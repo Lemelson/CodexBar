@@ -429,7 +429,9 @@ extension StatusItemController {
                         window: window,
                         now: now,
                         width: width,
-                        sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: now)),
+                        sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: now),
+                        // An account read only by hand marks an old reading under its bar.
+                        reading: UsageReadingAge.make(account: account, kind: kind, window: window, now: now)),
                         showsChevron: true),
                     id: id,
                     width: width,
