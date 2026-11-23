@@ -256,10 +256,19 @@ struct UsageAntigravitySpendHeader: View {
         let period = self.spend.effective(self.selection.spendPeriod)
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center) {
-                Text(self.spend.offered.count > 1 ? "Estimate · API prices" : "This Mac · estimate at Gemini API prices")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // Next to the period switch the label has a third of the row: the short form then.
+                ViewThatFits(in: .horizontal) {
+                    ForEach(self.spend.offered.count > 1
+                        ? ["Estimate · API prices", "API estimate"]
+                        : ["This Mac · estimate at Gemini API prices", "Estimate at Gemini API prices"], id: \.self)
+                    { label in
+                        Text(label)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
                 Spacer(minLength: 6)
                 if self.spend.offered.count > 1 {
                     Picker("Period", selection: Binding(

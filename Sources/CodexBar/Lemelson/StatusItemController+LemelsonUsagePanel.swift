@@ -57,6 +57,9 @@ final class LemelsonPanelSession {
     var openSubpanels = 0
     var rebuildPending = false
     var storeRefreshPending = false
+    /// A collector pass was asked for while one was running: run once more when it ends (fresh Antigravity
+    /// readings arrived after the running pass had read the live file).
+    var refreshAgain = false
     /// Whether the stock CodexBar rows (Cost, Usage history, Plan Usage) stay under the panel.
     var stockExtrasVisible = true
     /// The mode whose rows are in the menu now, and rendered rows of the other modes kept for an
@@ -114,7 +117,7 @@ private enum LemelsonCollectorRunner {
 }
 
 /// Passes the menu row highlight on to the layout module.
-private struct LemelsonHighlightBridge<Content: View>: View {
+struct LemelsonHighlightBridge<Content: View>: View {
     let content: Content
     /// Draws the chevron of a row whose detail panel is not a native submenu.
     var showsChevron = false
@@ -311,6 +314,11 @@ extension StatusItemController {
     func addLemelsonUsagePanel(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu) -> Bool {
         let session = LemelsonPanelSession.shared
         session.stockExtrasVisible = true
+        // The Antigravity tab is one page of its own (`+LemelsonAntigravity.swift`).
+        if context.currentProvider == .antigravity {
+            return self.addLemelsonAntigravityPage(to: menu, context: context)
+        }
+        self.lemelsonKeepAntigravityRowsLeaving()
         guard context.currentProvider == .claude,
               self.menuCardRenderingEnabledForController,
               let state = UsagePanelStore.load()
@@ -522,7 +530,10 @@ extension StatusItemController {
         }
         if let leaving = session.renderedMode, leaving != session.mode {
             var stash: [String: NSView] = [:]
-            for (id, view) in self.menuCardViewRecyclePool where id.hasPrefix("lemelson") {
+            // The Antigravity page's rows belong to another tab, not to a Claude mode.
+            for (id, view) in self.menuCardViewRecyclePool
+                where id.hasPrefix("lemelson") && !Self.lemelsonIsAntigravityRow(id)
+            {
                 stash[id] = view
             }
             for id in stash.keys {
@@ -653,7 +664,11 @@ extension StatusItemController {
             session.mode = session.defaultMode
             changed = true
         }
-        if UsagePanelStore.modificationDate() != session.renderedStateDate {
+        let stateDate = UsagePanelStore.modificationDate()
+        if stateDate != session.renderedStateDate {
+            changed = true
+        }
+        if let rendered = LemelsonAntigravityState.shared.renderedStateDate, rendered != stateDate {
             changed = true
         }
         if self.lemelsonStartRefreshIfDue() {
@@ -663,6 +678,7 @@ extension StatusItemController {
             self.invalidateMenus()
         }
         self.lemelsonScheduleModeWarmup()
+        self.lemelsonAntigravityPageMayBeShown(in: menu)
     }
 
     func lemelsonAllMenusDidClose() {
@@ -671,6 +687,8 @@ extension StatusItemController {
         self.lemelsonDetailAllMenusDidClose()
         session.modeWarmTimer?.invalidate()
         session.modeWarmTimer = nil
+        LemelsonAntigravityState.shared.warmTimer?.invalidate()
+        LemelsonAntigravityState.shared.warmTimer = nil
         session.openSubpanels = 0
         session.rebuildPending = false
         guard session.storeRefreshPending else { return }
@@ -679,11 +697,16 @@ extension StatusItemController {
     }
 
     /// Starts the collector unless it ran in the last 20 seconds. The collector itself queries an account
-    /// at most once every 45 seconds and follows the VPN rule.
-    private func lemelsonStartRefreshIfDue() -> Bool {
+    /// at most once every 45 seconds and follows the VPN rule. `force` (fresh Antigravity readings) skips
+    /// the 20 seconds and, while a pass is running, asks for one more after it.
+    @discardableResult
+    func lemelsonStartRefreshIfDue(force: Bool = false) -> Bool {
         let session = LemelsonPanelSession.shared
-        guard !session.isRefreshing else { return false }
-        if let last = session.lastRefreshStarted, Date().timeIntervalSince(last) < 20 {
+        guard !session.isRefreshing else {
+            if force { session.refreshAgain = true }
+            return false
+        }
+        if !force, let last = session.lastRefreshStarted, Date().timeIntervalSince(last) < 20 {
             return false
         }
         guard let collector = UsagePanelStore.load()?.collector,
@@ -705,6 +728,10 @@ extension StatusItemController {
     private func lemelsonRefreshDidFinish() {
         let session = LemelsonPanelSession.shared
         session.isRefreshing = false
+        if session.refreshAgain {
+            session.refreshAgain = false
+            self.lemelsonStartRefreshIfDue(force: true)
+        }
         if self.openMenus.isEmpty {
             self.invalidateMenus()
             self.lemelsonRefreshStore()
@@ -724,7 +751,7 @@ extension StatusItemController {
         }
     }
 
-    private func lemelsonRebuildOpenMenus() {
+    func lemelsonRebuildOpenMenus() {
         let session = LemelsonPanelSession.shared
         self.invalidateMenus()
         if session.openSubpanels > 0 {
@@ -732,8 +759,12 @@ extension StatusItemController {
             return
         }
         session.rebuildPending = false
+        // The rebuild only goes ahead while the menu still shows the tab it is for.
+        let provider: UsageProvider = self.lemelsonCurrentPageKey() == UsageProvider.antigravity.rawValue
+            ? .antigravity
+            : .claude
         for menu in self.openMenus.values where menu.supermenu == nil {
-            self.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: .claude)
+            self.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: provider)
         }
     }
 }
@@ -804,13 +835,34 @@ extension StatusItemController {
             let all = rows()
             let item = index.flatMap { all.indices.contains($0) ? all[$0] : nil }
             self.menu(menu, willHighlight: item, eventType: .mouseMoved)
-            log.notice("highlight \(index ?? -1) of \(all.count) limit rows")
+            let panel = UsageHoverPanelController.shared
+            let row = (item?.representedObject as? String) ?? "none"
+            // A document taller than the clip view means the menu scrolls (NSMenu draws an arrow).
+            let scroll = Self.attachedMenuScrollView(in: menu)
+            let fit = "\(Int(scroll?.documentView?.frame.height ?? -1))/\(Int(scroll?.contentView.bounds.height ?? -1))"
+            if index == nil, let window = scroll?.window, let content = window.contentView {
+                // What sits in the menu window besides the rows (NSMenu's scroll arrows among them).
+                func walk(_ view: NSView, _ depth: Int) {
+                    guard depth <= 3 else { return }
+                    let name = String(describing: type(of: view))
+                    log.notice("tree \(String(repeating: "  ", count: depth), privacy: .public)\(name, privacy: .public) \(NSStringFromRect(view.frame), privacy: .public) hidden=\(view.isHidden) alpha=\(view.alphaValue)")
+                    for sub in view.subviews where !(sub is NSClipView) || depth < 2 {
+                        walk(sub, depth + 1)
+                    }
+                }
+                log.notice("tree window \(NSStringFromRect(window.frame), privacy: .public) screen visible \(NSStringFromRect(window.screen?.visibleFrame ?? .zero), privacy: .public)")
+                walk(content, 0)
+            }
+            log.notice("highlight \(index ?? -1) of \(all.count) limit rows on \(page(), privacy: .public): \(row, privacy: .public) -> panel \(panel.visibleKey ?? "hidden", privacy: .public) card \(NSStringFromRect(panel.cardScreenRect), privacy: .public) menu document/clip \(fit, privacy: .public)")
         }
         let left: UInt16 = 123
         let right: UInt16 = 124
         log.notice("self-test start on \(page(), privacy: .public)")
         // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Gemini, Antigravity,
         // opened on Claude Limits. The log names the page after each step, so another line still reads.
+        // On Antigravity (the last page) its two limit rows are pointed at: the detail panel appears
+        // fused to the menu and morphs from one row to the other and back.
+        let back = 1.9
         let steps: [(TimeInterval, () -> Void)] = [
             (0.7, { key(right, "right, to Spend") }),
             (1.3, { key(right, "right, to Value") }),
@@ -819,30 +871,34 @@ extension StatusItemController {
             (3.1, { key(right, "right, to Antigravity (last page)") }),
             (3.7, { key(right, "right at the end, stays") }),
             (4.1, { swipe(0.4, -9, "vertical, no page") }),
-            (4.5, { key(left, "left, to Gemini") }),
+            (4.4, { highlight(0) }),
+            (5.0, { highlight(1) }),
+            (5.6, { highlight(0) }),
+            (6.1, { highlight(nil) }),
+            (4.5 + back, { key(left, "left, to Gemini") }),
             // Two presses 50 ms apart: the second lands mid-slide.
-            (5.1, { key(left, "left, to Classic") }),
-            (5.15, { key(left, "left mid-slide, to Value") }),
-            (5.8, { swipe(6, -0.5, "content-right, to Spend") }),
-            (6.5, { key(left, "left, to Limits") }),
-            (7.1, { key(left, "left, to Codex") }),
-            (7.7, { key(left, "left, to Overview (first page)") }),
-            (8.3, { key(left, "left at the start, stays") }),
-            (8.8, { key(right, "right, to Codex") }),
+            (5.1 + back, { key(left, "left, to Classic") }),
+            (5.15 + back, { key(left, "left mid-slide, to Value") }),
+            (5.8 + back, { swipe(6, -0.5, "content-right, to Spend") }),
+            (6.5 + back, { key(left, "left, to Limits") }),
+            (7.1 + back, { key(left, "left, to Codex") }),
+            (7.7 + back, { key(left, "left, to Overview (first page)") }),
+            (8.3 + back, { key(left, "left at the start, stays") }),
+            (8.8 + back, { key(right, "right, to Codex") }),
             // Back again 80 ms later: the strip turns around from where it is.
-            (8.88, { key(left, "left mid-slide, reversal, to Overview") }),
-            (9.3, { key(right, "right, to Codex") }),
-            (9.6, { key(right, "right into Claude Limits") }),
-            (10.1, { highlight(0) }),
-            (10.5, { highlight(2) }),
-            (11.6, { [weak menu] in
+            (8.88 + back, { key(left, "left mid-slide, reversal, to Overview") }),
+            (9.3 + back, { key(right, "right, to Codex") }),
+            (9.6 + back, { key(right, "right into Claude Limits") }),
+            (10.1 + back, { highlight(0) }),
+            (10.5 + back, { highlight(2) }),
+            (11.6 + back, { [weak menu] in
                 LemelsonPageTransition.shared.trace = nil
                 menu?.cancelTracking()
             }),
         ]
         // With `lemelsonSmoothScroll` on: a slow vertical two-finger scroll and its momentum, one sample
         // per frame like a real gesture.
-        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.6, { highlight(nil) })]
+        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.6 + back, { highlight(nil) })]
         let scrollStart = ProcessInfo.processInfo.systemUptime
         for index in 0...40 {
             let sample = index == 0
@@ -853,7 +909,7 @@ extension StatusItemController {
                     phase: index <= 20 ? .changed : .none,
                     isMomentum: index > 20,
                     time: scrollStart + Double(index) / 60)
-            scrollSteps.append((10.65 + Double(index) / 60, { [weak self, weak menu] in
+            scrollSteps.append((10.65 + back + Double(index) / 60, { [weak self, weak menu] in
                 guard let self, let menu else { return }
                 let scrollView = Self.attachedMenuScrollView(in: menu)
                 let before = scrollView?.contentView.bounds.origin.y ?? -1

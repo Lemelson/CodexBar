@@ -428,6 +428,10 @@ extension StatusItemController {
     func lemelsonMenuDidPopulate(_ menu: NSMenu) {
         self.lemelsonDetailMenuDidPopulate(menu)
         LemelsonPageTransition.shared.menuDidPopulate(menu)
+        self.lemelsonAntigravityPageMayBeShown(in: menu)
+        if self.openMenus[ObjectIdentifier(menu)] != nil, menu.supermenu == nil {
+            self.lemelsonScheduleAntigravityWarmup()
+        }
     }
 }
 
@@ -1195,6 +1199,7 @@ final class LemelsonPageTransition {
             for case let scroll as NSScrollView in content.subviews where scroll.frame != content.bounds {
                 scroll.frame = content.bounds
             }
+            self.hideIdleScrollArrows(in: content, finalHeight: self.heightTo)
         }
     }
 
@@ -1229,12 +1234,30 @@ final class LemelsonPageTransition {
                 }
             }
         }
+        if let content = window.contentView {
+            self.hideIdleScrollArrows(in: content, finalHeight: self.scrollHeight == nil ? height : self.heightTo)
+        }
         self.applyingHeight = false
         self.shownHeight = height
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         self.layoutClip(height: height - self.boundary)
         CATransaction.commit()
+    }
+
+    /// NSMenu decides about its scroll arrows after its own resize, when this transition has already put
+    /// the window back to the old height: a page that grows to a height it fits in would keep the
+    /// "more below" arrow over its last row for good. While the rows fit the height the window is going
+    /// to, the arrows stay hidden; NSMenu shows them again itself on a page that really scrolls.
+    /// NSMenu adds the arrow views anew in the middle of each rebuild, after its resize: until the rebuild
+    /// returns (the first step of the height timer) nothing here can reach them.
+    private func hideIdleScrollArrows(in content: NSView, finalHeight: CGFloat) {
+        guard let scroll = content.subviews.lazy.compactMap({ $0 as? NSScrollView }).first,
+              let document = scroll.documentView, document.frame.height <= finalHeight + 0.5
+        else { return }
+        for view in content.subviews where type(of: view) == NSImageView.self && !view.isHidden {
+            view.isHidden = true
+        }
     }
 
     // MARK: - Plumbing

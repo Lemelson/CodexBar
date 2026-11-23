@@ -510,6 +510,8 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         self.observeUpdaterChanges()
         self.observeManagedCodexCoordinatorChanges()
         self.observeCloudSyncChanges()
+        // lemelson: fresh Antigravity readings go to the live readings file and refresh the Antigravity page.
+        self.lemelsonObserveAntigravity()
     }
 
     private func observeStoreChanges() {
