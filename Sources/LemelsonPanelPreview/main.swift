@@ -7,11 +7,16 @@ import SwiftUI
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
 //       [--only limits|spend|value|details|antigravity|antigravity-details] [--account 1] [--highlighted]
 //       [--hover-week 0] [--hover-day 2026-11-21] [--fixture full] [--antigravity block.json]
+//       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
 // --hover-day draws the per-day spend charts as if that day were pointed at.
 // --period 30|60|90|180 picks the spend period (default 30, so renders do not depend on an earlier run).
+// --breakdown accounts|models picks the split of the per-day spend chart (default accounts).
+// --fill-missing fills the summary fields of usage/STATE-ADDITIONS-24.md it does not have yet (week limit
+// parts, refresh mode) from what it has. --manual-age 30 moves the last reading of manually read accounts
+// 30 hours back, windows and all.
 // --account picks whose detail panels are drawn: position in the Limits list, 0 is the active account.
 // --warm applies a warm tint, as on a Night Shift screen: shows whether colors blend together.
 //
@@ -156,7 +161,8 @@ struct PreviewRoot: View {
                         now: self.now,
                         width: self.menuWidth,
                         sessionsLeft: UsageSessionsLeft.make(
-                            for: kind, account: account, in: state, now: self.now))
+                            for: kind, account: account, in: state, now: self.now),
+                        reading: UsageReadingAge.make(account: account, kind: kind, window: window, now: self.now))
                         .environment(\.usageRowHighlighted, self.highlighted)
                         .background(self.highlighted ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
                 }
@@ -226,14 +232,21 @@ let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
         + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
-        + "[--fixture name] [--antigravity file]\n"
+        + "[--fixture name] [--antigravity file] [--period n] [--breakdown accounts|models] [--fill-missing] "
+        + "[--manual-age hours]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
 
 let outputURL = URL(fileURLWithPath: arguments[1])
 let stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
-let state = UsagePanelStore.load(from: stateURL)
+var state = UsagePanelStore.load(from: stateURL)
+if arguments.contains("--fill-missing") {
+    state = state.map(ClaudeFixture.fillingMissingFields)
+}
+if let hours = argument(after: "--manual-age").flatMap(Double.init) {
+    state = state.map { ClaudeFixture.agingManualReadings($0, hours: hours) }
+}
 let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
 let only = argument(after: "--only")
 let wantsAntigravity = only?.hasPrefix("antigravity") == true
@@ -272,6 +285,8 @@ if wantsAntigravity {
 // The period is a menu-wide choice kept in the defaults (of this tool, here): always set it.
 UsagePanelSelection.shared.spendPeriod = argument(after: "--period").flatMap(Int.init)
     .flatMap(UsageSpendPeriod.init(rawValue:)) ?? .d30
+UsagePanelSelection.shared.spendBreakdown = argument(after: "--breakdown")
+    .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
 
 let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : .aqua)
 

@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Models: Opus and Fable in view, the rest collapsed into "Other"
+// MARK: - Models: Opus, Fable, Sonnet and Haiku, anything else as "Other"
 
 public enum UsageModelFamily: String, CaseIterable, Sendable, Identifiable {
     case opus, fable, sonnet, haiku, other
@@ -19,8 +19,9 @@ public enum UsageModelFamily: String, CaseIterable, Sendable, Identifiable {
         }
     }
 
-    /// Everything the panel collapses into a single "Other" row.
-    public static let minor: [UsageModelFamily] = [.sonnet, .haiku, .other]
+    public var color: Color {
+        UsagePalette.claudeModel(self)
+    }
 }
 
 /// Spend of one model: dollars at API prices and tokens.
@@ -71,21 +72,11 @@ public struct UsageModelSplit: Sendable, Equatable {
         self.parts.values.reduce(UsageModelUse(), +)
     }
 
-    /// Sonnet, Haiku and the rest as one sum.
-    public var minor: UsageModelUse {
-        UsageModelFamily.minor.reduce(UsageModelUse()) { $0 + self[$1] }
-    }
-
-    /// What "Other" consists of: "Haiku $48 · 528M tok   Sonnet $102 · 352M tok".
-    public var minorText: String {
-        let rows = UsageModelFamily.minor
-            .map { ($0, self[$0]) }
-            .filter { $0.1.tokens > 0 || $0.1.usd >= 0.005 }
-            .sorted { $0.1.tokens > $1.1.tokens }
-        guard !rows.isEmpty else { return "No Sonnet or Haiku here." }
-        return rows
-            .map { "\($0.0.title) \(UsageFormat.usdFine($0.1.usd)) · \(UsageFormat.tokens($0.1.tokens)) tok" }
-            .joined(separator: "   ")
+    /// The four models always, "Other" only when there is some.
+    public var shownFamilies: [UsageModelFamily] {
+        let other = self[.other]
+        let hasOther = other.usd >= 0.005 || other.tokens > 0
+        return UsageModelFamily.allCases.filter { $0 != .other || hasOther }
     }
 }
 
@@ -202,11 +193,30 @@ public enum UsageSpendPeriod: Int, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// A choice shared by the spend card, the account rows and the detail panel: one period for the whole menu.
+/// What the bars of the per-day spend chart are split by.
+public enum UsageSpendBreakdown: String, CaseIterable, Identifiable, Sendable {
+    case accounts
+    case models
+
+    public var id: String {
+        self.rawValue
+    }
+
+    public var title: String {
+        switch self {
+        case .accounts: "Accounts"
+        case .models: "Models"
+        }
+    }
+}
+
+/// Choices shared by the spend card, the account rows and the detail panel, kept across menu opens and
+/// restarts: one period and one chart breakdown for the whole menu.
 @MainActor
 public final class UsagePanelSelection: ObservableObject {
     public static let shared = UsagePanelSelection()
-    private static let periodKey = "lemelsonSpendPeriod"
+    public static let periodKey = "lemelsonSpendPeriod"
+    public static let breakdownKey = "lemelsonSpendBreakdown"
 
     @Published public var spendPeriod: UsageSpendPeriod {
         didSet {
@@ -214,8 +224,17 @@ public final class UsagePanelSelection: ObservableObject {
         }
     }
 
+    @Published public var spendBreakdown: UsageSpendBreakdown {
+        didSet {
+            UserDefaults.standard.set(self.spendBreakdown.rawValue, forKey: Self.breakdownKey)
+        }
+    }
+
     private init() {
-        self.spendPeriod = UsageSpendPeriod(rawValue: UserDefaults.standard.integer(forKey: Self.periodKey)) ?? .d30
+        let defaults = UserDefaults.standard
+        self.spendPeriod = UsageSpendPeriod(rawValue: defaults.integer(forKey: Self.periodKey)) ?? .d30
+        self.spendBreakdown = defaults.string(forKey: Self.breakdownKey)
+            .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
     }
 }
 
@@ -278,11 +297,17 @@ public struct UsageSpendDigest: Sendable, Equatable {
         let colorIndex: Int
     }
 
-    /// What one period shows: the chart (range, bars, hint, legend) and the whole-period split.
+    /// What one period shows: the chart by account and by model (range, bars, hint, legend) and the
+    /// whole-period split.
     public struct Period: Sendable, Equatable {
         public let period: UsageSpendPeriod
         let chart: UsageDayChartData
+        let modelChart: UsageDayChartData
         let whole: UsageModelSplit
+
+        func chart(_ breakdown: UsageSpendBreakdown) -> UsageDayChartData {
+            breakdown == .accounts ? self.chart : self.modelChart
+        }
     }
 
     public let today: UsageModelSplit
@@ -323,6 +348,21 @@ public struct UsageSpendDigest: Sendable, Equatable {
                     fable: day.fable ?? 0)
             }
         }
+        // The same days by model, all accounts together.
+        var modelDays: [String: UsageModelSplit] = [:]
+        for account in state.accounts {
+            for day in account.daily ?? [] where day.total > 0 {
+                modelDays[day.day, default: UsageModelSplit()].add(day.split)
+            }
+        }
+        let modelBars = modelDays.keys.sorted().flatMap { key -> [UsageDayChartData.Bar] in
+            guard let date = UsageDayKey.date(key), let split = modelDays[key] else { return [] }
+            return UsageModelFamily.allCases.compactMap { family in
+                let usd = split[family].usd
+                guard usd >= 0.005 else { return nil }
+                return UsageDayChartData.Bar(key: key, date: date, series: family.title, color: .claude(family), usd: usd)
+            }
+        }
         let trackedSince = state.trackedSince
         let legend = self.legend.map { UsageDayChartData.Legend(id: $0.id, name: $0.name, color: .account($0.colorIndex)) }
         self.periods = UsageSpendPeriod.allCases.map { period in
@@ -348,7 +388,22 @@ public struct UsageSpendDigest: Sendable, Equatable {
                 emptyText: "No Claude Code spend on this Mac in this period.",
                 chipLimit: nil,
                 centsInChips: false)
-            return Period(period: period, chart: chart, whole: whole(period.days))
+            let periodModelBars = modelBars.filter { $0.key >= from }
+            let periodSplit = whole(period.days)
+            let modelChart = UsageDayChartData(
+                period: period,
+                domain: domain,
+                bars: periodModelBars,
+                hint: chart.hint,
+                legend: periodSplit.shownFamilies.map {
+                    UsageDayChartData.Legend(id: $0.rawValue, name: $0.title, color: .claude($0))
+                },
+                dayNotes: modelDays.filter { $0.key >= from }
+                    .mapValues { "\(UsageFormat.tokens($0.total.tokens)) tokens" },
+                emptyText: chart.emptyText,
+                chipLimit: nil,
+                centsInChips: true)
+            return Period(period: period, chart: chart, modelChart: modelChart, whole: periodSplit)
         }
     }
 
@@ -377,10 +432,10 @@ public struct UsageSpendDigest: Sendable, Equatable {
         let calendar = Calendar.current
         let asked = calendar.date(byAdding: .day, value: -(period.days - 1), to: calendar.startOfDay(for: now))
         if let asked, domain.lowerBound > asked {
-            return "Per day since \(UsageFormat.format(domain.lowerBound, "MMM d")), the first day on record. "
+            return "Since \(UsageFormat.format(domain.lowerBound, "MMM d")), the first day on record. "
                 + "Point at a bar."
         }
-        return "Per day. Point at a bar for that day."
+        return "Point at a bar for that day."
     }
 }
 
@@ -392,8 +447,11 @@ struct UsageModelRow: View {
     let use: UsageModelUse
     let total: Double
     let color: Color
-    /// Claude's "Opus" / "Fable" / "Other" fit 36 pt; Gemini names such as "Hydrogen" need more.
+    /// Gemini names such as "Hydrogen" need more than the default.
     var nameWidth: CGFloat = 36
+
+    /// Room for "Sonnet".
+    static let claudeNameWidth: CGFloat = 40
 
     static let tokensWidth: CGFloat = 42
     static let usdWidth: CGFloat = 50
@@ -443,51 +501,23 @@ struct UsageModelHeader: View {
     }
 }
 
-/// The three main rows and the "Other" breakdown on hover (or always, if `expanded`).
+/// One row per Claude model: Opus, Fable, Sonnet, Haiku, and "Other" when there is some.
 struct UsageModelBlock: View {
     let title: String
     let split: UsageModelSplit
-    var expanded = false
-    /// Set when the block is one of the stacked period layers: only the visible layer may track the mouse,
-    /// because a tracking area ignores SwiftUI opacity and hit testing.
-    var trackingPeriod: UsageSpendPeriod?
-    @State private var otherHovered = false
 
     var body: some View {
         let total = self.split.total.usd
         VStack(alignment: .leading, spacing: 5) {
             UsageModelHeader(title: self.title)
-            UsageModelRow(name: "Opus", use: self.split[.opus], total: total, color: UsagePalette.opus)
-            UsageModelRow(name: "Fable", use: self.split[.fable], total: total, color: UsagePalette.fable)
-            UsageModelRow(name: "Other", use: self.split.minor, total: total, color: UsagePalette.others)
-                .overlay {
-                    // An expanded block always shows the breakdown: hovering would change nothing.
-                    if !self.expanded {
-                        self.otherTracker
-                    }
-                }
-            Text(self.expanded || self.otherHovered
-                ? self.split.minorText
-                : "Other is Sonnet and Haiku (subagents). Point at it for the split.")
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-        }
-    }
-
-    @ViewBuilder private var otherTracker: some View {
-        let onMoved: (CGPoint?) -> Void = { location in
-            let inside = location != nil
-            if self.otherHovered != inside {
-                self.otherHovered = inside
+            ForEach(self.split.shownFamilies) { family in
+                UsageModelRow(
+                    name: family.title,
+                    use: self.split[family],
+                    total: total,
+                    color: family.color,
+                    nameWidth: UsageModelRow.claudeNameWidth)
             }
-        }
-        if let period = self.trackingPeriod {
-            UsageSpendActiveTracker(period: period, onMoved: onMoved)
-        } else {
-            UsageMouseTracker(onMoved: onMoved)
         }
     }
 }

@@ -27,8 +27,23 @@ public enum UsagePalette {
     public static let paceBad = UsagePalette.dynamic(light: 0xD92D20, dark: 0xFF5A4F)
     public static let warning = UsagePalette.dynamic(light: 0xB25E09, dark: 0xF2A65A)
 
+    /// Claude models. Opus and Fable keep the orange and violet they always had. Sonnet is teal and Haiku is
+    /// yellow: the two hues left free by the account colors (orange, blue, green), and on a warm screen
+    /// yellow keeps apart from orange by brightness, teal from blue and green by hue.
     public static let opus = UsagePalette.you
     public static let fable = UsagePalette.chat
+    public static let sonnet = UsagePalette.dynamic(light: 0x0D9488, dark: 0x2DD4BF)
+    public static let haiku = UsagePalette.dynamic(light: 0xC99A06, dark: 0xFACC15)
+
+    public static func claudeModel(_ family: UsageModelFamily) -> Color {
+        switch family {
+        case .opus: self.opus
+        case .fable: self.fable
+        case .sonnet: self.sonnet
+        case .haiku: self.haiku
+        case .other: self.others
+        }
+    }
 
     /// Account colors on charts: same order as in Claude Switcher.
     public static let accounts: [Color] = [
@@ -561,6 +576,8 @@ public struct UsageLimitRowView: View {
     /// Replaces the short window title ("Session"), e.g. "5-hour" on the Antigravity page.
     let title: String?
     let sources: UsageLimitSources
+    /// An account read only by hand: see `UsageReadingAge.make(account:kind:window:now:)`.
+    let reading: UsageReadingAge?
     @Environment(\.usageRowHighlighted) private var highlighted
 
     public init(
@@ -570,7 +587,8 @@ public struct UsageLimitRowView: View {
         width: CGFloat,
         sessionsLeft: UsageSessionsLeft? = nil,
         title: String? = nil,
-        sources: UsageLimitSources = .split)
+        sources: UsageLimitSources = .split,
+        reading: UsageReadingAge? = nil)
     {
         self.kind = kind
         self.window = window
@@ -579,6 +597,7 @@ public struct UsageLimitRowView: View {
         self.sessionsLeft = sessionsLeft
         self.title = title
         self.sources = sources
+        self.reading = reading
     }
 
     private var percent: Double {
@@ -623,6 +642,7 @@ public struct UsageLimitRowView: View {
                     .lineLimit(1)
             }
             UsageSegmentBar(segments: segments, pace: pace)
+                .opacity(self.reading?.level == .stale ? 0.5 : 1)
             // One source needs no legend: the bar is the percentage above it.
             if !segments.isEmpty, self.sources == .split {
                 UsageFlowLayout {
@@ -630,6 +650,9 @@ public struct UsageLimitRowView: View {
                         UsageChip(color: segment.color, text: segment.chipText)
                     }
                 }
+            }
+            if let reading, !reading.isFresh {
+                UsageReadingAgeLine(reading: reading)
             }
             // Reserve or deficit is read off the mark on the bar; the exact percent is in the detail panel.
             if let warning = pace?.warning {
@@ -663,10 +686,17 @@ public struct UsageAccountHeaderView: View {
     }
 
     /// "Max 5x · 52m ago": the plan and how long ago the limits were read. The green dot already says
-    /// which account is in Claude now.
-    public static func status(for account: UsagePanelState.Account, now: Date) -> String {
-        let read = account.measuredAt.map { UsageFormat.age($0, now: now) } ?? "not read yet"
-        return [account.planName, read].compactMap(\.self).joined(separator: " · ")
+    /// which account is in Claude now. An account read only by hand says "reading from 3d ago" once the
+    /// reading is old, in the color of its age.
+    public static func status(for account: UsagePanelState.Account, now: Date) -> Text {
+        let reading = UsageReadingAge.make(account: account, now: now)
+        let read = if let reading, !reading.isFresh {
+            Text(reading.ageText).foregroundStyle(reading.color)
+        } else {
+            Text(account.measuredAt.map { UsageFormat.age($0, now: now) } ?? "not read yet")
+        }
+        guard let plan = account.planName else { return read }
+        return Text("\(plan) · ") + read
     }
 
     /// A second line only for what needs an action from me. Why an account is merely waiting
@@ -698,7 +728,7 @@ public struct UsageAccountHeaderView: View {
                     .lineLimit(1)
                 Spacer(minLength: 6)
                 // A long name gives way: the plan and the age are never cut off.
-                Text(Self.status(for: self.account, now: self.now))
+                Self.status(for: self.account, now: self.now)
                     .font(.system(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)

@@ -71,6 +71,10 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         /// Earliest spend record of this account on this Mac.
         public var trackedSince: Double?
         public var value: Value?
+        /// "background": the collector reads the limits by itself; "manual": only while this (VPN-only)
+        /// account is the active one. Missing in older summaries: see `refreshesInBackground`.
+        public var refresh: String?
+        public var refreshEverySec: Double?
 
         public var id: String {
             self.uuid
@@ -82,6 +86,15 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
 
         public var needsVPN: Bool {
             self.useHapp ?? false
+        }
+
+        /// Older summaries have no `refresh`: a VPN-only account is the one read only by hand.
+        public var refreshesInBackground: Bool {
+            switch self.refresh {
+            case "manual": false
+            case "background": true
+            default: !self.needsVPN
+            }
         }
 
         public func window(_ kind: WindowKind) -> Window? {
@@ -178,9 +191,44 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var peakPct: Double?
         /// By model family: [dollars, tokens].
         public var m: [String: [Double]]?
+        /// When the `peakPct` reading was taken.
+        public var peakAt: Double?
+        /// The peak was read in the last hours of the window, so it is about where the week ended.
+        /// False: the week used at least this much.
+        public var peakFinal: Bool?
+        /// This Mac's Claude Code in points of that week's limit; null when the account has no rate.
+        public var minePct: Double?
+        /// `minePct` by model family (opus, fable, sonnet, haiku, other).
+        public var minePctByModel: [String: Double]?
+        /// `peakPct - minePct`, never below zero.
+        public var othersPct: Double?
 
         public var id: Double {
             self.end
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case start, end, current, usd, tokens, peakPct, m
+            case peakAt, peakFinal, minePct, minePctByModel, othersPct
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.start = try container.decode(Double.self, forKey: .start)
+            self.end = try container.decode(Double.self, forKey: .end)
+            self.current = try container.decodeIfPresent(Bool.self, forKey: .current)
+            self.usd = try container.decodeIfPresent(Spend.self, forKey: .usd)
+            self.tokens = try container.decodeIfPresent(Double.self, forKey: .tokens)
+            self.peakPct = try container.decodeIfPresent(Double.self, forKey: .peakPct)
+            self.m = try container.decodeIfPresent([String: [Double]].self, forKey: .m)
+            // Fields being added by the collector right now: a value of an unexpected shape is dropped
+            // rather than costing the whole summary.
+            self.peakAt = try? container.decodeIfPresent(Double.self, forKey: .peakAt)
+            self.peakFinal = try? container.decodeIfPresent(Bool.self, forKey: .peakFinal)
+            self.minePct = try? container.decodeIfPresent(Double.self, forKey: .minePct)
+            self.minePctByModel = (try? container.decodeIfPresent([String: Double?].self, forKey: .minePctByModel))?
+                .compactMapValues { $0 }
+            self.othersPct = try? container.decodeIfPresent(Double.self, forKey: .othersPct)
         }
     }
 
