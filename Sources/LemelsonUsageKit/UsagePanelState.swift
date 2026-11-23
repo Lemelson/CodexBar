@@ -21,9 +21,11 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     /// Gemini use through Antigravity (`usage/ANTIGRAVITY-STATE.md`). Decoded leniently: a malformed
     /// block never breaks the Claude part of the summary.
     public var antigravity: UsageAntigravityBlock?
+    /// Prompt cache of all Claude accounts together; never fails the summary.
+    public var cache: UsageCacheStats?
 
     enum CodingKeys: String, CodingKey {
-        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity
+        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity, cache
         case kFable = "k_fable"
         case kSource = "k_source"
         case kPairs = "k_pairs"
@@ -75,6 +77,8 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         /// account is the active one. Missing in older summaries: see `refreshesInBackground`.
         public var refresh: String?
         public var refreshEverySec: Double?
+        /// Prompt cache of this account by span ("today", "7d", "30d"); never fails the summary.
+        public var cache: UsageCacheStats? = nil
 
         public var id: String {
             self.uuid
