@@ -49,6 +49,16 @@ public struct UsageSessionsLeft: Equatable, Sendable {
         in state: UsagePanelState,
         now: Date) -> UsageSessionsLeft?
     {
+        self.make(account: account, donors: state.accounts, now: now)
+    }
+
+    /// `donors`: accounts whose ratio may stand in when this one has no weekly rate yet (same plan only).
+    /// Antigravity passes none: a Claude plan says nothing about a Google quota.
+    public static func make(
+        account: UsagePanelState.Account,
+        donors: [UsagePanelState.Account],
+        now: Date) -> UsageSessionsLeft?
+    {
         // The data decides, not the plan name: the same plan may come with or without a 5-hour limit.
         guard account.has5h != false,
               account.has5h == true || account.visibleWindows.contains(where: { $0.0 == .fiveHour }),
@@ -60,7 +70,7 @@ public struct UsageSessionsLeft: Equatable, Sendable {
         else { return nil }
         let remaining = resetsAt - now.timeIntervalSince1970
         guard remaining > 0, remaining <= UsagePanelState.WindowKind.week.span + 120 else { return nil }
-        guard let (share, basis) = self.share(of: account, in: state) else { return nil }
+        guard let (share, basis) = self.share(of: account, donors: donors) else { return nil }
         let percentLeft = 100 - max(0, used)
         return UsageSessionsLeft(
             percentPerSession: share,
@@ -72,7 +82,7 @@ public struct UsageSessionsLeft: Equatable, Sendable {
 
     private static func share(
         of account: UsagePanelState.Account,
-        in state: UsagePanelState) -> (Double, Basis)?
+        donors: [UsagePanelState.Account]) -> (Double, Basis)?
     {
         if let measured = account.sessionPctOfWeek, self.isPlausible(measured) {
             return (measured, .readings)
@@ -83,7 +93,7 @@ public struct UsageSessionsLeft: Equatable, Sendable {
         // No weekly rate yet (too few readings). Limits are set by the plan, so an account on the same plan
         // that has both rates gives the same ratio.
         guard let plan = account.planName else { return nil }
-        let donor = state.accounts
+        let donor = donors
             .filter { $0.uuid != account.uuid && $0.planName == plan && $0.has5h != false }
             .compactMap { other in other.sessionShareFromRates.map { (other, $0) } }
             .max { ($0.0.rates?["7d"]?.pairs ?? 0) < ($1.0.rates?["7d"]?.pairs ?? 0) }

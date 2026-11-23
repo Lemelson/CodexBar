@@ -117,17 +117,7 @@ public struct UsageValueCardView: View {
     }
 
     private func bar(_ label: String, value: Double, scale: Double, color: Color, strong: Bool) -> some View {
-        HStack(spacing: 8) {
-            Text(label)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .leading)
-            UsageSplitBar(parts: [(value, color)], scale: scale, height: strong ? 9 : 5)
-            Text((strong ? "≈ " : "") + UsageFormat.usd(value))
-                .font(.system(size: 11, weight: strong ? .semibold : .regular))
-                .monospacedDigit()
-                .frame(width: 64, alignment: .trailing)
-        }
+        UsageValueBar(label: label, value: value, scale: scale, color: color, strong: strong)
     }
 
     /// The same weekly limit spent on a single model, and what I actually used over 30 days.
@@ -179,6 +169,29 @@ public struct UsageValueCardView: View {
                         .frame(width: 50, alignment: .trailing)
                 }
             }
+        }
+    }
+}
+
+/// "You pay" / "You get": a labelled bar on a common scale with the amount; the strong one is an estimate.
+struct UsageValueBar: View {
+    let label: String
+    let value: Double
+    let scale: Double
+    let color: Color
+    let strong: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(self.label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .frame(width: 46, alignment: .leading)
+            UsageSplitBar(parts: [(self.value, self.color)], scale: self.scale, height: self.strong ? 9 : 5)
+            Text((self.strong ? "≈ " : "") + UsageFormat.usd(self.value))
+                .font(.system(size: 11, weight: self.strong ? .semibold : .regular))
+                .monospacedDigit()
+                .frame(width: 64, alignment: .trailing)
         }
     }
 }

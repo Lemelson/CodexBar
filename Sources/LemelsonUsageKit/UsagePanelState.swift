@@ -18,9 +18,12 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     public var collector: Collector?
     public var vpnUp: Bool?
     public var accounts: [Account]
+    /// Gemini use through Antigravity (`usage/ANTIGRAVITY-STATE.md`). Decoded leniently: a malformed
+    /// block never breaks the Claude part of the summary.
+    public var antigravity: UsageAntigravityBlock?
 
     enum CodingKeys: String, CodingKey {
-        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp
+        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity
         case kFable = "k_fable"
         case kSource = "k_source"
         case kPairs = "k_pairs"

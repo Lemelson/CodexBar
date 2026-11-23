@@ -278,13 +278,11 @@ public struct UsageSpendDigest: Sendable, Equatable {
         let colorIndex: Int
     }
 
-    /// What one period shows: chart range, bars, the whole-period split and the hint above the chart.
+    /// What one period shows: the chart (range, bars, hint, legend) and the whole-period split.
     public struct Period: Sendable, Equatable {
         public let period: UsageSpendPeriod
-        let domain: ClosedRange<Date>
-        let bars: [Bar]
+        let chart: UsageDayChartData
         let whole: UsageModelSplit
-        let hint: String
     }
 
     public let today: UsageModelSplit
@@ -326,15 +324,31 @@ public struct UsageSpendDigest: Sendable, Equatable {
             }
         }
         let trackedSince = state.trackedSince
+        let legend = self.legend.map { UsageDayChartData.Legend(id: $0.id, name: $0.name, color: .account($0.colorIndex)) }
         self.periods = UsageSpendPeriod.allCases.map { period in
             let domain = Self.domain(period: period, trackedSince: trackedSince, now: now)
             let from = UsageDayKey.string(domain.lowerBound)
-            return Period(
+            let bars = allBars.filter { $0.key >= from }
+            // The grey part of a pointed-at day: that day's Opus and Fable over all accounts.
+            var sums: [String: (opus: Double, fable: Double)] = [:]
+            for bar in bars {
+                let sum = sums[bar.key] ?? (0, 0)
+                sums[bar.key] = (sum.opus + bar.opus, sum.fable + bar.fable)
+            }
+            let chart = UsageDayChartData(
                 period: period,
                 domain: domain,
-                bars: allBars.filter { $0.key >= from },
-                whole: whole(period.days),
-                hint: Self.hint(period: period, domain: domain, now: now))
+                bars: bars.map {
+                    UsageDayChartData.Bar(key: $0.key, date: $0.date, series: $0.account, color: .account($0.colorIndex),
+                                          usd: $0.usd)
+                },
+                hint: Self.hint(period: period, domain: domain, now: now),
+                legend: legend,
+                dayNotes: sums.mapValues { "Opus \(UsageFormat.usd($0.opus)) · Fable \(UsageFormat.usd($0.fable))" },
+                emptyText: "No Claude Code spend on this Mac in this period.",
+                chipLimit: nil,
+                centsInChips: false)
+            return Period(period: period, chart: chart, whole: whole(period.days))
         }
     }
 
@@ -378,6 +392,8 @@ struct UsageModelRow: View {
     let use: UsageModelUse
     let total: Double
     let color: Color
+    /// Claude's "Opus" / "Fable" / "Other" fit 36 pt; Gemini names such as "Hydrogen" need more.
+    var nameWidth: CGFloat = 36
 
     static let tokensWidth: CGFloat = 42
     static let usdWidth: CGFloat = 50
@@ -387,7 +403,8 @@ struct UsageModelRow: View {
         HStack(spacing: 6) {
             Text(self.name)
                 .font(.system(size: 11))
-                .frame(width: 36, alignment: .leading)
+                .lineLimit(1)
+                .frame(width: self.nameWidth, alignment: .leading)
             UsageSplitBar(parts: [(self.use.usd, self.color)], scale: max(0.01, self.total))
             Text(UsageFormat.tokens(self.use.tokens))
                 .font(.system(size: 10.5))
