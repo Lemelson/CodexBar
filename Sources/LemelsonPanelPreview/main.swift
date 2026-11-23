@@ -6,6 +6,7 @@ import SwiftUI
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
 //       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache]
+//       (limits, spend, value and details also as a comma list: --only limits,spend,value)
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--claude-cache real|full|plain|none]
 //       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
@@ -192,8 +193,10 @@ struct PreviewRoot: View {
         }
     }
 
+    /// `--only limits,spend,value` draws several of the Claude pages side by side.
     private func shows(_ name: String) -> Bool {
-        self.only == nil || self.only == name
+        guard let only = self.only else { return true }
+        return only.split(separator: ",").contains { $0 == name }
     }
 
     /// The cache row as the bottom of the menu, and its detail panel next to it.
@@ -282,7 +285,7 @@ struct PreviewRoot: View {
         UsageSpendSummaryView(state: state, now: self.now, width: self.menuWidth)
         Divider().padding(.horizontal, 12)
         ForEach(Array(state.accounts.enumerated()), id: \.offset) { index, account in
-            UsageSpendAccountRowView(account: account, colorIndex: index, width: self.menuWidth)
+            UsageSpendAccountRowView(account: account, colorIndex: index, width: self.menuWidth, now: self.now)
         }
         Divider().padding(.horizontal, 12)
         UsageFooterView(state: state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: false)
