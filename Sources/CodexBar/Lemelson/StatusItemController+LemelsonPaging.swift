@@ -1,5 +1,6 @@
 import AppKit
 import CodexBarCore
+import ImageIO
 import LemelsonUsageKit
 import os
 
@@ -449,8 +450,10 @@ extension StatusItemController {
 ///
 /// The strip starts to move on the frame of the key press or swipe and keeps one continuous motion:
 /// another request while it moves only gives it a new target, from where it is. A page that was shown
-/// before is in the strip from the first frame (its last snapshot is kept for a while); a page seen for
-/// the first time joins as soon as its rows are built.
+/// before is in the strip from the first frame: its last picture is kept for as long as the app runs
+/// (as a bitmap while the menu is in use, compressed after that). A page that was never shown has
+/// nothing to slide in, so the strip stays where it is until the rows of that page are built (a few
+/// frames) and then slides to them; it never moves towards an empty half.
 @MainActor
 final class LemelsonPageTransition {
     enum Boundary {
@@ -463,8 +466,10 @@ final class LemelsonPageTransition {
     static let defaultDuration: CFTimeInterval = 0.24
     /// The rebuild normally lands within a few frames; after this the transition gives up.
     static let rebuildTimeout: TimeInterval = 0.6
-    /// How long a page built after the strip set off takes to come in from the edge.
-    static let entranceDuration: CFTimeInterval = 0.16
+    /// A page that came in as real rows gets its picture taken after resting this long.
+    static let pictureDelay: TimeInterval = 0.3
+    /// A picture of the page at rest younger than this is not taken again.
+    static let pictureFreshness: CFTimeInterval = 30
     /// How long the menu window takes to grow or shrink to the height of the new page.
     /// Seconds the menu window takes to reach the height of the new page.
     /// `defaults write com.steipete.codexbar lemelsonHeightDuration -float 0.4` changes it without a rebuild.
@@ -472,15 +477,20 @@ final class LemelsonPageTransition {
         let custom = UserDefaults.standard.double(forKey: "lemelsonHeightDuration")
         return custom >= 0.06 && custom <= 1 ? custom : 0.3
     }
-    /// Page snapshots are dropped this long after the menu closes.
+    /// This long after the menu closes the page pictures are compressed (see `archivePictures`).
     static let cacheLifetime: TimeInterval = 600
 
-    private struct Snapshot {
+    /// `CGImage` is immutable, so a picture can be compressed and decoded off the main thread.
+    private struct Snapshot: @unchecked Sendable {
         let image: CGImage
         let size: NSSize
         /// Distance from the top of the window to the bottom of the provider row / the mode row.
         let providerBoundary: CGFloat
         let modeBoundary: CGFloat?
+        /// When it was taken (`CACurrentMediaTime`); 0 for a picture that came back from the archive.
+        var taken: CFTimeInterval = 0
+        /// The archive holds this very picture: it is not compressed a second time.
+        var archived = false
 
         var scale: CGFloat {
             CGFloat(self.image.width) / max(1, self.size.width)
@@ -502,6 +512,14 @@ final class LemelsonPageTransition {
                 height: (height * self.scale).rounded())
             return self.image.cropping(to: rect)
         }
+    }
+
+    /// A page picture as PNG data: a few hundred kilobytes instead of a few megabytes.
+    private struct Archived: Sendable {
+        let png: Data
+        let size: NSSize
+        let providerBoundary: CGFloat
+        let modeBoundary: CGFloat?
     }
 
     /// One page of the strip. `index` counts pages from the one the strip started on.
@@ -552,11 +570,17 @@ final class LemelsonPageTransition {
     /// The real rows show the target page (they were rebuilt after the last request).
     private var targetIsFresh = false
     private var stripHasArrived = false
-    private var lastForward = true
-    private var entranceEnd: CFTimeInterval = 0
+    /// The last page the strip was sent to: the target, or, while the target has nothing to show yet,
+    /// the page before it.
+    private var shownIndex = 0
+    private var shownKey = ""
+    /// The target page has neither a picture nor rows yet: the strip sets off when its rows are in.
+    private var waitsForRows = false
     /// The page whose real rows are on screen and move with the strip; nil while the rows under the
     /// row that stays are masked out and only copies show.
     private var realKey: String?
+    /// The picture in the strip was taken from the rows that are on screen now.
+    private var realPictureIsCurrent = false
     private let rowMask = CALayer()
     /// Height animation of the menu window (see "Height" below).
     private var heightObserver: (any NSObjectProtocol)?
@@ -572,14 +596,17 @@ final class LemelsonPageTransition {
     private var scrollHeight: CGFloat?
     private var slideStart: CFTimeInterval = 0
     private var slideFrom: CGFloat = 0
+    private var slideTo: CGFloat = 0
     private var slideDuration: CFTimeInterval = 0
     private weak var menu: NSMenu?
     private weak var menuWindow: NSWindow?
     private var boundaryViews: ((NSMenu) -> BoundaryViews)?
     private var currentKey: (() -> String)?
     private var timers: [Timer] = []
-    private var captureTimer: Timer?
+    private var placeTimer: Timer?
+    private var pictureTimer: Timer?
     private var cache: [String: Snapshot] = [:]
+    private var archive: [String: Archived] = [:]
     private var cacheAppearance: NSAppearance.Name?
     private var cachePurgeTimer: Timer?
     /// Self-test log hook.
@@ -636,16 +663,20 @@ final class LemelsonPageTransition {
         let appearance = window.effectiveAppearance.name
         if self.cacheAppearance != appearance {
             self.cache.removeAll()
+            self.archive.removeAll()
             self.cacheAppearance = appearance
         }
         self.cancelTimers()
-        self.entranceEnd = 0
+        self.pictureTimer?.invalidate()
+        self.pictureTimer = nil
         self.menu = menu
         self.menuWindow = window
         self.boundaryViews = boundaryViews
         self.currentKey = currentKey
         let wasIdle = self.phase != .active
         if !wasIdle {
+            // The rows on screen are about to be replaced: their page needs a picture of them first.
+            self.takePictureOfRealRows()
             self.freezeRealRows()
         } else {
             // The picture of the page at rest needs the window at its full height.
@@ -654,8 +685,8 @@ final class LemelsonPageTransition {
         self.watchHeight(of: window)
 
         if self.phase != .active || self.kind != kind {
-            // A fresh strip. If one was moving under another boundary, it restarts from its target page.
-            let restartKey = self.phase == .active ? self.targetKey : from
+            // A fresh strip. If one was moving under another boundary, it restarts from the page it shows.
+            let restartKey = self.phase == .active ? self.shownKey : from
             var start = self.phase == .active ? self.cached(restartKey, width: window.frame.width) : nil
             if start == nil {
                 start = Self.snapshot(window, views: boundaryViews(menu), excluding: self.rootLayer)
@@ -672,60 +703,116 @@ final class LemelsonPageTransition {
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        let slot: Slot
         if let existing = self.slots.first(where: { $0.key == target }) {
             // Going back to a page that is still in the strip.
-            self.targetIndex = existing.index
-        } else if let current = self.slot(at: self.targetIndex), !current.hasImage {
-            // The page the strip was heading to never got its rows: its place goes to the new target.
+            slot = existing
+            if !slot.hasImage {
+                self.fill(slot, from: self.cached(target, width: self.width))
+            }
+        } else if let current = self.slot(at: self.targetIndex), !current.hasImage,
+                  current.index != self.shownIndex
+        {
+            // The page the strip was waiting for never got its rows: its place goes to the new target.
             current.key = target
-            self.fill(current, from: self.cached(target, width: self.width), fade: false)
+            self.fill(current, from: self.cached(target, width: self.width))
+            slot = current
         } else {
             let index = self.targetIndex + (forward ? 1 : -1)
             self.removeSlot(at: index)
-            let slot = Slot(key: target, index: index)
+            slot = Slot(key: target, index: index)
             self.slots.append(slot)
             self.stripLayer.addSublayer(slot.layer)
-            self.fill(slot, from: self.cached(target, width: self.width), fade: false)
-            self.targetIndex = index
+            self.fill(slot, from: self.cached(target, width: self.width))
         }
+        self.targetIndex = slot.index
         self.targetKey = target
         self.targetIsFresh = false
         self.stripHasArrived = false
-        self.lastForward = forward
+        // A page with nothing to show is not slid to: an empty half would come in. The strip goes to
+        // (or stays on) the last page that has something, and sets off when the new rows are in.
+        self.waitsForRows = !slot.hasImage
+        if slot.hasImage {
+            self.shownIndex = slot.index
+            self.shownKey = target
+        }
         CATransaction.commit()
         let duration = self.duration
-        self.slideStrip(duration: duration)
+        self.slideStrip(toIndex: self.shownIndex, duration: duration)
         if wasIdle, let first = self.slot(at: 0) {
             // Until the menu rebuilds its rows, the page that leaves is the real rows themselves.
-            self.revealRealRows(of: first, enterOffset: nil)
+            self.revealRealRows(of: first, pictureIsCurrent: true)
         }
         self.phase = .active
-        self.schedule(after: duration) { [weak self] in
-            guard let self else { return }
-            self.stripHasArrived = true
-            self.settleIfReady()
+        if !self.waitsForRows {
+            self.scheduleArrival(after: duration)
         }
         self.schedule(after: duration + Self.rebuildTimeout) { [weak self] in
             self?.log("rebuild timeout")
             self?.abort()
         }
-        self.log("begin \(from) -> \(target) index=\(self.targetIndex)")
+        self.log("begin \(from) -> \(target) index=\(self.targetIndex)\(self.waitsForRows ? ", waits for rows" : "")")
+    }
+
+    private func scheduleArrival(after delay: TimeInterval) {
+        self.schedule(after: delay) { [weak self] in
+            guard let self else { return }
+            self.stripHasArrived = true
+            self.settleIfReady()
+        }
+    }
+
+    /// Hook at the start of `populateMenu`: the rows on screen are about to be replaced. Their picture
+    /// takes over before the rebuild touches them: the rebuild puts its work on screen in steps (the old
+    /// rows are gone a few frames before the new ones are in), and none of that may show.
+    func menuWillPopulate(_ menu: NSMenu) {
+        guard self.phase == .active, menu === self.menu, self.realKey != nil else { return }
+        self.takePictureOfRealRows()
+        self.freezeRealRows()
+        CATransaction.flush()
     }
 
     /// Hook at the end of `populateMenu`: the real rows now show `currentKey()`.
     func menuDidPopulate(_ menu: NSMenu) {
         guard self.phase == .active, menu === self.menu, let key = self.currentKey?() else { return }
+        self.log("populated \(key)")
         // The rows now belong to another page: the copy of the old one takes over, and the new rows
         // stay out of sight until they are placed.
         self.freezeRealRows()
         self.setRowsMasked(true)
-        // NSMenu applies the new rows and its new size on its next pass; capture one frame later.
-        self.captureTimer?.invalidate()
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.capture(key: key) }
+        self.schedulePlacement(of: key, attempt: 0)
+    }
+
+    /// The menu is opening: pictures in the archive come back as bitmaps on a background queue, so a key
+    /// press does not have to wait for one to be decoded.
+    func menuWillOpen() {
+        self.cachePurgeTimer?.invalidate()
+        self.cachePurgeTimer = nil
+        let packed = self.archive.filter { self.cache[$0.key] == nil }
+        guard !packed.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var decoded: [String: Snapshot] = [:]
+            for (key, item) in packed {
+                guard let image = Self.image(png: item.png) else { continue }
+                decoded[key] = Snapshot(
+                    image: image,
+                    size: item.size,
+                    providerBoundary: item.providerBoundary,
+                    modeBoundary: item.modeBoundary,
+                    archived: true)
+            }
+            let pictures = decoded
+            // A run loop block: the main dispatch queue is not a sure thing while a menu tracks.
+            CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
+                MainActor.assumeIsolated {
+                    let transition = LemelsonPageTransition.shared
+                    for (key, picture) in pictures where transition.cache[key] == nil && transition.archive[key] != nil {
+                        transition.cache[key] = picture
+                    }
+                }
+            }
+            CFRunLoopWakeUp(CFRunLoopGetMain())
         }
-        RunLoop.main.add(timer, forMode: .common)
-        self.captureTimer = timer
     }
 
     func menuDidClose() {
@@ -737,7 +824,7 @@ final class LemelsonPageTransition {
         self.cachePurgeTimer?.invalidate()
         let timer = Timer(timeInterval: Self.cacheLifetime, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.cache.removeAll()
+                self?.archivePictures()
                 self?.cachePurgeTimer = nil
             }
         }
@@ -747,62 +834,124 @@ final class LemelsonPageTransition {
 
     // MARK: - Steps
 
-    private func capture(key: String) {
-        self.captureTimer = nil
-        guard self.phase == .active, let menu = self.menu, let window = self.menuWindow else { return }
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        // The picture needs the rows unmasked; nothing is committed until the end of this block.
-        self.setRowsMasked(false)
-        // The window may be between two heights; the picture is taken at the final one.
-        let shown = self.shownHeight
-        let resizing = self.heightTimer != nil
-        if resizing { self.setWindowHeight(self.heightTo, display: false) }
-        let taken = Self.snapshot(
-            window,
-            views: self.boundaryViews?(menu) ?? (nil, nil),
-            excluding: self.rootLayer)
-        if resizing { self.setWindowHeight(shown, display: false) }
-        guard let snapshot = taken else {
-            self.setRowsMasked(true)
-            CATransaction.commit()
+    /// NSMenu puts the new rows into its window on its own pass, right after the rebuild returns. A timer
+    /// with no delay comes after that pass; if the rows are not in the window yet, it looks again.
+    private func schedulePlacement(of key: String, attempt: Int) {
+        self.placeTimer?.invalidate()
+        let timer = Timer(timeInterval: attempt == 0 ? 0 : 1.0 / 120.0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.placeRows(key: key, attempt: attempt) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.placeTimer = timer
+    }
+
+    /// The first row under the provider row is in the window. (Rows further down may never be: the menu
+    /// only puts the rows it shows into its table.)
+    private static func rowsArePlaced(_ menu: NSMenu, in window: NSWindow) -> Bool {
+        guard let first = menu.items.dropFirst().first(where: { !$0.isHidden && $0.view != nil }) else { return true }
+        return first.view?.window === window
+    }
+
+    /// The rows of `key` are in the window: when it is the target page they take their place in the
+    /// strip at once, as the real rows (a picture of them would only cost time, and it draws the dimmed
+    /// text brighter than the menu does). A strip that waited for them sets off now.
+    private func placeRows(key: String, attempt: Int) {
+        self.placeTimer = nil
+        guard self.phase == .active, let menu = self.menu, let window = self.menuWindow,
+              let content = window.contentView
+        else { return }
+        if attempt < 12, !Self.rowsArePlaced(menu, in: window) {
+            self.schedulePlacement(of: key, attempt: attempt + 1)
             return
         }
-        self.cache[key] = snapshot
-        self.layoutClip(height: (window.contentView?.bounds.height ?? window.frame.height) - self.boundary)
-        let slot = self.slots.first(where: { $0.key == key })
-        var enterOffset: CGFloat?
-        if let slot {
-            enterOffset = self.fill(slot, from: snapshot, fade: !slot.hasImage)
-        }
-        if key == self.targetKey, let slot {
-            // The page that arrives is the real rows, not a picture of them: a picture draws the
-            // dimmed (vibrant) text brighter than the menu does, which showed as a flash at rest.
-            self.revealRealRows(of: slot, enterOffset: enterOffset)
+        // The menu's table makes the layers of its rows when it lays out and draws; the rows cannot be
+        // told to follow the strip before that.
+        content.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.hideIdleScrollArrows(
+            in: content,
+            finalHeight: self.heightTimer == nil ? content.bounds.height : self.heightTo)
+        self.layoutClip(height: content.bounds.height - self.boundary)
+        if key == self.targetKey, let slot = self.slots.first(where: { $0.key == key }) {
+            if self.waitsForRows {
+                self.waitsForRows = false
+                self.shownIndex = slot.index
+                self.shownKey = key
+                self.cancelTimers()
+                let duration = self.duration
+                self.slideStrip(toIndex: slot.index, duration: duration)
+                self.scheduleArrival(after: duration)
+            }
+            self.revealRealRows(of: slot, pictureIsCurrent: false)
+            self.targetIsFresh = true
         } else {
             self.setRowsMasked(true)
         }
         CATransaction.commit()
         CATransaction.flush()
-        self.log("capture \(key) height=\(Int(snapshot.size.height))")
-        if key == self.targetKey {
-            self.targetIsFresh = true
-            self.settleIfReady()
+        self.log("rows placed \(key) height=\(Int(self.heightTimer == nil ? content.bounds.height : self.heightTo))"
+            + (attempt > 0 ? " after \(attempt) more looks" : ""))
+        self.settleIfReady()
+    }
+
+    /// A picture of the window as it is, at the height it is going to. Only with the real rows showing.
+    private func takePicture() -> Snapshot? {
+        guard let menu = self.menu, let window = self.menuWindow else { return nil }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        // The window may be between two heights; the picture is taken at the final one. Nothing is
+        // committed in between.
+        let shown = self.shownHeight
+        let resizing = self.heightTimer != nil
+        if resizing { self.setWindowHeight(self.heightTo, display: false) }
+        let picture = Self.snapshot(
+            window,
+            views: self.boundaryViews?(menu) ?? (nil, nil),
+            excluding: self.rootLayer)
+        if resizing { self.setWindowHeight(shown, display: false) }
+        return picture
+    }
+
+    /// The page shown by the real rows gets its picture, for the moment the rows are taken away.
+    private func takePictureOfRealRows() {
+        guard let key = self.realKey, !self.realPictureIsCurrent, let picture = self.takePicture() else { return }
+        self.cache[key] = picture
+        self.realPictureIsCurrent = true
+        guard let slot = self.slots.first(where: { $0.key == key }) else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.fill(slot, from: picture)
+        CATransaction.commit()
+        self.log("picture \(key) before its rows go")
+    }
+
+    /// A page that came in as real rows has no picture of its own yet, or an old one. It is taken once
+    /// the page has rested for a moment, so the next visit has it from the first frame.
+    private func schedulePicture(of key: String) {
+        self.pictureTimer?.invalidate()
+        self.pictureTimer = nil
+        if let picture = self.cache[key], CACurrentMediaTime() - picture.taken < Self.pictureFreshness { return }
+        let timer = Timer(timeInterval: Self.pictureDelay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.pictureTimer = nil
+                guard self.phase == .idle, self.currentKey?() == key, self.menuWindow?.isVisible == true,
+                      let picture = self.takePicture()
+                else { return }
+                self.cache[key] = picture
+                self.log("picture \(key) at rest")
+            }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.pictureTimer = timer
     }
 
     /// The strip is at rest on the target page and the real rows show the same page: swap them.
     private func settleIfReady() {
         guard self.phase == .active, self.stripHasArrived, self.targetIsFresh else { return }
-        let entranceLeft = self.entranceEnd - CACurrentMediaTime()
-        guard entranceLeft <= 0 else {
-            // The target page is still coming in.
-            self.cancelTimers()
-            self.schedule(after: entranceLeft) { [weak self] in
-                self?.settleIfReady()
-            }
-            return
-        }
         self.cancelTimers()
         // The real rows are already in place; only the pages that left are removed.
         CATransaction.begin()
@@ -815,19 +964,22 @@ final class LemelsonPageTransition {
         self.realKey = nil
         self.phase = .idle
         self.log("done")
+        self.schedulePicture(of: self.targetKey)
     }
 
     private func abort() {
         self.finishHeight()
         self.cancelTimers()
-        self.captureTimer?.invalidate()
-        self.captureTimer = nil
+        self.placeTimer?.invalidate()
+        self.placeTimer = nil
+        self.pictureTimer?.invalidate()
+        self.pictureTimer = nil
+        self.waitsForRows = false
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         self.setRowsMasked(false)
         for layer in self.lowerRowLayers() {
             layer.removeAnimation(forKey: Self.followKey)
-            layer.removeAnimation(forKey: Self.enterKey)
         }
         self.rootLayer.opacity = 0
         self.clearStrip()
@@ -877,10 +1029,12 @@ final class LemelsonPageTransition {
         let slot = Slot(key: key, index: 0)
         self.slots = [slot]
         self.stripLayer.addSublayer(slot.layer)
-        self.fill(slot, from: snapshot, fade: false)
+        self.fill(slot, from: snapshot)
         // From rest the page is still the real rows; its copy waits, unseen, for the rebuild.
         slot.layer.isHidden = !showCopy
         self.targetIndex = 0
+        self.shownIndex = 0
+        self.shownKey = key
         self.rootLayer.opacity = 1
         CATransaction.commit()
         CATransaction.flush()
@@ -931,12 +1085,10 @@ final class LemelsonPageTransition {
         self.stripLayer.position.y = clipHeight - self.stripLayer.bounds.height / 2
     }
 
-    /// Returns the offset the page comes in from, when it joins a strip that is already moving.
-    @discardableResult
-    private func fill(_ slot: Slot, from snapshot: Snapshot?, fade: Bool) -> CGFloat? {
-        guard let snapshot else { return nil }
+    private func fill(_ slot: Slot, from snapshot: Snapshot?) {
+        guard let snapshot else { return }
         let height = snapshot.size.height - self.boundary
-        guard height > 0 else { return nil }
+        guard height > 0 else { return }
         slot.layer.contents = snapshot.crop(top: self.boundary, height: height)
         slot.layer.contentsScale = snapshot.scale
         slot.layer.frame = CGRect(
@@ -944,46 +1096,13 @@ final class LemelsonPageTransition {
             y: self.stripLayer.bounds.height - height,
             width: self.width,
             height: height)
-        let isNew = !slot.hasImage
         slot.hasImage = true
-        if fade, isNew, slot.key == self.targetKey {
-            return self.slideIn(slot)
-        }
-        return nil
-    }
-
-    /// A page whose rows were built after the strip set off: it comes in from the edge it would have
-    /// come from, on top of what is left of the strip's own motion, instead of appearing in place.
-    private func slideIn(_ slot: Slot) -> CGFloat? {
-        let target = self.width / 2 - CGFloat(self.targetIndex) * self.width
-        let remaining = (self.stripLayer.presentation()?.position.x ?? target) - target
-        let side: CGFloat = if abs(remaining) > 0.5 {
-            remaining > 0 ? 1 : -1
-        } else {
-            self.lastForward ? 1 : -1
-        }
-        let offset = side * self.width - remaining
-        guard abs(offset) > 1 else { return nil }
-        slot.layer.add(Self.entrance(from: offset), forKey: Self.enterKey)
-        self.entranceEnd = CACurrentMediaTime() + Self.entranceDuration
-        return offset
     }
 
     private static let followKey = "lemelsonFollow"
-    private static let enterKey = "lemelsonEnter"
     /// Visible on the first frame, halfway in about 55 ms, then a soft landing.
     private static var slideTiming: CAMediaTimingFunction {
         CAMediaTimingFunction(controlPoints: 0.3, 0.4, 0.15, 1)
-    }
-
-    private static func entrance(from offset: CGFloat) -> CABasicAnimation {
-        let enter = CABasicAnimation(keyPath: "position.x")
-        enter.isAdditive = true
-        enter.fromValue = offset
-        enter.toValue = 0
-        enter.duration = self.entranceDuration
-        enter.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.75, 0.2, 1)
-        return enter
     }
 
     // MARK: - Real rows
@@ -1040,37 +1159,33 @@ final class LemelsonPageTransition {
     }
 
     /// The real rows take the place of `slot`'s picture and move exactly as the strip does.
-    private func revealRealRows(of slot: Slot, enterOffset: CGFloat?) {
+    private func revealRealRows(of slot: Slot, pictureIsCurrent: Bool) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         slot.layer.isHidden = true
         self.setRowsMasked(false)
         let rest = self.width / 2 - CGFloat(slot.index) * self.width
-        let target = self.width / 2 - CGFloat(self.targetIndex) * self.width
         let moving = CACurrentMediaTime() < self.slideStart + self.slideDuration
         for layer in self.lowerRowLayers() {
             layer.removeAnimation(forKey: Self.followKey)
-            layer.removeAnimation(forKey: Self.enterKey)
-            if moving || abs(target - rest) > 0.5 {
+            if moving || abs(self.slideTo - rest) > 0.5 {
                 let follow = CABasicAnimation(keyPath: "position.x")
                 follow.isAdditive = true
                 follow.fromValue = self.slideFrom - rest
-                follow.toValue = target - rest
+                follow.toValue = self.slideTo - rest
                 follow.duration = self.slideDuration
                 follow.timingFunction = Self.slideTiming
                 follow.beginTime = layer.convertTime(self.slideStart, from: nil)
                 // A page that leaves stays out until its rows are replaced.
                 follow.fillMode = .forwards
-                follow.isRemovedOnCompletion = abs(target - rest) <= 0.5
+                follow.isRemovedOnCompletion = abs(self.slideTo - rest) <= 0.5
                 layer.add(follow, forKey: Self.followKey)
-            }
-            if let enterOffset {
-                layer.add(Self.entrance(from: enterOffset), forKey: Self.enterKey)
             }
         }
         CATransaction.commit()
         self.realKey = slot.key
-        self.log("real rows \(slot.key)")
+        self.realPictureIsCurrent = pictureIsCurrent
+        self.log("real rows \(slot.key) \(moving ? "slide in" : "in place")")
     }
 
     /// The copy of the page takes over from the real rows, in the same place.
@@ -1082,15 +1197,14 @@ final class LemelsonPageTransition {
         self.setRowsMasked(true)
         for layer in self.lowerRowLayers() {
             layer.removeAnimation(forKey: Self.followKey)
-            layer.removeAnimation(forKey: Self.enterKey)
         }
         CATransaction.commit()
         self.realKey = nil
     }
 
-    /// Moves the strip to the target page from wherever it is now.
-    private func slideStrip(duration: CFTimeInterval) {
-        let target = self.width / 2 - CGFloat(self.targetIndex) * self.width
+    /// Moves the strip to the page at `index` from wherever it is now.
+    private func slideStrip(toIndex index: Int, duration: CFTimeInterval) {
+        let target = self.width / 2 - CGFloat(index) * self.width
         let current = self.stripLayer.presentation()?.position.x ?? self.stripLayer.position.x
         let slide = CABasicAnimation(keyPath: "position.x")
         slide.fromValue = current
@@ -1099,6 +1213,7 @@ final class LemelsonPageTransition {
         slide.timingFunction = Self.slideTiming
         self.slideStart = CACurrentMediaTime()
         self.slideFrom = current
+        self.slideTo = target
         self.slideDuration = duration
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1129,8 +1244,60 @@ final class LemelsonPageTransition {
     }
 
     private func cached(_ key: String, width: CGFloat) -> Snapshot? {
+        if self.cache[key] == nil, let packed = self.archive[key], abs(packed.size.width - width) < 0.5,
+           let image = Self.image(png: packed.png)
+        {
+            // Asked for before the background decoding of `menuWillOpen` got to it.
+            self.cache[key] = Snapshot(
+                image: image,
+                size: packed.size,
+                providerBoundary: packed.providerBoundary,
+                modeBoundary: packed.modeBoundary,
+                archived: true)
+        }
         guard let snapshot = self.cache[key], abs(snapshot.size.width - width) < 0.5 else { return nil }
         return snapshot
+    }
+
+    /// Ten minutes after the menu closed the pictures stop being bitmaps (a few megabytes each) and stay
+    /// as PNG data, so a page that was seen once has a picture for as long as the app runs.
+    private func archivePictures() {
+        let fresh = self.cache.filter { !$0.value.archived }
+        self.cache.removeAll()
+        guard !fresh.isEmpty else { return }
+        let appearance = self.cacheAppearance
+        DispatchQueue.global(qos: .utility).async {
+            var packed: [String: Archived] = [:]
+            for (key, picture) in fresh {
+                guard let png = Self.png(picture.image) else { continue }
+                packed[key] = Archived(
+                    png: png,
+                    size: picture.size,
+                    providerBoundary: picture.providerBoundary,
+                    modeBoundary: picture.modeBoundary)
+            }
+            let result = packed
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let transition = LemelsonPageTransition.shared
+                    guard transition.cacheAppearance == appearance else { return }
+                    transition.archive.merge(result) { _, new in new }
+                }
+            }
+        }
+    }
+
+    private nonisolated static func png(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    private nonisolated static func image(png: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
     }
 
     // MARK: - Height
@@ -1313,6 +1480,7 @@ final class LemelsonPageTransition {
             image: image,
             size: bounds.size,
             providerBoundary: distance(views.providerRow) ?? 0,
-            modeBoundary: distance(views.modeRow))
+            modeBoundary: distance(views.modeRow),
+            taken: CACurrentMediaTime())
     }
 }

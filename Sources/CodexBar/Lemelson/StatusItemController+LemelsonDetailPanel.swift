@@ -71,6 +71,8 @@ extension StatusItemController {
 
     /// Hook at the start of `populateMenu`: the author's code always sees its own submenus.
     func lemelsonMenuWillPopulate(_ menu: NSMenu) {
+        // The page transition takes a picture of the rows that are about to go.
+        LemelsonPageTransition.shared.menuWillPopulate(menu)
         self.lemelsonRestoreAdoptedSubmenus(in: menu)
     }
 

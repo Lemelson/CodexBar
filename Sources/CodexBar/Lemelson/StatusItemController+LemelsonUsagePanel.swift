@@ -652,6 +652,7 @@ extension StatusItemController {
     func lemelsonRootMenuWillOpen(_ menu: NSMenu) {
         // Left/right and sideways swipes page through the tabs and modes, with or without the panel.
         self.lemelsonInstallMenuEventFilter()
+        LemelsonPageTransition.shared.menuWillOpen()
         LemelsonPagingState.shared.swipe.reset()
         LemelsonPagingState.shared.smoothScroll = UserDefaults.standard.bool(forKey: "lemelsonSmoothScroll")
         // The detail panel serves every tab, with or without the Claude summary.
