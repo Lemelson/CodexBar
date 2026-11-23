@@ -25,7 +25,8 @@ public struct UsageValueCardView: View {
         }
     }
 
-    private static let weeksPerMonth = 30.44 / 7
+    /// Shared with the Month chart of the limit card below, so its latest month and "You get" match.
+    private static let weeksPerMonth = UsageDriftMonths.weeksPerMonth
 
     private func got(_ account: UsagePanelState.Account) -> Double? {
         guard let value = account.value else { return nil }
@@ -230,22 +231,30 @@ struct UsageValueBar: View {
     }
 }
 
-// MARK: - Does the weekly limit change
+// MARK: - Does the limit change
 
-/// Weekly limit capacity by week. The switcher shows the same measured limit
-/// in three units: Opus dollars, dollars at my actual model mix, and Fable dollars.
+/// Weekly limit capacity by month or by week (the remembered Month / Week switch). The unit switcher
+/// shows the same measured limit in three units: Opus dollars, dollars at my actual model mix, and
+/// Fable dollars. A month is built from the week values only (`UsageDriftMonths`).
+/// Both positions have the same height: fixed caption frames, the same chart height and one legend row
+/// per account that has a week (the menu caches the row's height).
 public struct UsageDriftCardView: View {
     let state: UsagePanelState
     let width: CGFloat
-    /// Only for the PNG preview, which cannot move a pointer: draws the chart as if this week were
-    /// pointed at (0 is the latest week, 1 the one before, ...). Nil in the app.
+    /// Only for the PNG preview, which cannot move a pointer: draws the chart as if this week (or month,
+    /// in the Month position) were pointed at (0 is the latest, 1 the one before, ...). Nil in the app.
     let initialHoverIndex: Int?
     @State private var unit: Unit = .opus
+    @ObservedObject private var selection = UsagePanelSelection.shared
 
     public init(state: UsagePanelState, width: CGFloat, initialHoverIndex: Int? = nil) {
         self.state = state
         self.width = width
         self.initialHoverIndex = initialHoverIndex
+    }
+
+    private var period: UsageDriftPeriod {
+        self.selection.driftPeriod
     }
 
     enum Unit: String, CaseIterable, Identifiable {
@@ -312,28 +321,54 @@ public struct UsageDriftCardView: View {
             }
             return "\(account.displayName) ×\(ratio) (\(how))"
         }
-        return "Fable/Opus ratio per account: " + parts.joined(separator: ", ") + "."
+        // The same in both positions, so the row keeps its height.
+        return "Fable/Opus ratio per account: " + parts.joined(separator: ", ") + ". \"You get\" above "
+            + "rates the last 35 days at once, so it can differ a little from the latest month here."
+    }
+
+    /// What one point (or bar) is, in the chosen position.
+    private var periodCaption: String {
+        switch self.period {
+        case .month:
+            "A bar is a month of full weekly limits: its average week × 4.35. "
+                + "Faded: under 2 weeks of it measured."
+        case .week:
+            "A point is one weekly limit, used up completely, rated on that week's own readings."
+        }
     }
 
     public var body: some View {
         let points = self.state.accounts.flatMap { self.points(for: $0) }
         VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Is the weekly limit changing?")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer(minLength: 0)
+            Text(self.period == .month ? "Is the monthly limit changing?" : "Is the weekly limit changing?")
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+            HStack(spacing: 10) {
+                UsageSegmentedControl(
+                    options: Array(UsageDriftPeriod.allCases),
+                    title: \.title,
+                    selection: self.$selection.driftPeriod)
+                    .fixedSize()
+                UsageSegmentedControl(
+                    options: Array(Unit.allCases),
+                    title: \.rawValue,
+                    selection: self.$unit,
+                    fillWidth: true)
             }
-            UsageSegmentedControl(
-                options: Array(Unit.allCases),
-                title: \.rawValue,
-                selection: self.$unit,
-                fillWidth: true)
-            Text(self.caption)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .frame(height: 40, alignment: .topLeading)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(self.periodCaption)
+                    .frame(height: 27, alignment: .topLeading)
+                Text(self.caption)
+                    .frame(height: 40, alignment: .topLeading)
+            }
+            .font(.system(size: 10.5))
+            .foregroundStyle(.secondary)
             if points.isEmpty {
                 UsageNote(text: "Not enough readings yet: it needs at least one full week.")
+            } else if self.period == .month {
+                UsageDriftMonthChartView(
+                    series: self.monthSeries,
+                    initialHoverIndex: self.initialHoverIndex)
             } else {
                 UsageDriftChartView(
                     points: points,
@@ -358,6 +393,19 @@ public struct UsageDriftCardView: View {
                 name: account.displayName,
                 colorIndex: self.state.colorIndex(of: account),
                 points: points)
+        }
+    }
+
+    /// The same accounts as the Week chart (one legend row each, whatever their months), each week value
+    /// spread over the calendar months it covers up to the summary's time.
+    private var monthSeries: [UsageDriftMonthSeries] {
+        let until = self.state.generatedDate
+        return self.series.map { series in
+            UsageDriftMonthSeries(
+                id: series.id,
+                name: series.name,
+                colorIndex: series.colorIndex,
+                months: UsageDriftMonths.months(of: series.points, until: until))
         }
     }
 }
@@ -460,18 +508,8 @@ struct UsageDriftChartView: View {
     }
 
     private func legendRow(_ series: UsageDriftSeries, hovered: UsageDriftWeek?) -> some View {
-        HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(UsagePalette.account(series.colorIndex))
-                .frame(width: 8, height: 8)
-            Text(series.name)
-                .font(.system(size: 11, weight: .medium))
-                .lineLimit(1)
-            Spacer(minLength: 6)
+        UsageDriftLegendRow(name: series.name, colorIndex: series.colorIndex) {
             self.legendValue(series, hovered: hovered)
-                .font(.system(size: 11))
-                .monospacedDigit()
-                .lineLimit(1)
         }
     }
 

@@ -42,6 +42,37 @@ enum ClaudeFixture {
         return state
     }
 
+    /// Made-up limit weeks for the Value page's limit chart, under made-up names ("Account A", ...):
+    /// A has twelve weeks (three or four months), B only the current week (a single, preliminary month),
+    /// C the last three weeks (a single month with enough days). Weeks end a day after the summary, as the
+    /// current week does. Any further accounts lose their weeks.
+    static func driftMonths(_ state: UsagePanelState) -> UsagePanelState {
+        var state = state
+        let week = 7 * 24 * 3600.0
+        let lastEnd = state.generatedAt + 24 * 3600
+        let plans: [[Double]] = [
+            Array([905, 930, 1290, 880, 1010, 1160, 810, 1090, 1300, 1260, 1230, 1240].reversed()),
+            [2980],
+            [1520, 1610, 1580],
+        ]
+        for index in state.accounts.indices {
+            let letter = String(UnicodeScalar(UInt8(65 + index % 26)))
+            state.accounts[index].name = "Account \(letter)"
+            state.accounts[index].short = "Account \(letter)"
+            let values = index < plans.count ? plans[index] : []
+            state.accounts[index].drift = Array(values.enumerated().map { offset, usd in
+                let end = lastEnd - Double(offset) * week
+                // Mostly Opus, with some Fable in every other week, so "My mix" has something to weigh.
+                let spend = """
+                {"opus": \(usd * 0.4), "fable": \(offset.isMultiple(of: 2) ? usd * 0.05 : 0), "other": 1}
+                """
+                let json = "{\"weekEnd\": \(end), \"usd_per_100\": \(usd), \"pairs\": 500, \"spend\": \(spend)}"
+                return try! JSONDecoder().decode(UsagePanelState.DriftPoint.self, from: Data(json.utf8))
+            }.reversed())
+        }
+        return state
+    }
+
     /// Moves the last reading of every manually read account `hours` back, windows and all, as if it had
     /// not been read since: with enough hours its windows have reset by now.
     static func agingManualReadings(_ state: UsagePanelState, hours: Double) -> UsagePanelState {
