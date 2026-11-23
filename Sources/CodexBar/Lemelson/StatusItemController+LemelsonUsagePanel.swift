@@ -661,8 +661,15 @@ extension StatusItemController {
         else { return }
         let width = session.warmWidth
         let now = Date()
+        let started = CACurrentMediaTime()
         session.isWarming = true
-        defer { session.isWarming = false }
+        defer {
+            session.isWarming = false
+            if UserDefaults.standard.bool(forKey: "lemelsonSelfTest") {
+                let ms = Int((CACurrentMediaTime() - started) * 1000)
+                Self.lemelsonLog.notice("claude modes rendered ahead in \(ms) ms")
+            }
+        }
         for mode in Self.lemelsonWarmableModes where mode != session.mode && session.warmRows[mode] == nil {
             let scratch = NSMenu()
             scratch.autoenablesItems = false
@@ -1021,6 +1028,8 @@ extension StatusItemController {
         ]
         let plan = if UserDefaults.standard.bool(forKey: "lemelsonSelfTestTour") {
             self.lemelsonTourSelfTestPlan(menu: menu)
+        } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestValue") {
+            self.lemelsonValueSelfTestPlan(menu: menu)
         } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestPeek") {
             self.lemelsonPeekSelfTestPlan(menu: menu)
         } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestAdopted") {

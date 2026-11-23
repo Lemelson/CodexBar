@@ -447,6 +447,55 @@ extension StatusItemController {
         return plan
     }
 
+    /// `lemelsonSelfTestValue -bool YES` (opened on `claude:value`): the limit chart's Month | Week and unit
+    /// switches in all six positions, the chart pointed at in each, then the plan card's Month | Week, then a
+    /// page turn away and back. After every step the log gives each card's row height next to the height its
+    /// content wants: the row is measured once, so the two must keep the same distance in every position.
+    func lemelsonValueSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        let log = Self.lemelsonLog
+        let tools = LemelsonSelfTestTools(controller: self, menu: menu)
+        let rows = ["lemelsonValue", "lemelsonDrift"]
+        var plan: [(TimeInterval, () -> Void)] = []
+        var time: TimeInterval = 0.8
+        func step(_ gap: TimeInterval, _ action: @escaping () -> Void) {
+            plan.append((time, action))
+            time += gap
+        }
+        step(0.4) { [weak menu] in
+            let selection = UsagePanelSelection.shared
+            log.notice("value: opened on \(tools.page(), privacy: .public) drift=\(selection.driftPeriod.rawValue, privacy: .public) unit=\(selection.driftUnit.rawValue, privacy: .public) plan card=\(selection.valuePeriod.rawValue, privacy: .public)")
+            // Every card row of the page the menu opened on, as first measured.
+            let all = (menu?.items ?? []).compactMap { $0.representedObject as? String }
+                .filter { $0.hasPrefix("lemelson") }
+            tools.describeHeights(of: all, label: "open")
+        }
+        for period in ["Month", "Week"] {
+            step(0.5) { tools.clickSegment(period, inRow: "lemelsonDrift") }
+            for unit in ["Opus $", "My mix", "Fable $"] {
+                step(0.5) { tools.clickSegment(unit, inRow: "lemelsonDrift") }
+                step(0.3) { tools.describeHeights(of: rows, label: "\(period) \(unit)") }
+                for fraction in [0.08, 0.55, 0.97] {
+                    step(0.35) { tools.moveOverTracker(inRow: "lemelsonDrift", fraction: fraction) }
+                }
+            }
+        }
+        step(0.5) { tools.moveOverTracker(inRow: "lemelsonDrift", fraction: nil) }
+        step(0.5) { tools.clickSegment("Week", inRow: "lemelsonValue") }
+        step(0.5) { tools.describeHeights(of: rows, label: "plan card Week") }
+        step(0.5) { tools.clickSegment("Month", inRow: "lemelsonValue") }
+        step(0.5) { tools.describeHeights(of: rows, label: "plan card Month") }
+        step(0.9) { tools.key(right: false, "left, to Spend") }
+        step(0.9) { tools.key(right: true, "right, back to Value") }
+        step(0.4) { tools.describeHeights(of: rows, label: "after the turn") }
+        step(0) { [weak menu] in
+            let selection = UsagePanelSelection.shared
+            log.notice("value: end drift=\(selection.driftPeriod.rawValue, privacy: .public) unit=\(selection.driftUnit.rawValue, privacy: .public) plan card=\(selection.valuePeriod.rawValue, privacy: .public)")
+            LemelsonPageTransition.shared.trace = nil
+            menu?.cancelTracking()
+        }
+        return plan
+    }
+
     /// `lemelsonSelfTestPeek -bool YES`: the opening line of the log says on which page and with which Spend
     /// switches the menu opened; with `lemelsonSelfTestPeekClick` (a segment label, e.g. "Models") that segment
     /// of the Spend row is clicked first when the menu opened on Spend. Then the menu closes.
@@ -598,10 +647,12 @@ struct LemelsonSelfTestTools {
             (0..<control.segmentCount).contains { control.label(forSegment: $0) == label }
         }), let segment = (0..<control.segmentCount).first(where: { control.label(forSegment: $0) == label })
         else { return self.log.notice("tour: no segment \(label, privacy: .public) in \(rowID, privacy: .public)") }
-        // Segments are as wide as their labels: the point is placed by the labels' widths.
+        // Segments are as wide as their labels (or all equal, in a control that fills its width): the
+        // point is placed by the labels' widths.
         let font = control.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
         let widths = (0..<control.segmentCount).map { index in
-            (control.label(forSegment: index) ?? "").size(withAttributes: [.font: font]).width + 16
+            control.segmentDistribution == .fillEqually
+                ? 1 : (control.label(forSegment: index) ?? "").size(withAttributes: [.font: font]).width + 16
         }
         let total = widths.reduce(0, +)
         let start = widths.prefix(segment).reduce(0, +)
@@ -627,6 +678,55 @@ struct LemelsonSelfTestTools {
             }
         }
         RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// The height of each row next to the height its content wants now (the menu measured the row once, at
+    /// build time, and adds a fixed padding).
+    func describeHeights(of rowIDs: [String], label: String) {
+        let parts = rowIDs.map { id -> String in
+            guard let view = self.menu?.items.first(where: { ($0.representedObject as? String) == id })?.view
+            else { return "\(id) none" }
+            let hosting = StatusItemController.lemelsonViews(in: view) {
+                String(describing: type(of: $0)).hasPrefix("NSHostingView<")
+            }.max { $0.frame.height < $1.frame.height }
+            let wants = hosting.map { Int($0.fittingSize.height.rounded()) } ?? -1
+            return "\(id) row=\(Int(view.frame.height)) wants=\(wants)"
+        }
+        self.log.notice("value: heights \(label, privacy: .public): \(parts.joined(separator: ", "), privacy: .public)")
+    }
+
+    /// Points at a chart of the row `rowID` (its mouse tracker) at `fraction` of its width, half-way down;
+    /// nil moves to the row's top edge, off the chart.
+    func moveOverTracker(inRow rowID: String, fraction: CGFloat?) {
+        guard let view = self.menu?.items.first(where: { ($0.representedObject as? String) == rowID })?.view,
+              let window = view.window
+        else { return self.log.notice("tour: no row \(rowID, privacy: .public)") }
+        guard let tracker = StatusItemController.lemelsonViews(in: view, where: {
+            String(describing: type(of: $0)).contains("TrackingView")
+        }).first else { return self.log.notice("tour: no chart tracker in \(rowID, privacy: .public)") }
+        let chart = window.convertToScreen(tracker.convert(tracker.bounds, to: nil))
+        let row = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let point = fraction.map { NSPoint(x: chart.minX + chart.width * $0, y: chart.midY) }
+            ?? NSPoint(x: row.midX, y: row.maxY - 6)
+        // A posted move does not reach the chart's tracking area (AppKit drives those from the real
+        // pointer), so the built event is handed to the tracker itself, as the key presses are.
+        guard let event = NSEvent.mouseEvent(
+            with: .mouseMoved,
+            location: window.convertPoint(fromScreen: point),
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            eventNumber: 0,
+            clickCount: 0,
+            pressure: 0)
+        else { return }
+        if fraction == nil {
+            tracker.mouseExited(with: event)
+        } else {
+            tracker.mouseMoved(with: event)
+        }
+        self.log.notice("value: move \(fraction.map { String(format: "%.2f", $0) } ?? "off", privacy: .public) of the chart \(NSStringFromRect(chart), privacy: .public)")
     }
 
     /// Moves over a row of the panel by its title (a plain action row such as "Open Status Page").

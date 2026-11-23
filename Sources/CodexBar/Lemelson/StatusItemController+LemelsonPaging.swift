@@ -503,8 +503,15 @@ final class LemelsonPageTransition {
         let custom = UserDefaults.standard.double(forKey: "lemelsonHeightDuration")
         return custom >= 0.06 && custom <= 1 ? custom : 0.3
     }
-    /// This long after the menu closes the page pictures are compressed (see `archivePictures`).
-    static let cacheLifetime: TimeInterval = 600
+    /// This long after the menu closes the page pictures are compressed (see `archivePictures`). A debug
+    /// build takes `lemelsonPictureArchiveDelay` (seconds) instead, so a self-test can reach the archive.
+    static var cacheLifetime: TimeInterval {
+        #if DEBUG
+        let custom = UserDefaults.standard.double(forKey: "lemelsonPictureArchiveDelay")
+        if custom > 0 { return custom }
+        #endif
+        return 600
+    }
 
     /// `CGImage` is immutable, so a picture can be compressed and decoded off the main thread.
     private struct Snapshot: @unchecked Sendable {
@@ -817,6 +824,7 @@ final class LemelsonPageTransition {
         let packed = self.archive.filter { self.cache[$0.key] == nil }
         guard !packed.isEmpty else { return }
         DispatchQueue.global(qos: .userInitiated).async {
+            let started = CACurrentMediaTime()
             var decoded: [String: Snapshot] = [:]
             for (key, item) in packed {
                 guard let image = Self.image(png: item.png) else { continue }
@@ -828,13 +836,18 @@ final class LemelsonPageTransition {
                     archived: true)
             }
             let pictures = decoded
+            let ms = Int((CACurrentMediaTime() - started) * 1000)
             // A run loop block: the main dispatch queue is not a sure thing while a menu tracks.
             CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) {
                 MainActor.assumeIsolated {
                     let transition = LemelsonPageTransition.shared
+                    var taken: [String] = []
                     for (key, picture) in pictures where transition.cache[key] == nil && transition.archive[key] != nil {
                         transition.cache[key] = picture
+                        taken.append(key)
                     }
+                    transition.log("archive: \(pictures.count) decoded off the main thread in \(ms) ms, "
+                        + "taken \(taken.sorted().joined(separator: " "))")
                 }
             }
             CFRunLoopWakeUp(CFRunLoopGetMain())
@@ -1284,10 +1297,12 @@ final class LemelsonPageTransition {
     }
 
     private func cached(_ key: String, width: CGFloat) -> Snapshot? {
+        let started = CACurrentMediaTime()
         if self.cache[key] == nil, let packed = self.archive[key], abs(packed.size.width - width) < 0.5,
            let image = Self.image(png: packed.png)
         {
             // Asked for before the background decoding of `menuWillOpen` got to it.
+            self.log("archive: \(key) decoded on the main thread in \(Int((CACurrentMediaTime() - started) * 1000)) ms")
             self.cache[key] = Snapshot(
                 image: image,
                 size: packed.size,
@@ -1322,6 +1337,10 @@ final class LemelsonPageTransition {
                     let transition = LemelsonPageTransition.shared
                     guard transition.cacheAppearance == appearance else { return }
                     transition.archive.merge(result) { _, new in new }
+                    #if DEBUG
+                    let bytes = transition.archive.values.reduce(0) { $0 + $1.png.count }
+                    StatusItemController.lemelsonLog.notice("transition: archive: \(result.count) pictures compressed, \(transition.archive.count) kept, \(bytes / 1024) KB")
+                    #endif
                 }
             }
         }
