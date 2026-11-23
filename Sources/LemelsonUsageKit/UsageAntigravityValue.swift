@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - What the Antigravity plan is worth, computed once
 
 /// The numbers of the Antigravity Value block. Reads `antigravity.value` in the shape of
-/// `STATE-ADDITIONS-24.md` when the collector writes it, and falls back to the older fields
+/// `usage/ANTIGRAVITY-STATE.md` when the collector writes it, and falls back to the older fields
 /// (`weekOpusUsd`, `monthOpusUsd`, the account's plan price) when it does not.
 struct UsageAntigravityWorth {
     struct ModelRow: Identifiable {

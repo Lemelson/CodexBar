@@ -25,7 +25,7 @@ import SwiftUI
 // --hover-day draws the per-day spend charts as if that day were pointed at.
 // --period 30|60|90|180 picks the spend period (default 30, so renders do not depend on an earlier run).
 // --breakdown accounts|models picks the split of the per-day spend chart (default accounts).
-// --fill-missing fills the summary fields of usage/STATE-ADDITIONS-24.md it does not have yet (week limit
+// --fill-missing fills the summary fields of usage/README.md it does not have yet (week limit
 // parts, refresh mode) from what it has. --manual-age 30 moves the last reading of manually read accounts
 // 30 hours back, windows and all.
 // --account picks whose detail panels are drawn: position in the Limits list, 0 is the active account.

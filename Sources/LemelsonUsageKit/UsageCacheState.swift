@@ -3,7 +3,7 @@ import Foundation
 // MARK: - The `cache` objects of the summary
 
 /// Prompt cache by span ("today", "7d", "30d"), as `accounts[].cache`, the top-level `cache` and
-/// `antigravity.cache` carry it (`usage/STATE-ADDITIONS-24.md`, "Cache"). Decoding never throws: a malformed
+/// `antigravity.cache` carry it (`usage/README.md`, cache keys). Decoding never throws: a malformed
 /// object reads as empty and a malformed span drops only itself.
 public struct UsageCacheStats: Decodable, Sendable, Equatable {
     public var spans: [String: Span]

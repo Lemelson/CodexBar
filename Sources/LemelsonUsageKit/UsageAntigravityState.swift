@@ -24,7 +24,7 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
     public var valueReason: String?
     /// How many pairs of readings the weekly value was measured from.
     public var valuePairs: Double?
-    /// The value in the shape of `STATE-ADDITIONS-24.md` (plan, month, ×, per model); nil in older summaries.
+    /// The value in the shape of `usage/ANTIGRAVITY-STATE.md` (plan, month, ×, per model); nil in older summaries.
     public var worth: Worth?
     /// How many full 5-hour windows one weekly window holds, measured by the collector (`windows.7d.sessions`).
     public var weekSessions: Sessions?

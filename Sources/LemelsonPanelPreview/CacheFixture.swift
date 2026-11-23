@@ -1,7 +1,7 @@
 import Foundation
 import LemelsonUsageKit
 
-/// Claude prompt cache numbers for the preview, in the shape of `usage/STATE-ADDITIONS-24.md` ("Cache"),
+/// Claude prompt cache numbers for the preview, in the shape of `usage/README.md` (cache keys),
 /// written into the summary's JSON before it is decoded, so they go through the real decoding.
 ///
 ///   real   the summary as it is (no cache row when it has no `cache`)

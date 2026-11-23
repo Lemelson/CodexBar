@@ -3,7 +3,7 @@ import LemelsonUsageKit
 
 /// Changes to a real summary for renders of states it does not have right now.
 enum ClaudeFixture {
-    /// Fills the fields of `usage/STATE-ADDITIONS-24.md` that a summary does not have yet, from what it has:
+    /// Fills the newer fields of `usage/README.md` that a summary does not have yet, from what it has:
     /// `refresh` from the VPN flag, and for every week `minePct` / `minePctByModel` / `othersPct` from its
     /// dollars through the account's rate, `peakAt` / `peakFinal` (every other past week read early).
     static func fillingMissingFields(_ state: UsagePanelState) -> UsagePanelState {
@@ -73,7 +73,7 @@ enum ClaudeFixture {
         return state
     }
 
-    /// The collector's failure isolation (`usage/STATE-ADDITIONS-24.md`), written into a copy of the summary's
+    /// The collector's failure isolation (`usage/README.md`), written into a copy of the summary's
     /// JSON so it goes through the real decoding: the accounts at `broken` (positions in the summary) become
     /// error stubs `{uuid, name, short, active, useHapp, error, refresh, refreshEverySec, cache}`, and with
     /// `cacheError` every `cache` is null and a top-level `cacheError` is set. Returns the copy's URL.

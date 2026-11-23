@@ -5,7 +5,7 @@ import LemelsonUsageKit
 /// relative to `now`. They go through the same JSON decoding as the real summary.
 ///
 ///   full      5-hour 0% with a fresh window, weekly 40%, four days of spend, three models, and every field of
-///             `usage/STATE-ADDITIONS-24.md`: measured 5h sessions per week, value with plan price and per model,
+///             `usage/ANTIGRAVITY-STATE.md`: measured 5h sessions per week, value with plan price and per model,
 ///             cache with dollars
 ///   no-price  "full" with the plan price unknown: "You get" without "You pay" and without ×
 ///   no-value  "full" with too few readings for a value: the collector's reason instead of numbers
@@ -143,7 +143,7 @@ enum AntigravityFixture {
         return block
     }
 
-    /// The fields of `usage/STATE-ADDITIONS-24.md` on top of the older block.
+    /// The fields of `usage/ANTIGRAVITY-STATE.md` on top of the older block.
     private static func addMessage24(to block: inout [String: Any], _ name: String) {
         if var windows = block["windows"] as? [String: Any], var week = windows["7d"] as? [String: Any] {
             week["sessions"] = ["perWeek": 14.2, "pairs": 9]

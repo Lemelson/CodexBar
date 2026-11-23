@@ -38,10 +38,15 @@ public struct UsageValueCardView: View {
         let scale = max(1, self.state.accounts.compactMap { self.got($0) }.max() ?? 1)
         VStack(alignment: .leading, spacing: 10) {
             // Centered like the Spend and Antigravity headers: the segmented control has no text baseline of
-            // its own, and on the baseline the row was measured taller on its first build after launch.
+            // its own. The title and the control fill the line to within 2 pt, and the control is a little
+            // wider before it is in a window: on the first build after launch the title wrapped, the card
+            // was measured 8 pt taller, and the next data refresh replaced the row with the menu open.
             HStack(alignment: .center) {
                 Text("What the plan is worth")
                     .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .allowsTightening(true)
+                    .minimumScaleFactor(0.9)
                 Spacer(minLength: 8)
                 UsageSegmentedControl(
                     options: Array(UsageDriftPeriod.allCases),
