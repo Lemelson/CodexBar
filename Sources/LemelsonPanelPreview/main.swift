@@ -78,23 +78,19 @@ struct PreviewChevron: ViewModifier {
     }
 }
 
-/// Stand-in for one of the menu's own action rows ("Status Page"): a 16 pt template icon and the menu font.
+/// Stand-in for one of the menu's own action rows ("Status Page"): no icon, the menu font, a 24 pt row.
 struct MockMenuItem: View {
-    let icon: String
     let title: String
     let width: CGFloat
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: self.icon)
-                .font(.system(size: 12))
-                .frame(width: 16, height: 16)
+        HStack(spacing: 0) {
             Text(self.title)
                 .font(.system(size: NSFont.menuFont(ofSize: 0).pointSize))
             Spacer(minLength: 0)
         }
-        .padding(.leading, 14)
-        .frame(width: self.width, height: UsageCacheRowView.height, alignment: .leading)
+        .padding(.leading, UsageCacheRowView.textInset)
+        .frame(width: self.width, height: UsageCacheRowView.rowHeight, alignment: .leading)
     }
 }
 
@@ -108,13 +104,9 @@ struct MockMenuFooter: View {
         MenuSeparator()
         UsageCacheRowView(summary: self.summary, width: self.width)
             .environment(\.usageRowHighlighted, self.highlighted)
-            .modifier(PreviewChevron(shown: true, lit: self.highlighted))
-            .background(self.highlighted
-                ? RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .selectedContentBackgroundColor))
-                .padding(.horizontal, 6)
-                : nil)
-        MockMenuItem(icon: "waveform.path.ecg", title: "Status Page", width: self.width)
-        MockMenuItem(icon: "plus", title: "Add Account…", width: self.width)
+            .frame(height: UsageCacheRowView.rowHeight)
+        MockMenuItem(title: "Status Page", width: self.width)
+        MockMenuItem(title: "Add Account…", width: self.width)
             .padding(.bottom, 5)
     }
 }

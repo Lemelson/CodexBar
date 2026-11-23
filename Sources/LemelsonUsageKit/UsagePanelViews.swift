@@ -578,6 +578,9 @@ public struct UsageLimitRowView: View {
     let sources: UsageLimitSources
     /// An account read only by hand: see `UsageReadingAge.make(account:kind:window:now:)`.
     let reading: UsageReadingAge?
+    /// Weekly row without `sessionsLeft` while the session size is still being measured (Antigravity):
+    /// "5h sessions: measuring, 1 of 3 windows seen".
+    let sessionsNote: String?
     @Environment(\.usageRowHighlighted) private var highlighted
 
     public init(
@@ -588,7 +591,8 @@ public struct UsageLimitRowView: View {
         sessionsLeft: UsageSessionsLeft? = nil,
         title: String? = nil,
         sources: UsageLimitSources = .split,
-        reading: UsageReadingAge? = nil)
+        reading: UsageReadingAge? = nil,
+        sessionsNote: String? = nil)
     {
         self.kind = kind
         self.window = window
@@ -598,6 +602,7 @@ public struct UsageLimitRowView: View {
         self.title = title
         self.sources = sources
         self.reading = reading
+        self.sessionsNote = sessionsNote
     }
 
     private var percent: Double {
@@ -660,6 +665,12 @@ public struct UsageLimitRowView: View {
             }
             if let sessionsLeft {
                 UsageSessionsLeftLine(sessions: sessionsLeft)
+            } else if let sessionsNote {
+                Text(sessionsNote)
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(UsageInk.secondary(self.highlighted))
+                    .lineLimit(1)
             }
         }
         .padding(.leading, 20)
@@ -699,8 +710,14 @@ public struct UsageAccountHeaderView: View {
         return Text("\(plan) · ") + read
     }
 
-    /// A second line only for what needs an action from me. Why an account is merely waiting
-    /// (VPN state, server not answering) is not shown: the age of the reading says enough.
+    /// Under the name of an account the collector skips while the VPN is on, in the quiet color of the age:
+    /// it is waiting, not failing. (Next to the age it left no room for the name.)
+    public static func pauseNote(for account: UsagePanelState.Account) -> String? {
+        account.isPausedByVPN ? "Paused while VPN is on" : nil
+    }
+
+    /// A second line for what needs an action from me. Of the reasons an account is merely waiting only the
+    /// VPN pause is shown (`pauseNote`, quietly); for the rest the age of the reading says enough.
     public static func actionNote(for account: UsagePanelState.Account) -> String? {
         switch account.lastPoll?.status {
         case "auth_rejected":
@@ -740,6 +757,11 @@ public struct UsageAccountHeaderView: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(UsagePalette.warning)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let pause = Self.pauseNote(for: self.account) {
+                Text(pause)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, 20)

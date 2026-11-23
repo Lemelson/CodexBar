@@ -4,7 +4,11 @@ import Foundation
 // "Live readings file (written by the app)"). CodexBar's own history keeps only the peak of each clock
 // hour; every fresh reading the app gets is appended here, and the collector imports it.
 //
-//   {"ts": 1795424947, "source": "codexbar-live", "windows": {"5h": {"pct": 1.0, "resetsAt": 1795439520}, …}}
+//   {"ts": 1795424947, "source": "codexbar-live", "windows": {"5h": {"pct": 1.0, "resetsAt": 1795439520}, …},
+//    "plan": "…"}
+//
+// "plan" is the plan or tier name exactly as the app fetched it with that reading; the key is left out when
+// the fetch did not name one.
 //
 // A line goes in only when a value changed or ten minutes passed since the last line. Each line is
 // written under the shared lock file (open, lock, append in one write, close, unlock), so the collector's
@@ -32,15 +36,20 @@ public struct UsageAntigravityLiveReading: Equatable, Sendable {
     public var ts: Int
     public var fiveHour: Window?
     public var week: Window?
+    /// The plan or tier name the fetch gave, as is; nil when it named none. Not a value of the reading: a line
+    /// is not written only because it changed.
+    public var plan: String?
 
-    public init(ts: Int, fiveHour: Window?, week: Window?) {
+    public init(ts: Int, fiveHour: Window?, week: Window?, plan: String? = nil) {
         self.ts = ts
         self.fiveHour = fiveHour.map(Self.normalized)
         self.week = week.map(Self.normalized)
+        let trimmed = plan?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.plan = trimmed?.isEmpty == false ? trimmed : nil
     }
 
-    public init(at date: Date, fiveHour: Window?, week: Window?) {
-        self.init(ts: Int(date.timeIntervalSince1970), fiveHour: fiveHour, week: week)
+    public init(at date: Date, fiveHour: Window?, week: Window?, plan: String? = nil) {
+        self.init(ts: Int(date.timeIntervalSince1970), fiveHour: fiveHour, week: week, plan: plan)
     }
 
     /// Clamped to 0–100 and rounded to hundredths: the fetch gives values like 59.199999999999996.
@@ -88,7 +97,18 @@ public struct UsageAntigravityLiveReading: Equatable, Sendable {
             return "\"\(key)\": {\"pct\": \(number(window.pct)), \"resetsAt\": \(resets)}"
         }
         let windows = [window("5h", self.fiveHour), window("7d", self.week)].compactMap(\.self)
-        return "{\"ts\": \(self.ts), \"source\": \"codexbar-live\", \"windows\": {\(windows.joined(separator: ", "))}}\n"
+        let plan = self.plan.map { ", \"plan\": \(Self.jsonString($0))" } ?? ""
+        let body = "\"ts\": \(self.ts), \"source\": \"codexbar-live\", \"windows\": {\(windows.joined(separator: ", "))}"
+        return "{\(body)\(plan)}\n"
+    }
+
+    /// A JSON string literal, quotes included (one line: control characters are escaped).
+    static func jsonString(_ text: String) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: [text], options: [.withoutEscapingSlashes]),
+              let array = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
+        // `["…"]` -> `"…"`.
+        return String(array.dropFirst().dropLast())
     }
 
     /// Reads a line of the file back (nil for a broken or empty line).
@@ -103,7 +123,7 @@ public struct UsageAntigravityLiveReading: Equatable, Sendable {
             else { return nil }
             return Window(pct: pct, resetsAt: (raw["resetsAt"] as? NSNumber)?.intValue)
         }
-        self.init(ts: ts, fiveHour: window("5h"), week: window("7d"))
+        self.init(ts: ts, fiveHour: window("5h"), week: window("7d"), plan: object["plan"] as? String)
     }
 }
 

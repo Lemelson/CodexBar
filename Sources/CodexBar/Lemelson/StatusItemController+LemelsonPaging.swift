@@ -220,6 +220,9 @@ extension StatusItemController {
                 return false
             }
             return self.lemelsonHandleScrollSample(LemelsonScrollSample(event: event), menu: menu)
+        case .leftMouseUp:
+            // A Status Page row whose list the panel shows keeps its own click: it opens the page.
+            return self.lemelsonClickStatusRow(event)
         default:
             return false
         }
@@ -328,6 +331,21 @@ extension StatusItemController {
         UsageHoverPanelController.shared.hide(animated: false)
         // Rows cached for the Claude tab were rendered in another mode.
         self.mergedSwitcherContentCaches[ObjectIdentifier(menu)]?.removeValue(forKey: selection)
+    }
+
+    /// A page turn is waiting for a rebuild of `menu` while a native row (Status Page, Settings…) is
+    /// highlighted. The author holds such rebuilds until the pointer moves, because NSMenu would keep drawing
+    /// the highlight where the row was; the slide then timed out and the old page came back. The row leaves
+    /// the menu instead, which drops its highlight, and the rebuild puts the new page's rows in. Returns true
+    /// when the rebuild may go ahead.
+    func lemelsonReleaseNativeHighlightForPageTurn(_ menu: NSMenu) -> Bool {
+        let key = ObjectIdentifier(menu)
+        guard LemelsonPageTransition.shared.isActive, menu === self.lemelsonPagedRootMenu(),
+              let item = self.highlightedMenuItems[key], item.menu === menu, item.view == nil
+        else { return false }
+        self.highlightedMenuItems.removeValue(forKey: key)
+        menu.removeItem(item)
+        return true
     }
 
     /// Rendering rows ahead of time takes the main thread for a tenth of a second or more. While pages
@@ -695,7 +713,7 @@ final class LemelsonPageTransition {
                 self.abort()
                 return
             }
-            if self.phase != .active {
+            if self.phase != .active, !self.rowIsHighlighted {
                 self.cache[from] = start
             }
             self.startStrip(with: start, key: restartKey, kind: kind, over: window, showCopy: !wasIdle)
@@ -897,6 +915,11 @@ final class LemelsonPageTransition {
     }
 
     /// A picture of the window as it is, at the height it is going to. Only with the real rows showing.
+    /// A row of the menu is highlighted (under the pointer, or the row whose detail panel is open).
+    private var rowIsHighlighted: Bool {
+        self.menu?.highlightedItem != nil
+    }
+
     private func takePicture() -> Snapshot? {
         guard let menu = self.menu, let window = self.menuWindow else { return nil }
         CATransaction.begin()
@@ -918,7 +941,11 @@ final class LemelsonPageTransition {
     /// The page shown by the real rows gets its picture, for the moment the rows are taken away.
     private func takePictureOfRealRows() {
         guard let key = self.realKey, !self.realPictureIsCurrent, let picture = self.takePicture() else { return }
-        self.cache[key] = picture
+        // With a row highlighted the picture is right for the page as it leaves but wrong for the next
+        // visit, which would slide in with that row lit: the cache keeps the page's picture at rest.
+        if !self.rowIsHighlighted {
+            self.cache[key] = picture
+        }
         self.realPictureIsCurrent = true
         guard let slot = self.slots.first(where: { $0.key == key }) else { return }
         CATransaction.begin()
@@ -938,9 +965,14 @@ final class LemelsonPageTransition {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.pictureTimer = nil
-                guard self.phase == .idle, self.currentKey?() == key, self.menuWindow?.isVisible == true,
-                      let picture = self.takePicture()
+                guard self.phase == .idle, self.currentKey?() == key, self.menuWindow?.isVisible == true
                 else { return }
+                // A lit row would come back on the next visit: try again once the pointer has left it.
+                if self.rowIsHighlighted {
+                    self.schedulePicture(of: key)
+                    return
+                }
+                guard let picture = self.takePicture() else { return }
                 self.cache[key] = picture
                 self.log("picture \(key) at rest")
             }
@@ -1482,5 +1514,24 @@ final class LemelsonPageTransition {
             providerBoundary: distance(views.providerRow) ?? 0,
             modeBoundary: distance(views.modeRow),
             taken: CACurrentMediaTime())
+    }
+}
+
+extension MenuRowContainerView {
+    /// The deepest visible, enabled AppKit control under `point` (in the row's coordinates; `root` is its
+    /// hosting view),
+    /// searched through the hosting view's subviews: SwiftUI places a representable's view there but does not
+    /// return it from its hit test.
+    static func lemelsonControl(at point: NSPoint, in root: NSView) -> NSControl? {
+        guard let row = root.superview else { return nil }
+        func search(_ view: NSView) -> NSControl? {
+            for sub in view.subviews.reversed() where !sub.isHidden && sub.alphaValue > 0 {
+                guard sub.convert(sub.bounds, to: row).contains(point) else { continue }
+                if let deeper = search(sub) { return deeper }
+                if let control = sub as? NSControl, control.isEnabled { return control }
+            }
+            return nil
+        }
+        return search(root)
     }
 }

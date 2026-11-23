@@ -15,6 +15,8 @@ public struct UsageLimitDetailPanelView: View {
     /// `.single` (Antigravity): no "You" line or "Where it went", dollars read as "your use", and a plain
     /// sentence instead of a chart with fewer than two readings.
     let sources: UsageLimitSources
+    /// One sentence in place of `sessionsLeft` while the session size is still being measured.
+    let sessionsNote: String?
 
     public init(
         account: UsagePanelState.Account,
@@ -24,7 +26,8 @@ public struct UsageLimitDetailPanelView: View {
         width: CGFloat,
         sessionsLeft: UsageSessionsLeft? = nil,
         title: String? = nil,
-        sources: UsageLimitSources = .split)
+        sources: UsageLimitSources = .split,
+        sessionsNote: String? = nil)
     {
         self.account = account
         self.kind = kind
@@ -34,6 +37,7 @@ public struct UsageLimitDetailPanelView: View {
         self.sessionsLeft = sessionsLeft
         self.title = title
         self.sources = sources
+        self.sessionsNote = sessionsNote
     }
 
     private struct Sample: Identifiable {
@@ -161,6 +165,12 @@ public struct UsageLimitDetailPanelView: View {
                     .font(.system(size: 11))
                     .fixedSize(horizontal: false, vertical: true)
                 UsageNote(text: sessionsLeft.basisNote)
+            } else if let sessionsNote {
+                Divider()
+                UsageSectionLabel(text: "5-hour sessions left")
+                Text(sessionsNote)
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Divider()
             VStack(alignment: .leading, spacing: 3) {

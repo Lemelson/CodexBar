@@ -3,7 +3,7 @@ import CodexBarCore
 import LemelsonUsageKit
 
 // The author's rows whose details are a hosted submenu (cost history, Plan Usage, usage breakdown,
-// credits, storage) show them in the detail panel instead.
+// credits, storage, the live component list of Status Page) show them in the detail panel instead.
 //
 // Only while a root menu is open, and only with menu refresh on (tests build menus without it, so they
 // always see the author's submenus):
@@ -18,7 +18,9 @@ import LemelsonUsageKit
 // author's own factory and filled by the author's own hydrate / refresh functions. The refresh keeps the
 // rendered views while their data signature is unchanged, so a menu rebuild does not reset a chart.
 //
-// Status Page (a list with an action) and the command submenus stay native.
+// Status Page: its list of components is shown by the panel, with "Open Status Page" as a clickable row
+// under it, and a click on the Status Page row itself opens the page too (`lemelsonClickStatusRow`): an
+// item with a submenu never sends its own action. The command submenus stay native.
 
 @MainActor
 final class LemelsonAdoptionState {
@@ -107,10 +109,55 @@ extension StatusItemController {
     private func lemelsonAdoptableIdentity(of submenu: NSMenu) -> (chartID: String, provider: String?)? {
         guard self.isHostedSubviewMenu(submenu),
               let first = submenu.items.first(where: { $0.representedObject is String }),
-              let chartID = first.representedObject as? String,
-              chartID != Self.statusComponentsID
+              let chartID = first.representedObject as? String
         else { return nil }
-        return (chartID, first.toolTip)
+        // The status link names its provider in `identifier`, the other rows in `toolTip`.
+        return (chartID, first.toolTip ?? first.identifier?.rawValue)
+    }
+
+    static var lemelsonStatusKeyPrefix: String {
+        "\(Self.lemelsonAdoptedKeyPrefix)\(Self.statusComponentsID)|"
+    }
+
+    /// A click (mouse up) on an adopted Status Page row of an open root menu opens the provider's status page
+    /// and closes the menu, as the plain Status Page row does. Returns true when it was such a click.
+    func lemelsonClickStatusRow(_ event: NSEvent) -> Bool {
+        guard event.type == .leftMouseUp else { return false }
+        let state = LemelsonDetailPanelState.shared
+        for menu in state.openRootMenus.values {
+            guard let item = self.highlightedMenuItems[ObjectIdentifier(menu)] ?? menu.highlightedItem,
+                  let key = state.itemKeys[ObjectIdentifier(item)], key.hasPrefix(Self.lemelsonStatusKeyPrefix),
+                  let (rect, _) = self.lemelsonScreenRect(of: item, in: menu),
+                  rect.contains(NSEvent.mouseLocation) || rect.contains(Self.lemelsonScreenPoint(of: event))
+            else { continue }
+            let provider = String(key.dropFirst(Self.lemelsonStatusKeyPrefix.count))
+            self.lemelsonOpenStatusPage(provider: provider, menu: menu)
+            return true
+        }
+        return false
+    }
+
+    /// Opens the status page of `provider` and closes the menu. While a self-test runs it only logs, so a
+    /// test never opens a browser.
+    func lemelsonOpenStatusPage(provider: String, menu: NSMenu?) {
+        if UserDefaults.standard.bool(forKey: "lemelsonSelfTest") {
+            Self.lemelsonLog.notice("status page of \(provider, privacy: .public) would open now")
+        } else {
+            let sender = NSMenuItem()
+            sender.identifier = NSUserInterfaceItemIdentifier(provider)
+            self.openStatusPageFromMenuItem(sender)
+        }
+        (LemelsonDetailPanelState.menuToClose(for: menu) ?? menu)?.cancelTracking()
+    }
+
+    static func lemelsonScreenPoint(of event: NSEvent) -> NSPoint {
+        if let window = event.window {
+            return window.convertPoint(toScreen: event.locationInWindow)
+        }
+        if event.windowNumber > 0, let window = NSApp.window(withWindowNumber: event.windowNumber) {
+            return window.convertPoint(toScreen: event.locationInWindow)
+        }
+        return event.locationInWindow
     }
 
     /// The copy for `key`, filled or refreshed, stacked into one view for the panel.
@@ -138,19 +185,37 @@ extension StatusItemController {
         }
         let stack = state.stacks[key] ?? LemelsonDetailStackView()
         state.stacks[key] = stack
+        stack.perform = { [weak self] item in
+            self?.lemelsonPerformDetailAction(item)
+        }
         stack.show(copy.items, width: width)
         return stack
+    }
+
+    /// A plain row of a copy with an action ("Open Status Page") was clicked in the panel.
+    private func lemelsonPerformDetailAction(_ item: NSMenuItem) {
+        let menu = LemelsonDetailPanelState.shared.openRootMenus.values.first
+        if item.action == #selector(self.openStatusPageFromMenuItem(_:)) {
+            self.lemelsonOpenStatusPage(provider: item.identifier?.rawValue ?? "", menu: menu)
+            return
+        }
+        guard let action = item.action else { return }
+        NSApp.sendAction(action, to: item.target, from: item)
+        menu?.cancelTracking()
     }
 }
 
 /// The rows of a hosted submenu stacked top to bottom: their views as they are, separators as hairlines,
-/// a plain title row ("No data available") as a label. Follows the height changes of its rows (Storage
+/// a plain title row with an action ("Open Status Page") as a clickable menu row, one without ("No data
+/// available") as a label. Follows the height changes of its rows (Storage
 /// grows when a group is expanded) by changing its own frame, which the panel watches.
 final class LemelsonDetailStackView: NSView {
     private var rows: [NSView] = []
     private var signature: [ObjectIdentifier] = []
     private var observers: [any NSObjectProtocol] = []
     private var width: CGFloat = 0
+    /// Runs the action of a clicked action row.
+    var perform: ((NSMenuItem) -> Void)?
 
     override var isFlipped: Bool {
         true
@@ -205,6 +270,11 @@ final class LemelsonDetailStackView: NSView {
                     }
                 })
                 return wrapper
+            }
+            if item.action != nil {
+                return LemelsonDetailActionRow(item: item, width: width) { [weak self] item in
+                    self?.perform?(item)
+                }
             }
             let label = NSTextField(labelWithString: item.title)
             label.textColor = .secondaryLabelColor
@@ -278,6 +348,93 @@ private final class LemelsonDetailRowWrapper: NSView {
         if self.frame.size != self.row.frame.size {
             self.setFrameSize(self.row.frame.size)
         }
+    }
+}
+
+/// A plain menu row inside the panel: the item's icon and title in the menu's font, highlighted under the
+/// pointer, and its action on click. The panel sends it enter, exit, press and release itself.
+private final class LemelsonDetailActionRow: NSView {
+    private let item: NSMenuItem
+    private let onClick: (NSMenuItem) -> Void
+    private var hovered = false {
+        didSet { if self.hovered != oldValue { self.needsDisplay = true } }
+    }
+
+    private var pressed = false
+
+    static let height: CGFloat = 24
+
+    init(item: NSMenuItem, width: CGFloat, onClick: @escaping (NSMenuItem) -> Void) {
+        self.item = item
+        self.onClick = onClick
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: Self.height))
+        self.addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil))
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        nil
+    }
+
+    override var isFlipped: Bool {
+        true
+    }
+
+    override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
+        true
+    }
+
+    /// The row takes the clicks itself, not a subview.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        self.frame.contains(point) ? self : nil
+    }
+
+    override func mouseEntered(with _: NSEvent) {
+        self.hovered = true
+    }
+
+    override func mouseExited(with _: NSEvent) {
+        self.hovered = false
+    }
+
+    override func mouseDown(with _: NSEvent) {
+        self.pressed = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { self.pressed = false }
+        guard self.pressed, self.bounds.contains(self.convert(event.locationInWindow, from: nil)) else { return }
+        self.onClick(self.item)
+    }
+
+    override func draw(_: NSRect) {
+        // Same selection shape as the menu's own rows.
+        if self.hovered {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: self.bounds.insetBy(dx: 6, dy: 2), xRadius: 6, yRadius: 6).fill()
+        }
+        let ink: NSColor = self.hovered ? .selectedMenuItemTextColor : .controlTextColor
+        var x: CGFloat = 14
+        if let image = self.item.image {
+            let size = NSSize(width: 16, height: 16)
+            let rect = NSRect(x: x, y: (self.bounds.height - size.height) / 2, width: size.width, height: size.height)
+            let tinted = NSImage(size: size, flipped: false) { bounds in
+                image.draw(in: bounds)
+                ink.set()
+                bounds.fill(using: .sourceAtop)
+                return true
+            }
+            tinted.draw(in: rect)
+            x += size.width + 6
+        }
+        let font = NSFont.menuFont(ofSize: 0)
+        let title = NSAttributedString(string: self.item.title, attributes: [.font: font, .foregroundColor: ink])
+        let height = title.size().height
+        title.draw(at: NSPoint(x: x, y: (self.bounds.height - height) / 2))
     }
 }
 

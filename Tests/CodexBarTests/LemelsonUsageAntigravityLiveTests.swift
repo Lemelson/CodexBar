@@ -38,6 +38,22 @@ struct LemelsonUsageAntigravityLiveTests {
     }
 
     @Test
+    func `plan key is optional, as fetched, and not a value of the reading`() {
+        let base = self.reading(7)
+        let planned = Reading(ts: 7, fiveHour: base.fiveHour, week: base.week, plan: "  Pro Plan \"x\"  ")
+        #expect(planned.plan == "Pro Plan \"x\"")
+        let line = planned.jsonLine
+        #expect(line.hasSuffix(", \"plan\": \"Pro Plan \\\"x\\\"\"}\n"))
+        // The other keys and their order stay as they were.
+        #expect(line.hasPrefix(String(base.jsonLine.dropLast(2))))
+        #expect(Reading(jsonLine: line) == planned)
+        // Unknown (nil or blank): the key is left out.
+        #expect(Reading(ts: 7, fiveHour: base.fiveHour, week: base.week, plan: " ").jsonLine == base.jsonLine)
+        // A new plan name alone does not make a line.
+        #expect(UsageAntigravityLiveWriter.decide(Reading(ts: 8, fiveHour: base.fiveHour, week: base.week, plan: "Other"), after: planned) == .unchanged)
+    }
+
+    @Test
     func `changed, unchanged and the ten minute rule`() {
         let first = self.reading(1000)
         #expect(UsageAntigravityLiveWriter.decide(first, after: nil) == .written)

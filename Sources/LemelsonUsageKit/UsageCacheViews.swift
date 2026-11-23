@@ -15,17 +15,21 @@ enum UsageCacheColors {
 // MARK: - Menu row
 
 /// A plain menu item in size and type, for the menu's footer area next to "Status Page": title on the left,
-/// the share reused on the right. The chevron is drawn by the menu bridge, like the limit rows'.
+/// the share reused on the right, a submenu chevron. Measured against the native rows on a 2x screenshot:
+/// the rows of this menu have no icons, their text starts 16.5 pt from the menu's edge, and the submenu
+/// chevron is a label-coloured 13 pt glyph whose right edge sits 21 pt from the edge.
 public struct UsageCacheRowView: View {
     let summary: UsageCacheSummary
     let width: CGFloat
     @Environment(\.usageRowHighlighted) private var highlighted
 
-    /// Native menu metrics: 16 pt template icon, the menu font, a 22 pt row.
-    public static let height: CGFloat = 22
-    static let iconInset: CGFloat = 14
-    /// Room on the right for the chevron (drawn 10 pt from the edge).
-    static let trailingInset: CGFloat = 30
+    /// A native item is 24 pt tall; a card row adds 7 pt around its content (6 padding, 1 descender).
+    public static let rowHeight: CGFloat = 24
+    public static let height: CGFloat = rowHeight - 7
+    /// Where the native rows' text starts.
+    public static let textInset: CGFloat = 16
+    /// From the right edge to the chevron's right edge.
+    static let chevronInset: CGFloat = 21
 
     public init(summary: UsageCacheSummary, width: CGFloat) {
         self.summary = summary
@@ -34,11 +38,7 @@ public struct UsageCacheRowView: View {
 
     public var body: some View {
         let font = Font.system(size: NSFont.menuFont(ofSize: 0).pointSize)
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.3.trianglepath")
-                .font(.system(size: 12))
-                .frame(width: 16, height: 16)
-                .foregroundStyle(UsageInk.primary(self.highlighted))
+        HStack(spacing: 0) {
             Text("Prompt cache")
                 .font(font)
                 .foregroundStyle(UsageInk.primary(self.highlighted))
@@ -49,10 +49,24 @@ public struct UsageCacheRowView: View {
                 .monospacedDigit()
                 .foregroundStyle(UsageInk.secondary(self.highlighted))
                 .lineLimit(1)
+                .padding(.trailing, 10)
+            Image(systemName: "chevron.forward")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(UsageInk.primary(self.highlighted))
         }
-        .padding(.leading, Self.iconInset)
-        .padding(.trailing, Self.trailingInset)
+        .padding(.leading, Self.textInset)
+        .padding(.trailing, Self.chevronInset)
         .frame(width: self.width, height: Self.height, alignment: .leading)
+        .background {
+            // The card's own highlight follows the content (13 pt here); a native row's fills the whole
+            // 24 pt row, 5 pt in from the menu's sides. This one covers the card's.
+            if self.highlighted {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(nsColor: .selectedContentBackgroundColor))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, -(Self.rowHeight - Self.height) / 2)
+            }
+        }
     }
 }
 

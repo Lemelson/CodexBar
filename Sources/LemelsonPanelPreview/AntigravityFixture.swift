@@ -18,9 +18,11 @@ import LemelsonUsageKit
 ///   error     the collector's Antigravity step failed
 ///   rolled    "full" after the 5-hour window reset with no newer reading
 ///   priced    "legacy" with a known plan and price
+///   measuring "full" before the session size is measured: no `sessions`, `calibration` says 1 of 3 windows seen
+///   measuring-bare  the same without `calibration`
 enum AntigravityFixture {
     static let names = ["full", "no-price", "no-value", "no-cache", "legacy", "run-out", "no-quota", "no-spend",
-                        "one-day", "error", "rolled", "priced"]
+                        "one-day", "error", "rolled", "priced", "measuring", "measuring-bare"]
 
     static func state(_ name: String, now: Date) -> UsagePanelState? {
         let summary: [String: Any] = [
@@ -119,8 +121,23 @@ enum AntigravityFixture {
                 block["planName"] = "AI Ultra"
                 block["planPriceUsd"] = 250.0
             }
-            if ["full", "no-price", "no-value", "no-cache"].contains(name) {
+            if ["full", "no-price", "no-value", "no-cache", "measuring", "measuring-bare"].contains(name) {
                 self.addMessage24(to: &block, name)
+            }
+            if name.hasPrefix("measuring") {
+                // No measured session size, and no 5-hour rate to stand in for it.
+                if var windows = block["windows"] as? [String: Any], var week = windows["7d"] as? [String: Any] {
+                    week["sessions"] = NSNull()
+                    windows["7d"] = week
+                    block["windows"] = windows
+                }
+                if var rates = block["rates"] as? [String: Any] {
+                    rates["5h"] = nil
+                    block["rates"] = rates
+                }
+                if name == "measuring" {
+                    block["calibration"] = ["sessionIntervals": 1, "thresholds": ["sessionPairs": 3]]
+                }
             }
         }
         return block

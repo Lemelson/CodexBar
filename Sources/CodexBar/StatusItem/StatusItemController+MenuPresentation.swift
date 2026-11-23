@@ -310,6 +310,14 @@ final class MenuRowContainerView: NSView, MenuCardHighlighting, MenuCardMeasurin
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
+        // lemelson: over an AppKit control inside SwiftUI (the Spend switches) the hosting view answers the
+        // hit test with itself, and a click never reached the control. Rows that declare interactive
+        // controls hand such clicks to the control.
+        if self.containsInteractiveControls,
+           let control = Self.lemelsonControl(at: self.convert(point, from: self.superview), in: self.hosting)
+        {
+            return control
+        }
         let descendant = super.hitTest(point)
         if let descendant {
             var current: NSView? = descendant

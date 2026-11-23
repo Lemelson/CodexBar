@@ -30,6 +30,8 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
     public var weekSessions: Sessions?
     /// How the weekly rate was measured (`rates.7d.method`, `pairsUsed`, `pairsDropped`).
     public var weekRate: RateNote?
+    /// How far the collector is with measuring a week in 5-hour sessions (`calibration`); nil in older summaries.
+    public var calibration: Calibration?
 
     public struct ModelStats: Decodable, Sendable, Equatable {
         public var calls: Double?
@@ -134,6 +136,36 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         }
     }
 
+    /// The parts of `calibration` the page reads: how many 5-hour windows were measured for the session size
+    /// (`sessionIntervals`) and how many it takes (`thresholds.sessionPairs`).
+    public struct Calibration: Decodable, Sendable, Equatable {
+        public var sessionIntervals: Double?
+        public var sessionPairsNeeded: Double?
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.sessionIntervals = keys?.lenient(Double.self, .sessionIntervals)
+            self.sessionPairsNeeded = keys?.lenient(Thresholds.self, .thresholds)?.sessionPairs
+        }
+
+        private struct Thresholds: Decodable {
+            var sessionPairs: Double?
+
+            init(from decoder: Decoder) throws {
+                let keys = try? decoder.container(keyedBy: Key.self)
+                self.sessionPairs = keys?.lenient(Double.self, .sessionPairs)
+            }
+
+            enum Key: String, CodingKey {
+                case sessionPairs
+            }
+        }
+
+        enum Key: String, CodingKey {
+            case sessionIntervals, thresholds
+        }
+    }
+
     /// `windows.7d.sessions` read on its own, so the window itself decodes as before.
     private struct WeekWindow: Decodable {
         var sessions: Lenient<Sessions>?
@@ -188,7 +220,7 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         case uuid, name, short, active, planName, planPriceUsd, has5h, sessionPctOfWeek, kFable
         case windows, rates, drift, lastMeasuredAt, weeks, daily, trackedSince, value
         case usdToday, tokensToday, usd7d, tokens7d, usd30d, tokens30d
-        case beta, error, models, cache, coverage, quotaSource, valueReason
+        case beta, error, models, cache, coverage, quotaSource, valueReason, calibration
     }
 
     private struct ValuePairs: Decodable {
@@ -244,6 +276,7 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         self.worth = keys?.lenient(Worth.self, .value).flatMap { $0.isNewShape ? $0 : nil }
         self.weekSessions = weekSessions
         self.weekRate = keys?.lenient([String: Lenient<RateNote>].self, .rates)?["7d"]?.value
+        self.calibration = keys?.lenient(Calibration.self, .calibration)
     }
 }
 
@@ -281,6 +314,46 @@ extension UsageAntigravityBlock {
     /// a Claude plan says nothing about a Google quota.
     public func sessionsLeft(for kind: UsagePanelState.WindowKind, now: Date) -> UsageSessionsLeft? {
         kind == .week ? UsageSessionsLeft.make(account: self.account, donors: [], now: now) : nil
+    }
+
+    /// While the collector has not measured the session size yet (`windows.7d.sessions` is null), the weekly
+    /// row says how far it is instead of showing nothing: "5h sessions: measuring, 1 of 3 windows seen".
+    /// No preliminary number. Nil for the 5-hour row, once a session line can be shown, and without a 5-hour limit.
+    public func sessionsMeasuringCaption(for kind: UsagePanelState.WindowKind, now: Date) -> String? {
+        guard self.sessionsAreMeasuring(kind, now: now) else { return nil }
+        let (seen, needed) = self.sessionProgress
+        if let seen, let needed, seen < needed {
+            return "5h sessions: measuring, \(seen) of \(needed) windows seen"
+        }
+        if let seen, seen > 0 {
+            return "5h sessions: measuring, \(seen) \(seen == 1 ? "window" : "windows") seen"
+        }
+        return "5h sessions: measuring"
+    }
+
+    /// The same for the weekly detail panel, as one sentence.
+    public func sessionsMeasuringSentence(for kind: UsagePanelState.WindowKind, now: Date) -> String? {
+        guard self.sessionsAreMeasuring(kind, now: now) else { return nil }
+        let (seen, needed) = self.sessionProgress
+        guard let needed else {
+            return "Full 5-hour sessions left appear here once enough 5-hour windows have been measured."
+        }
+        let soFar = seen.map { "; \($0) so far" } ?? ""
+        return "Full 5-hour sessions left appear here once \(needed) 5-hour windows have been measured\(soFar)."
+    }
+
+    private func sessionsAreMeasuring(_ kind: UsagePanelState.WindowKind, now: Date) -> Bool {
+        kind == .week && self.weekSessions?.perWeek == nil && self.account.has5h != false
+            && self.limitWindows.contains { $0.0 == .fiveHour }
+            && self.sessionsLeft(for: .week, now: now) == nil
+    }
+
+    private var sessionProgress: (seen: Int?, needed: Int?) {
+        func count(_ value: Double?) -> Int? {
+            value.flatMap { $0.isFinite && $0 >= 0 ? Int($0.rounded()) : nil }
+        }
+        let needed = count(self.calibration?.sessionPairsNeeded).flatMap { $0 > 0 ? $0 : nil }
+        return (count(self.calibration?.sessionIntervals), needed)
     }
 
     /// Short title of a limit row: "5-hour", "Weekly".

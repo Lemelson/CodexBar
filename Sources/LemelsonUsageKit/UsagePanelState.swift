@@ -101,6 +101,12 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
             }
         }
 
+        /// Read in the background, but skipped while the VPN is on (`lastPoll.status == "vpn_mismatch"`):
+        /// the reading is waiting, not failing.
+        public var isPausedByVPN: Bool {
+            self.refreshesInBackground && self.lastPoll?.status == "vpn_mismatch"
+        }
+
         public func window(_ kind: WindowKind) -> Window? {
             self.windows?[kind.rawValue]
         }

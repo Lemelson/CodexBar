@@ -67,9 +67,11 @@ extension StatusItemController {
         }
         let started = CACurrentMediaTime()
         let warm = self.lemelsonTakeWarmAntigravityRows(width: context.menuWidth)
-        guard self.addLemelsonAntigravityRows(to: menu, width: context.menuWidth) else { return false }
+        guard let page = self.addLemelsonAntigravityRows(to: menu, width: context.menuWidth) else { return false }
         // The page replaces the stock Cost, Usage history and Plan Usage rows.
         LemelsonPanelSession.shared.stockExtrasVisible = false
+        // Its prompt cache row goes above the action rows, as on the Claude pages.
+        LemelsonPanelSession.shared.pendingCacheRow = Self.lemelsonCacheRow(of: page)
         // Built for the tab cache's warm-up (another tab is shown): render the page's own rows now as well,
         // while warming is allowed; the tab cache is often emptied before the page is reached.
         if !LemelsonAntigravityState.shared.isWarming,
@@ -84,9 +86,9 @@ extension StatusItemController {
         return true
     }
 
-    @discardableResult
-    private func addLemelsonAntigravityRows(to menu: NSMenu, width: CGFloat) -> Bool {
-        guard let state = UsagePanelStore.load() else { return false }
+    /// The page's rows, without its cache row (see `lemelsonCacheRow(of:)`). Nil without a page.
+    private func addLemelsonAntigravityRows(to menu: NSMenu, width: CGFloat) -> UsageAntigravityPage? {
+        guard let state = UsagePanelStore.load() else { return nil }
         let refreshing = self.lemelsonAntigravityRefreshing
         guard let page = UsageAntigravityPage(
             state: state,
@@ -94,7 +96,7 @@ extension StatusItemController {
             width: width,
             detailWidth: UsageHoverPanelController.panelWidth,
             refreshing: refreshing)
-        else { return false }
+        else { return nil }
         let shared = LemelsonAntigravityState.shared
         shared.renderedStateDate = UsagePanelStore.modificationDate()
         shared.width = width
@@ -129,7 +131,18 @@ extension StatusItemController {
                 menu.addItem(.separator())
             }
         }
-        return true
+        return page
+    }
+
+    /// The page's "Prompt cache" row in the shape the menu footer takes; nil without cache data.
+    static func lemelsonCacheRow(of page: UsageAntigravityPage) -> LemelsonCacheRow? {
+        guard let row = page.cacheRow, let detail = row.detail else { return nil }
+        return LemelsonCacheRow(
+            id: row.id,
+            view: row.view,
+            detail: detail,
+            heightCacheScope: row.heightCacheScope,
+            heightFingerprint: row.heightFingerprint)
     }
 
     // MARK: - Rows rendered ahead of time
@@ -209,7 +222,10 @@ extension StatusItemController {
         scratch.autoenablesItems = false
         shared.isWarming = true
         defer { shared.isWarming = false }
-        guard self.addLemelsonAntigravityRows(to: scratch, width: width) else { return }
+        guard let page = self.addLemelsonAntigravityRows(to: scratch, width: width) else { return }
+        if let row = Self.lemelsonCacheRow(of: page) {
+            self.addLemelsonCacheRow(row, to: scratch, width: width)
+        }
         var rows: [String: NSView] = [:]
         for item in scratch.items {
             guard let id = item.representedObject as? String, Self.lemelsonIsAntigravityRow(id),
@@ -292,10 +308,12 @@ extension StatusItemController {
                 UsageAntigravityLiveReading.Window(pct: $0.window.usedPercent, resetsAt: $0.window.resetsAt)
             }
         }
+        // The plan or tier name the fetch gave (Google's paid tier, plan type or current tier), as is.
         let reading = UsageAntigravityLiveReading(
             at: snapshot.updatedAt,
             fiveHour: window("Gemini 5-hour"),
-            week: window("Gemini weekly"))
+            week: window("Gemini weekly"),
+            plan: snapshot.loginMethod(for: .antigravity))
         return reading.isEmpty ? nil : reading
     }
 

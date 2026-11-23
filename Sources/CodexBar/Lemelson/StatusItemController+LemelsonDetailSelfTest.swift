@@ -1,6 +1,7 @@
 import AppKit
 import CodexBarCore
 import LemelsonUsageKit
+import os
 
 // `lemelsonSelfTestDetail -bool YES` together with `lemelsonSelfTest -bool YES` runs a plan for the
 // detail panel instead of the paging walk. Mouse events are built in the app and posted to this app's
@@ -361,6 +362,111 @@ extension StatusItemController {
         ]
     }
 
+    // MARK: - Tour
+
+    /// `lemelsonSelfTestTour -bool YES`: one walk over the rows added in message 24, with mouse events posted
+    /// to the app's own queue (the real path through NSMenu's tracking loop): Claude Limits, the cache row,
+    /// Spend (Accounts → Models → Accounts, then 90d), Value, Classic and its cache row, Antigravity and its
+    /// cache row and Status Page, back to Classic's Status Page (the fused panel) and its "Open Status Page"
+    /// row, Codex's Status Page, and back to Claude, where a click on Status Page closes the menu (the
+    /// self-test only logs the page it would open).
+    func lemelsonTourSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        let log = Self.lemelsonLog
+        let panel = UsageHoverPanelController.shared
+        panel.trace = { message in
+            log.notice("panel: \(message, privacy: .public)")
+        }
+        let tools = LemelsonSelfTestTools(controller: self, menu: menu)
+        #if DEBUG
+        // Which presses the tracking loops read, and in which mode (NSMenu's, or a control's own).
+        LemelsonMenuEventFilter.probe = { event, mode, dequeue in
+            guard dequeue, event.type == .leftMouseDown || event.type == .leftMouseUp else { return }
+            let mode = mode.replacingOccurrences(of: "NSEventTrackingRunLoopMode", with: "tracking")
+            log.notice("probe \(String(describing: event.type), privacy: .public) mode=\(mode, privacy: .public) window=\(event.windowNumber) at \(NSStringFromPoint(event.locationInWindow), privacy: .public)")
+        }
+        #endif
+        let cacheRow: () -> NSMenuItem? = { [weak menu] in
+            menu?.items.first { LemelsonSelfTestTools.isCacheRow($0) }
+        }
+        let statusRow: () -> NSMenuItem? = { [weak menu] in
+            let keys = LemelsonDetailPanelState.shared.itemKeys
+            return menu?.items.first { item in
+                keys[ObjectIdentifier(item)]?.hasPrefix(Self.lemelsonStatusKeyPrefix) == true
+            } ?? menu?.items.first { $0.title == "Status Page" }
+        }
+        let hover: (String, @escaping () -> NSMenuItem?) -> [(TimeInterval, () -> Void)] = { name, find in
+            [
+                (0, {
+                    guard let item = find() else { return log.notice("tour: no \(name, privacy: .public) row on \(tools.page(), privacy: .public)") }
+                    tools.moveOver(item, label: name)
+                }),
+                (0.6, {
+                    tools.describeHover(name, item: find())
+                }),
+            ]
+        }
+        var plan: [(TimeInterval, () -> Void)] = []
+        func at(_ time: TimeInterval, _ steps: [(TimeInterval, () -> Void)]) {
+            plan += steps.map { (time + $0.0, $0.1) }
+        }
+        at(0.6, hover("cache", cacheRow))
+        at(1.6, [(0, { tools.describeFooter() })])
+        at(2.0, [(0, { tools.key(right: true, "right, to Spend") })])
+        at(2.9, [(0, { tools.clickSegment("Models", inRow: "lemelsonSpendSummary") })])
+        at(3.6, [(0, { tools.clickSegment("Accounts", inRow: "lemelsonSpendSummary") })])
+        at(4.3, [(0, { tools.clickSegment("90d", inRow: "lemelsonSpendSummary") })])
+        at(5.0, [(0, { tools.key(right: true, "right, to Value") })])
+        at(5.7, [(0, { tools.key(right: true, "right, to Classic") })])
+        at(6.5, hover("cache", cacheRow))
+        at(7.4, [(0, { tools.key(right: true, "right, to Antigravity") })])
+        at(8.6, hover("cache", cacheRow))
+        at(9.5, hover("Status Page", statusRow))
+        at(10.4, [(0, { tools.key(right: false, "left, to Classic") })])
+        at(11.2, hover("Status Page", statusRow))
+        at(12.0, [(0, { tools.moveOverPanelRow("Open Status Page") })])
+        at(12.6, [(0, { tools.key(right: false, "left, to Value") })])
+        at(13.1, [(0, { tools.key(right: false, "left, to Spend") })])
+        at(13.6, [(0, { tools.key(right: false, "left, to Limits") })])
+        at(14.2, [(0, { tools.key(right: false, "left, to Codex") })])
+        at(15.0, hover("Status Page", statusRow))
+        at(16.0, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
+        at(16.8, hover("Status Page", statusRow))
+        at(17.6, [(0, {
+            guard let item = statusRow() else { return }
+            tools.click(item, label: "Status Page")
+        })])
+        at(18.4, [(0, { [weak menu] in
+            log.notice("tour: end, menu open=\(menu.map { self.openMenus[ObjectIdentifier($0)] != nil } ?? false)")
+            #if DEBUG
+            LemelsonMenuEventFilter.probe = nil
+            #endif
+            panel.trace = nil
+            LemelsonPageTransition.shared.trace = nil
+            menu?.cancelTracking()
+        })])
+        return plan
+    }
+
+    /// `lemelsonSelfTestPeek -bool YES`: the opening line of the log says on which page and with which Spend
+    /// switches the menu opened; with `lemelsonSelfTestPeekClick` (a segment label, e.g. "Models") that segment
+    /// of the Spend row is clicked first when the menu opened on Spend. Then the menu closes.
+    func lemelsonPeekSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        let log = Self.lemelsonLog
+        let tools = LemelsonSelfTestTools(controller: self, menu: menu)
+        let click = UserDefaults.standard.string(forKey: "lemelsonSelfTestPeekClick")
+        return [
+            (0.8, {
+                log.notice("peek: page \(tools.page(), privacy: .public)")
+                if let click { tools.clickSegment(click, inRow: "lemelsonSpendSummary") }
+            }),
+            (1.6, { [weak menu] in
+                let selection = UsagePanelSelection.shared
+                log.notice("peek: end on \(tools.page(), privacy: .public) period=\(selection.spendPeriod.rawValue) breakdown=\(selection.spendBreakdown.rawValue, privacy: .public)")
+                menu?.cancelTracking()
+            }),
+        ]
+    }
+
     static func lemelsonViews(in root: NSView, where matches: (NSView) -> Bool) -> [NSView] {
         var found: [NSView] = []
         func visit(_ view: NSView) {
@@ -376,5 +482,165 @@ extension StatusItemController {
             let r = rhs.convert(rhs.bounds, to: nil).maxY
             return l > r
         }
+    }
+}
+
+/// Small actions the self-test plans share. Mouse events go to this app's own queue only.
+@MainActor
+struct LemelsonSelfTestTools {
+    weak var controller: StatusItemController?
+    weak var menu: NSMenu?
+
+    init(controller: StatusItemController, menu: NSMenu) {
+        self.controller = controller
+        self.menu = menu
+    }
+
+    private var log: Logger {
+        StatusItemController.lemelsonLog
+    }
+
+    /// The prompt cache row of a Claude or Antigravity page.
+    static func isCacheRow(_ item: NSMenuItem) -> Bool {
+        let id = item.representedObject as? String
+        return id == "lemelsonCache-claude" || id == UsageAntigravityPage.idPrefix + "cache"
+    }
+
+    func page() -> String {
+        self.controller?.lemelsonCurrentPageKey() ?? "?"
+    }
+
+    private var menuWindow: NSWindow? {
+        self.menu.flatMap { self.controller?.lemelsonMenuWindow(of: $0) }
+    }
+
+    func post(_ type: NSEvent.EventType, at screenPoint: NSPoint, in window: NSWindow?) {
+        let isPress = type != .mouseMoved
+        guard let event = NSEvent.mouseEvent(
+            with: type,
+            location: window.map { $0.convertPoint(fromScreen: screenPoint) } ?? screenPoint,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window?.windowNumber ?? 0,
+            context: nil,
+            eventNumber: 0,
+            clickCount: isPress ? 1 : 0,
+            pressure: type == .leftMouseDown ? 1 : 0)
+        else { return }
+        NSApp.postEvent(event, atStart: false)
+    }
+
+    func key(right: Bool, _ label: String) {
+        guard let controller = self.controller else { return }
+        let code: UInt16 = right ? 124 : 123
+        let character = String(UnicodeScalar(right ? 0xF703 : 0xF702)!)
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0, context: nil,
+            characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: code)
+        else { return }
+        let before = self.page()
+        _ = controller.lemelsonHandleTrackedEvent(event)
+        self.log.notice("key \(label, privacy: .public): \(before, privacy: .public) -> \(self.page(), privacy: .public)")
+    }
+
+    private func rect(of item: NSMenuItem) -> (NSRect, NSWindow)? {
+        guard let menu = self.menu else { return nil }
+        return self.controller?.lemelsonScreenRect(of: item, in: menu)
+    }
+
+    func moveOver(_ item: NSMenuItem, label: String) {
+        guard let (rect, window) = self.rect(of: item) else {
+            return self.log.notice("tour: \(label, privacy: .public) row has no frame")
+        }
+        self.post(.mouseMoved, at: NSPoint(x: rect.midX, y: rect.midY), in: window)
+        self.log.notice("tour: move over \(label, privacy: .public) on \(self.page(), privacy: .public)")
+    }
+
+    func click(_ item: NSMenuItem, label: String) {
+        guard let (rect, window) = self.rect(of: item) else { return }
+        let point = NSPoint(x: rect.midX, y: rect.midY)
+        self.post(.leftMouseDown, at: point, in: window)
+        self.post(.leftMouseUp, at: point, in: window)
+        self.log.notice("tour: click \(label, privacy: .public) on \(self.page(), privacy: .public)")
+    }
+
+    func describeHover(_ label: String, item: NSMenuItem?) {
+        guard let menu = self.menu, let controller = self.controller else { return }
+        let panel = UsageHoverPanelController.shared
+        let highlighted = controller.highlightedMenuItems[ObjectIdentifier(menu)] ?? menu.highlightedItem
+        let name = highlighted.map { $0.title.isEmpty ? ($0.representedObject as? String ?? "?") : $0.title } ?? "none"
+        let row = item.flatMap(self.rect(of:)).map { NSStringFromRect($0.0) } ?? "-"
+        self.log.notice("tour: \(label, privacy: .public) on \(self.page(), privacy: .public): highlighted=\(name, privacy: .public) panel=\(panel.visibleKey ?? "hidden", privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public) row=\(row, privacy: .public) menu=\(NSStringFromRect(self.menuWindow?.frame ?? .zero), privacy: .public)")
+    }
+
+    /// Frames of the rows around the cache row: it and the native rows next to it should line up.
+    func describeFooter() {
+        guard let menu = self.menu else { return }
+        guard let index = menu.items.firstIndex(where: Self.isCacheRow) else {
+            return self.log.notice("tour: no cache row")
+        }
+        for item in menu.items[max(0, index - 2)...min(menu.items.count - 1, index + 4)] {
+            let name = item.isSeparatorItem ? "—" : (item.title.isEmpty ? (item.representedObject as? String ?? "?") : item.title)
+            let frame = self.rect(of: item).map { NSStringFromRect($0.0) } ?? "-"
+            self.log.notice("tour: footer row \(name, privacy: .public) \(frame, privacy: .public)")
+        }
+    }
+
+    /// Presses the segment labelled `label` of a segmented control inside the row `rowID`.
+    func clickSegment(_ label: String, inRow rowID: String) {
+        guard let item = self.menu?.items.first(where: { ($0.representedObject as? String) == rowID }),
+              let view = item.view, let window = view.window
+        else { return self.log.notice("tour: no row \(rowID, privacy: .public) on \(self.page(), privacy: .public)") }
+        let controls = StatusItemController.lemelsonViews(in: view) { $0 is NSSegmentedControl }
+            .compactMap { $0 as? NSSegmentedControl }
+        guard let control = controls.first(where: { control in
+            (0..<control.segmentCount).contains { control.label(forSegment: $0) == label }
+        }), let segment = (0..<control.segmentCount).first(where: { control.label(forSegment: $0) == label })
+        else { return self.log.notice("tour: no segment \(label, privacy: .public) in \(rowID, privacy: .public)") }
+        // Segments are as wide as their labels: the point is placed by the labels' widths.
+        let font = control.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let widths = (0..<control.segmentCount).map { index in
+            (control.label(forSegment: index) ?? "").size(withAttributes: [.font: font]).width + 16
+        }
+        let total = widths.reduce(0, +)
+        let start = widths.prefix(segment).reduce(0, +)
+        let x = control.bounds.width * (start + widths[segment] / 2) / max(1, total)
+        let local = NSPoint(x: x, y: control.bounds.midY)
+        let point = window.convertPoint(toScreen: control.convert(local, to: nil))
+        let before = control.selectedSegment
+        let hit = window.contentView.flatMap { content in
+            content.hitTest(content.superview?.convert(window.convertPoint(fromScreen: point), from: nil)
+                ?? window.convertPoint(fromScreen: point))
+        }
+        let frame = control.convert(control.bounds, to: nil)
+        let chain = sequence(first: control as NSView, next: \.superview).prefix(6)
+            .map { String(describing: type(of: $0)).prefix(40) }.joined(separator: " < ")
+        self.log.notice("tour: \(label, privacy: .public) point \(NSStringFromPoint(window.convertPoint(fromScreen: point)), privacy: .public) hits \(hit.map { String(describing: type(of: $0)) } ?? "nothing", privacy: .public); control \(NSStringFromRect(frame), privacy: .public) hidden=\(control.isHiddenOrHasHiddenAncestor) in \(chain, privacy: .public)")
+        self.post(.leftMouseDown, at: point, in: window)
+        self.post(.leftMouseUp, at: point, in: window)
+        self.log.notice("tour: press \(label, privacy: .public) (segment \(segment) of \(controls.count) controls, selected \(before))")
+        let timer = Timer(timeInterval: 0.4, repeats: false) { _ in
+            MainActor.assumeIsolated {
+                let selection = UsagePanelSelection.shared
+                self.log.notice("tour: after \(label, privacy: .public): selected \(control.selectedSegment) period=\(selection.spendPeriod.rawValue) breakdown=\(selection.spendBreakdown.rawValue, privacy: .public) menu open=\(self.menu.map { self.controller?.openMenus[ObjectIdentifier($0)] != nil } ?? false)")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// Moves over a row of the panel by its title (a plain action row such as "Open Status Page").
+    func moveOverPanelRow(_ title: String) {
+        let panel = UsageHoverPanelController.shared
+        guard let content = panel.visibleContentView, let window = content.window else {
+            return self.log.notice("tour: no panel for \(title, privacy: .public)")
+        }
+        let rows = StatusItemController.lemelsonViews(in: content) {
+            String(describing: type(of: $0)).contains("ActionRow")
+        }
+        guard let row = rows.first else { return self.log.notice("tour: no action row in the panel") }
+        let rect = window.convertToScreen(row.convert(row.bounds, to: nil))
+        self.post(.mouseMoved, at: NSPoint(x: rect.midX, y: rect.midY), in: self.menuWindow)
+        self.log.notice("tour: move over panel row \(title, privacy: .public) at \(NSStringFromRect(rect), privacy: .public)")
     }
 }

@@ -71,7 +71,7 @@ extension StatusItemController {
             // while its submenu is open, and on the Overview tab the resulting structural parent
             // rebuild force-closes the hovered submenu. Each reopen then triggered another rescan,
             // producing an infinite open/close/rebuild flicker loop (#2652).
-            // lemelson: default mode, fresh summary and a limits refresh on every open.
+            // lemelson: start mode (pinned or last), fresh summary and a limits refresh on every open.
             self.lemelsonRootMenuWillOpen(menu)
             self.store.noteMenuOpened()
             self.agentSessions.refreshOnMenuOpen()
@@ -865,6 +865,8 @@ extension StatusItemController {
         }
         if switcherSelection != .overview {
             self.addUserPluginMenuCards(to: menu, width: context.menuWidth)
+            // lemelson: the prompt cache row of a Claude or Antigravity page, right above the action rows.
+            self.addLemelsonPendingCacheRow(to: menu, width: context.menuWidth)
         }
     }
 

@@ -135,7 +135,8 @@ public struct UsageAntigravityPage {
                         width: width,
                         sessionsLeft: block.sessionsLeft(for: kind, now: now),
                         title: UsageAntigravityBlock.rowTitle(kind),
-                        sources: .single),
+                        sources: .single,
+                        sessionsNote: block.sessionsMeasuringCaption(for: kind, now: now)),
                     separatorAfter: index == windows.count - 1,
                     detail: {
                         AnyView(Self.detail(kind: kind, window: window, block: block, now: clock(), width: detailWidth))
@@ -190,7 +191,8 @@ public struct UsageAntigravityPage {
             width: width,
             sessionsLeft: block.sessionsLeft(for: kind, now: now),
             title: UsageAntigravityBlock.detailTitle(kind),
-            sources: .single)
+            sources: .single,
+            sessionsNote: block.sessionsMeasuringSentence(for: kind, now: now))
     }
 
     /// What is exact and what is estimated, in the style of the Claude footnotes.

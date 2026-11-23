@@ -520,7 +520,10 @@ extension StatusItemController {
         guard self.openMenus[key] != nil else { return }
         let isHostedSubviewMenu = self.isHostedSubviewMenu(menu)
         guard isHostedSubviewMenu || !self.hasOpenHostedSubviewMenu() else { return }
-        guard !self.isNativeMenuItemHighlighted(in: menu) else {
+        // lemelson: a page turn does not wait for the pointer to leave a native row (it slid, timed out and
+        // snapped back); the row drops its highlight first.
+        guard !self.isNativeMenuItemHighlighted(in: menu) || self.lemelsonReleaseNativeHighlightForPageTurn(menu)
+        else {
             self.nativeHighlightDeferredMenuRebuilds[key] = NativeHighlightDeferredMenuRebuild(provider: provider)
             return
         }

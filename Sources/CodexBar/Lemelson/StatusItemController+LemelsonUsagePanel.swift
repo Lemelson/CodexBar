@@ -43,13 +43,34 @@ enum LemelsonPanelMode: String, CaseIterable {
     }
 }
 
+/// The prompt cache row of a page: a low row of its own above the menu's action rows, with a detail panel.
+struct LemelsonCacheRow {
+    let id: String
+    let view: AnyView
+    let detail: @MainActor () -> AnyView
+    let heightCacheScope: String
+    let heightFingerprint: String
+}
+
 @MainActor
 final class LemelsonPanelSession {
     static let shared = LemelsonPanelSession()
-    private static let defaultModeKey = "lemelsonPanelDefaultMode"
+    /// The pinned mode (the pin button in the mode row); unset = no pin.
+    private static let pinnedModeKey = "lemelsonPanelDefaultMode"
+    /// The mode shown last, kept across app restarts.
+    private static let lastModeKey = "lemelsonPanelLastMode"
 
-    /// The mode shown now. Every menu open returns to the default mode.
-    var mode: LemelsonPanelMode
+    /// The mode shown now. A menu opens in the pinned mode, or without a pin in the mode shown last.
+    var mode: LemelsonPanelMode {
+        didSet {
+            guard self.mode != oldValue else { return }
+            UserDefaults.standard.set(self.mode.rawValue, forKey: Self.lastModeKey)
+        }
+    }
+
+    /// Set while a page is built (`addLemelsonUsagePanel`), added by `addLemelsonPendingCacheRow` at the end
+    /// of the page's content, below the stock rows a mode keeps.
+    var pendingCacheRow: LemelsonCacheRow?
     var isRefreshing = false
     var lastRefreshStarted: Date?
     /// Version of the summary the menu was built from: a newer file rebuilds the menu on open.
@@ -70,17 +91,30 @@ final class LemelsonPanelSession {
     var isWarming = false
     var modeWarmTimer: Timer?
 
-    var defaultMode: LemelsonPanelMode {
+    /// The pinned mode: every menu opens in it. Nil: the menu opens in the mode shown last.
+    var pinnedMode: LemelsonPanelMode? {
         get {
-            UserDefaults.standard.string(forKey: Self.defaultModeKey)
-                .flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+            UserDefaults.standard.string(forKey: Self.pinnedModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
         }
-        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.defaultModeKey) }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue.rawValue, forKey: Self.pinnedModeKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.pinnedModeKey)
+            }
+        }
+    }
+
+    /// The mode a menu opens in.
+    var startMode: LemelsonPanelMode {
+        self.pinnedMode
+            ?? UserDefaults.standard.string(forKey: Self.lastModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
+            ?? .limits
     }
 
     private init() {
-        self.mode = UserDefaults.standard.string(forKey: Self.defaultModeKey)
-            .flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+        self.mode = .limits
+        self.mode = self.startMode
     }
 }
 
@@ -179,7 +213,8 @@ private final class LemelsonSubpanelMenu: NSMenu, NSMenuDelegate {
     }
 }
 
-/// The row of mode buttons and the pin that makes the current mode the default.
+/// The row of mode buttons and the pin: pinned, the menu always opens in that mode; unpinned, in the mode
+/// shown last.
 private final class LemelsonModeSwitcherView: NSView {
     private let modes = LemelsonPanelMode.allCases
     private var buttons: [NSButton] = []
@@ -191,7 +226,7 @@ private final class LemelsonModeSwitcherView: NSView {
 
     init(
         selected: LemelsonPanelMode,
-        defaultMode: LemelsonPanelMode,
+        pinnedMode: LemelsonPanelMode?,
         width: CGFloat,
         onSelect: @escaping (LemelsonPanelMode) -> Void,
         onPin: @escaping () -> Void)
@@ -199,10 +234,10 @@ private final class LemelsonModeSwitcherView: NSView {
         self.onSelect = onSelect
         self.onPin = onPin
         self.preferredSize = NSSize(width: width, height: 28)
-        let isDefault = selected == defaultMode
+        let isPinned = selected == pinnedMode
         let pinImage = NSImage(
-            systemSymbolName: isDefault ? "pin.fill" : "pin",
-            accessibilityDescription: "Default mode") ?? NSImage()
+            systemSymbolName: isPinned ? "pin.fill" : "pin",
+            accessibilityDescription: "Pin this mode") ?? NSImage()
         self.pinButton = NSButton(image: pinImage, target: nil, action: nil)
         super.init(frame: NSRect(origin: .zero, size: self.preferredSize))
 
@@ -232,10 +267,10 @@ private final class LemelsonModeSwitcherView: NSView {
 
         self.pinButton.isBordered = false
         self.pinButton.imageScaling = .scaleProportionallyDown
-        self.pinButton.contentTintColor = isDefault ? .controlAccentColor : .tertiaryLabelColor
-        self.pinButton.toolTip = isDefault
-            ? "CodexBar opens in this mode"
-            : "Open CodexBar in this mode by default"
+        self.pinButton.contentTintColor = isPinned ? .controlAccentColor : .tertiaryLabelColor
+        self.pinButton.toolTip = isPinned
+            ? "CodexBar always opens in this mode. Click to unpin"
+            : "Always open CodexBar in this mode"
         self.pinButton.translatesAutoresizingMaskIntoConstraints = false
 
         self.addSubview(row)
@@ -314,6 +349,7 @@ extension StatusItemController {
     func addLemelsonUsagePanel(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu) -> Bool {
         let session = LemelsonPanelSession.shared
         session.stockExtrasVisible = true
+        session.pendingCacheRow = nil
         // The Antigravity tab is one page of its own (`+LemelsonAntigravity.swift`).
         if context.currentProvider == .antigravity {
             return self.addLemelsonAntigravityPage(to: menu, context: context)
@@ -326,17 +362,19 @@ extension StatusItemController {
         session.renderedStateDate = UsagePanelStore.modificationDate()
 
         let width = context.menuWidth
+        // Every mode, Classic too, ends with the prompt cache row above the action rows.
+        session.pendingCacheRow = Self.lemelsonClaudeCacheRow(state, width: width)
         self.lemelsonExchangeWarmRows(width: width)
         let switcher = NSMenuItem()
         switcher.view = LemelsonModeSwitcherView(
             selected: session.mode,
-            defaultMode: session.defaultMode,
+            pinnedMode: session.pinnedMode,
             width: width,
             onSelect: { [weak self, weak captureMenu] mode in
                 self?.handleLemelsonModeSelection(mode, menu: captureMenu)
             },
             onPin: { [weak self, weak captureMenu] in
-                self?.handleLemelsonDefaultModePin(menu: captureMenu)
+                self?.handleLemelsonModePin(menu: captureMenu)
             })
         switcher.isEnabled = false
         menu.addItem(switcher)
@@ -498,6 +536,46 @@ extension StatusItemController {
         menu.addItem(.separator())
     }
 
+    // MARK: - Prompt cache row
+
+    static func lemelsonClaudeCacheRow(_ state: UsagePanelState, width: CGFloat) -> LemelsonCacheRow? {
+        guard let summary = UsageCacheSummary.claude(state) else { return nil }
+        let panelWidth = Self.lemelsonSubpanelWidth
+        return LemelsonCacheRow(
+            id: summary.rowID,
+            view: AnyView(UsageCacheRowView(summary: summary, width: width)),
+            detail: { AnyView(UsageCachePanelView(summary: summary, width: panelWidth)) },
+            heightCacheScope: "lemelson-cache-claude",
+            heightFingerprint: "\(Int(state.generatedAt))")
+    }
+
+    /// Hook at the end of `addPrimaryMenuContent`: the cache row of the page just built goes under everything
+    /// the page shows (the stock rows Spend and Classic keep included), right above the action rows.
+    func addLemelsonPendingCacheRow(to menu: NSMenu, width: CGFloat) {
+        let session = LemelsonPanelSession.shared
+        guard let row = session.pendingCacheRow else { return }
+        session.pendingCacheRow = nil
+        self.addLemelsonCacheRow(row, to: menu, width: width)
+    }
+
+    /// A low row of its own, between separators, like "Status Page" below it. Hovering opens its detail in
+    /// the panel, as a limit row does; the empty click handler keeps the row highlightable.
+    func addLemelsonCacheRow(_ row: LemelsonCacheRow, to menu: NSMenu, width: CGFloat) {
+        if let last = menu.items.last, !last.isSeparatorItem {
+            menu.addItem(.separator())
+        }
+        self.lemelsonRegisterDetail(.swiftUI(key: row.id, width: Self.lemelsonSubpanelWidth) { row.detail() })
+        menu.addItem(self.makeMenuCardItem(
+            // The row draws its own chevron, the native submenu one (larger than the limit rows').
+            LemelsonHighlightBridge(content: row.view),
+            id: row.id,
+            width: width,
+            heightCacheScope: row.heightCacheScope,
+            heightCacheFingerprint: row.heightFingerprint,
+            onClick: {}))
+        menu.addItem(.separator())
+    }
+
     private func makeLemelsonSubpanel(_ panel: @escaping () -> AnyView) -> NSMenu {
         let panelWidth = Self.lemelsonSubpanelWidth
         let submenu = LemelsonSubpanelMenu { [weak self] in
@@ -592,6 +670,9 @@ extension StatusItemController {
             case .value: self.addLemelsonValue(state, to: scratch, width: width, now: now)
             case .classic: break
             }
+            if let row = Self.lemelsonClaudeCacheRow(state, width: width) {
+                self.addLemelsonCacheRow(row, to: scratch, width: width)
+            }
             var rows: [String: NSView] = [:]
             for item in scratch.items {
                 guard let id = item.representedObject as? String, id.hasPrefix("lemelson"),
@@ -617,10 +698,10 @@ extension StatusItemController {
         menu.items.first { $0.view is LemelsonModeSwitcherView }
     }
 
-    private func handleLemelsonDefaultModePin(menu: NSMenu?) {
+    /// Pins the mode shown, or unpins it when it is the pinned one.
+    private func handleLemelsonModePin(menu: NSMenu?) {
         let session = LemelsonPanelSession.shared
-        guard session.defaultMode != session.mode else { return }
-        session.defaultMode = session.mode
+        session.pinnedMode = session.pinnedMode == session.mode ? nil : session.mode
         self.lemelsonRebuildAfterModeChange(menu: menu)
     }
 
@@ -648,7 +729,8 @@ extension StatusItemController {
 
     // MARK: - Menu open and limits refresh
 
-    /// The menu opens: return to the default mode, pick up a fresh summary and request the limits.
+    /// The menu opens: return to the start mode (the pinned one, else the one shown last), pick up a fresh
+    /// summary and request the limits. The provider tab is the author's: it stays where it was left.
     func lemelsonRootMenuWillOpen(_ menu: NSMenu) {
         // Left/right and sideways swipes page through the tabs and modes, with or without the panel.
         self.lemelsonInstallMenuEventFilter()
@@ -658,11 +740,11 @@ extension StatusItemController {
         // The detail panel serves every tab, with or without the Claude summary.
         self.lemelsonDetailRootMenuWillOpen(menu)
         guard FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path) else { return }
-        self.lemelsonRunSelfTestIfRequested(menu: menu)
         let session = LemelsonPanelSession.shared
-        var changed = false
-        if self.openMenus.isEmpty, session.mode != session.defaultMode {
-            session.mode = session.defaultMode
+        // A self-test opens on its own start page, wherever the menu was left.
+        var changed = self.lemelsonRunSelfTestIfRequested(menu: menu)
+        if !changed, self.openMenus.isEmpty, session.mode != session.startMode {
+            session.mode = session.startMode
             changed = true
         }
         let stateDate = UsagePanelStore.modificationDate()
@@ -778,9 +860,16 @@ extension StatusItemController {
     /// functions the event filter calls; nothing is posted to the system), then a limit row is hovered.
     /// Each step logs the page it reached:
     /// `log show --last 2m --info --predicate 'subsystem == "com.steipete.codexbar.lemelson"'`.
-    func lemelsonRunSelfTestIfRequested(menu: NSMenu) {
-        guard UserDefaults.standard.bool(forKey: "lemelsonSelfTest"), menu.supermenu == nil else { return }
+    /// The menu opens on the page named by `lemelsonSelfTestStart` (default `claude:limits`; `overview`,
+    /// `codex`, `antigravity`, `claude:spend`, …; `keep` opens where the menu was left). Returns true when a
+    /// self-test runs and its start page was set.
+    func lemelsonRunSelfTestIfRequested(menu: NSMenu) -> Bool {
+        guard UserDefaults.standard.bool(forKey: "lemelsonSelfTest"), menu.supermenu == nil else { return false }
         let log = Self.lemelsonLog
+        let forced = self.lemelsonForceSelfTestStart(
+            UserDefaults.standard.string(forKey: "lemelsonSelfTestStart") ?? "claude:limits")
+        let selection = UsagePanelSelection.shared
+        log.notice("self-test opens: start \(forced ? "forced" : "kept", privacy: .public) mode=\(LemelsonPanelSession.shared.mode.rawValue, privacy: .public) pinned=\(LemelsonPanelSession.shared.pinnedMode?.rawValue ?? "none", privacy: .public) period=\(selection.spendPeriod.rawValue) breakdown=\(selection.spendBreakdown.rawValue, privacy: .public)")
         LemelsonPageTransition.shared.trace = { message in
             log.notice("transition: \(message, privacy: .public)")
         }
@@ -859,47 +948,45 @@ extension StatusItemController {
         let left: UInt16 = 123
         let right: UInt16 = 124
         log.notice("self-test start on \(page(), privacy: .public)")
-        // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Gemini, Antigravity,
-        // opened on Claude Limits. The log names the page after each step, so another line still reads.
+        // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Antigravity, opened on
+        // Claude Limits. The log names the page after each step, so another line still reads.
         // On Antigravity (the last page) its two limit rows are pointed at: the detail panel appears
         // fused to the menu and morphs from one row to the other and back.
-        let back = 1.9
+        let back = 1.3
         let steps: [(TimeInterval, () -> Void)] = [
             (0.7, { key(right, "right, to Spend") }),
             (1.3, { key(right, "right, to Value") }),
             (1.9, { swipe(-6, 0.5, "content-left, to Classic") }),
-            (2.5, { key(right, "right, to Gemini") }),
-            (3.1, { key(right, "right, to Antigravity (last page)") }),
-            (3.7, { key(right, "right at the end, stays") }),
-            (4.1, { swipe(0.4, -9, "vertical, no page") }),
-            (4.4, { highlight(0) }),
-            (5.0, { highlight(1) }),
-            (5.6, { highlight(0) }),
-            (6.1, { highlight(nil) }),
-            (4.5 + back, { key(left, "left, to Gemini") }),
+            (2.5, { key(right, "right, to Antigravity (last page)") }),
+            (3.1, { key(right, "right at the end, stays") }),
+            (3.5, { swipe(0.4, -9, "vertical, no page") }),
+            (3.8, { highlight(0) }),
+            (4.4, { highlight(1) }),
+            (5.0, { highlight(0) }),
+            (5.5, { highlight(nil) }),
+            (4.7 + back, { key(left, "left, to Classic") }),
             // Two presses 50 ms apart: the second lands mid-slide.
-            (5.1 + back, { key(left, "left, to Classic") }),
-            (5.15 + back, { key(left, "left mid-slide, to Value") }),
-            (5.8 + back, { swipe(6, -0.5, "content-right, to Spend") }),
-            (6.5 + back, { key(left, "left, to Limits") }),
-            (7.1 + back, { key(left, "left, to Codex") }),
-            (7.7 + back, { key(left, "left, to Overview (first page)") }),
-            (8.3 + back, { key(left, "left at the start, stays") }),
-            (8.8 + back, { key(right, "right, to Codex") }),
+            (5.3 + back, { key(left, "left, to Value") }),
+            (5.35 + back, { key(left, "left mid-slide, to Spend") }),
+            (6.0 + back, { swipe(6, -0.5, "content-right, to Limits") }),
+            (6.6 + back, { key(left, "left, to Codex") }),
+            (7.2 + back, { key(left, "left, to Overview (first page)") }),
+            (7.8 + back, { key(left, "left at the start, stays") }),
+            (8.3 + back, { key(right, "right, to Codex") }),
             // Back again 80 ms later: the strip turns around from where it is.
-            (8.88 + back, { key(left, "left mid-slide, reversal, to Overview") }),
-            (9.3 + back, { key(right, "right, to Codex") }),
-            (9.6 + back, { key(right, "right into Claude Limits") }),
-            (10.1 + back, { highlight(0) }),
-            (10.5 + back, { highlight(2) }),
-            (11.6 + back, { [weak menu] in
+            (8.38 + back, { key(left, "left mid-slide, reversal, to Overview") }),
+            (8.8 + back, { key(right, "right, to Codex") }),
+            (9.1 + back, { key(right, "right into Claude Limits") }),
+            (9.6 + back, { highlight(0) }),
+            (10.0 + back, { highlight(2) }),
+            (11.1 + back, { [weak menu] in
                 LemelsonPageTransition.shared.trace = nil
                 menu?.cancelTracking()
             }),
         ]
         // With `lemelsonSmoothScroll` on: a slow vertical two-finger scroll and its momentum, one sample
         // per frame like a real gesture.
-        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.6 + back, { highlight(nil) })]
+        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.1 + back, { highlight(nil) })]
         let scrollStart = ProcessInfo.processInfo.systemUptime
         for index in 0...40 {
             let sample = index == 0
@@ -910,7 +997,7 @@ extension StatusItemController {
                     phase: index <= 20 ? .changed : .none,
                     isMomentum: index > 20,
                     time: scrollStart + Double(index) / 60)
-            scrollSteps.append((10.65 + back + Double(index) / 60, { [weak self, weak menu] in
+            scrollSteps.append((10.15 + back + Double(index) / 60, { [weak self, weak menu] in
                 guard let self, let menu else { return }
                 let scrollView = Self.attachedMenuScrollView(in: menu)
                 let before = scrollView?.contentView.bounds.origin.y ?? -1
@@ -930,7 +1017,11 @@ extension StatusItemController {
                 menu?.cancelTracking()
             }),
         ]
-        let plan = if UserDefaults.standard.bool(forKey: "lemelsonSelfTestAdopted") {
+        let plan = if UserDefaults.standard.bool(forKey: "lemelsonSelfTestTour") {
+            self.lemelsonTourSelfTestPlan(menu: menu)
+        } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestPeek") {
+            self.lemelsonPeekSelfTestPlan(menu: menu)
+        } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestAdopted") {
             self.lemelsonAdoptedSelfTestPlan(menu: menu)
         } else if Self.lemelsonDetailSelfTestRequested {
             self.lemelsonDetailSelfTestPlan(menu: menu)
@@ -945,5 +1036,29 @@ extension StatusItemController {
             }
             RunLoop.main.add(timer, forMode: .common)
         }
+        return forced
+    }
+
+    /// Puts the menu on a self-test's start page before it is built. "keep" leaves it where it was.
+    private func lemelsonForceSelfTestStart(_ key: String) -> Bool {
+        guard key != "keep" else { return false }
+        let session = LemelsonPanelSession.shared
+        if key == "overview" {
+            self.settings.mergedMenuLastSelectedWasOverview = true
+            return true
+        }
+        let parts = key.split(separator: ":").map(String.init)
+        guard let provider = parts.first.flatMap(UsageProvider.init(rawValue:)),
+              self.store.enabledFirstPartyProvidersForDisplay().contains(provider)
+        else {
+            Self.lemelsonLog.notice("self-test start \(key, privacy: .public): no such tab, kept")
+            return false
+        }
+        self.settings.mergedMenuLastSelectedWasOverview = false
+        self.selectedMenuProvider = provider.instanceID
+        if provider == .claude {
+            session.mode = parts.dropFirst().first.flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+        }
+        return true
     }
 }
