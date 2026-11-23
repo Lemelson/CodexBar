@@ -749,13 +749,14 @@ struct SettingsStoreTests {
         #expect(store.quotaWarningWindowEnabled(.weekly) == true)
         #expect(store.quotaWarningSoundEnabled == true)
         #expect(store.quotaWarningOnScreenAlertEnabled == false)
-        #expect(store.quotaWarningMarkersVisible == true)
+        // lemelson: the fork turns the threshold markers off by default.
+        #expect(store.quotaWarningMarkersVisible == false)
         #expect(defaults.array(forKey: "quotaWarningThresholds") as? [Int] == [50, 20])
         #expect(defaults.object(forKey: "quotaWarningSessionEnabled") as? Bool == true)
         #expect(defaults.object(forKey: "quotaWarningWeeklyEnabled") as? Bool == true)
         #expect(defaults.bool(forKey: "quotaWarningSoundEnabled") == true)
         #expect(defaults.object(forKey: "quotaWarningOnScreenAlertEnabled") as? Bool == false)
-        #expect(defaults.object(forKey: "quotaWarningMarkersVisible") as? Bool == true)
+        #expect(defaults.object(forKey: "quotaWarningMarkersVisible") as? Bool == false)
     }
 
     @Test

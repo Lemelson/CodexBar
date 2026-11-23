@@ -610,9 +610,10 @@ extension SettingsStore {
             quotaWarningWeeklyEnabled: quotaWarnings.weeklyEnabled,
             quotaWarningSoundEnabled: quotaWarnings.soundEnabled,
             quotaWarningOnScreenAlertEnabled: quotaWarnings.onScreenAlertEnabled,
+            // lemelson: the white threshold markers on the bars are off by default (Settings → Menu).
             quotaWarningMarkersVisible: Self.loadBoolDefault(
                 "quotaWarningMarkersVisible",
-                fallback: true,
+                fallback: false,
                 from: userDefaults),
             paceVisible: Self.loadBoolDefault("paceVisible", fallback: true, from: userDefaults),
             weeklyProgressWorkDays: userDefaults.object(forKey: "weeklyProgressWorkDays") as? Int,

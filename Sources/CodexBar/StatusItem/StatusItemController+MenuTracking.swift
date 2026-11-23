@@ -172,6 +172,8 @@ extension StatusItemController {
     }
 
     func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?, eventType: NSEvent.EventType?) {
+        // lemelson: the detail panel of the Claude limit rows follows the highlight.
+        self.lemelsonMenuWillHighlight(item, in: menu)
         let key = ObjectIdentifier(menu)
         let wasKeyboardHighlighted = self.keyboardHighlightedMenus.contains(key)
         switch eventType {

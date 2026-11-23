@@ -583,7 +583,8 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/Mac
 # Re-sign Sparkle and all nested components with the selected package identity.
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
 if [[ "$SIGNING_MODE" == "adhoc" ]]; then
-  CODESIGN_ID="-"
+  # lemelson: a stable local identity keeps Keychain "Always Allow" grants across rebuilds.
+  CODESIGN_ID="${CODEXBAR_LOCAL_IDENTITY:--}"
   CODESIGN_ARGS=(--force --sign "$CODESIGN_ID")
 elif [[ "$ALLOW_LLDB" == "1" ]]; then
   CODESIGN_ID="-"
@@ -685,7 +686,9 @@ verify_packaged_app_integrity "$APP"
 # Release gate for the 0.48.0 crash class (#2738): launch the packaged binary
 # with the build checkout unreadable so a `Bundle.module`-style compile-time
 # path dependency fails packaging here instead of on user machines.
-if [[ "$LOWER_CONF" == "release" ]]; then
+# lemelson: the sandboxed WebKit probe segfaults on this Mac (macOS 27.2); the local build script
+# launches the installed app for real instead.
+if [[ "$LOWER_CONF" == "release" && "${CODEXBAR_SKIP_LAUNCH_SMOKE:-0}" != "1" ]]; then
   "$ROOT/Scripts/verify_packaged_app_launch.sh" "$APP"
 fi
 echo "Created $APP"

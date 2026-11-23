@@ -71,6 +71,8 @@ extension StatusItemController {
             // while its submenu is open, and on the Overview tab the resulting structural parent
             // rebuild force-closes the hovered submenu. Each reopen then triggered another rescan,
             // producing an infinite open/close/rebuild flicker loop (#2652).
+            // lemelson: default mode, fresh summary and a limits refresh on every open.
+            self.lemelsonRootMenuWillOpen(menu)
             self.store.noteMenuOpened()
             self.agentSessions.refreshOnMenuOpen()
         }
@@ -177,6 +179,7 @@ extension StatusItemController {
         if self.openMenus.isEmpty {
             self.cancelMergedSwitcherSiblingWarmup()
             self.resetClaudeSwapAccountInspection()
+            self.lemelsonAllMenusDidClose()
         }
         self.resetCompactAccountMenuExpansionStateIfIdle()
     }
@@ -228,6 +231,8 @@ extension StatusItemController {
         // Re-warm sibling tab caches after every populate of the open merged menu so a
         // tab switch attaches pre-rendered rows; no-ops for closed or non-merged menus.
         defer { self.scheduleMergedSwitcherSiblingWarmup(for: menu) }
+        // lemelson: the page transition slides in the rows built here.
+        defer { self.lemelsonMenuDidPopulate(menu) }
 
         let enabledProviders = self.store.enabledFirstPartyProvidersForDisplay()
         let switcherProviderIDs = self.switcherProviderIDs(enabledFirstPartyProviders: enabledProviders)
@@ -688,8 +693,15 @@ extension StatusItemController {
     }
 
     private func addMenuCards(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu? = nil) -> Bool {
+        // lemelson: every build starts with the stock rows allowed; only the Claude panel turns them off.
+        LemelsonPanelSession.shared.stockExtrasVisible = true
         let fleetProjection = self.fleetAccountProjection(for: context.currentProvider)
         if self.addFleetFallback(fleetProjection, to: menu, context: context) {
+            return false
+        }
+
+        // lemelson: the Claude tab in its own modes (limits of every account, spend, subscription value).
+        if self.addLemelsonUsagePanel(to: menu, context: context, captureMenu: captureMenu ?? menu) {
             return false
         }
 
@@ -839,12 +851,15 @@ extension StatusItemController {
             }
         } else {
             let addedOpenAIWebItems = self.addMenuCards(to: menu, context: context, captureMenu: captureMenu)
-            self.addOpenAIWebItemsIfNeeded(
-                to: menu,
-                currentProvider: context.currentProvider,
-                context: context.openAIContext,
-                addedOpenAIWebItems: addedOpenAIWebItems)
-            self.addUsageHistoryClusterIfNeeded(to: menu, context: context)
+            // lemelson: in its own modes the panel decides whether the stock rows stay under it.
+            if LemelsonPanelSession.shared.stockExtrasVisible {
+                self.addOpenAIWebItemsIfNeeded(
+                    to: menu,
+                    currentProvider: context.currentProvider,
+                    context: context.openAIContext,
+                    addedOpenAIWebItems: addedOpenAIWebItems)
+                self.addUsageHistoryClusterIfNeeded(to: menu, context: context)
+            }
         }
         if switcherSelection != .overview {
             self.addUserPluginMenuCards(to: menu, width: context.menuWidth)

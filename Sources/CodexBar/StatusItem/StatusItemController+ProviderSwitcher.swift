@@ -302,6 +302,11 @@ extension StatusItemController {
             for: event,
             mapping: self.settings.providerSwitcherShortcuts)
         {
+            // lemelson: during menu tracking LemelsonMenuEventFilter handles previous/next when the
+            // event is dequeued; this peek misses most key presses, so leave the event in the queue.
+            if LemelsonMenuEventFilter.handler != nil, event.type == .keyDown {
+                return false
+            }
             self.navigateProviderSwitcher(direction, menu: menu)
             return true
         }

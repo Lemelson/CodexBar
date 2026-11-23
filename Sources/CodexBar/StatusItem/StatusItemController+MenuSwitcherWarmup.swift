@@ -26,6 +26,11 @@ extension StatusItemController {
                 guard let self else { return }
                 self.mergedSwitcherWarmupTimer = nil
                 guard let menu = self.openMenus[menuKey] else { return }
+                // lemelson: not while pages are being turned; the warm-up blocks the main thread.
+                guard !self.lemelsonPostponesWarmup() else {
+                    self.scheduleMergedSwitcherSiblingWarmup(for: menu)
+                    return
+                }
                 self.warmMergedSwitcherSiblingContent(in: menu)
             }
         }

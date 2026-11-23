@@ -290,6 +290,11 @@ public enum ClaudeProviderDescriptor {
     }
 
     private static func resolveStrategies(context: ProviderFetchContext) async -> [any ProviderFetchStrategy] {
+        // lemelson: while the Claude Switcher summary exists, limits come only from it, with no network
+        // requests: its collector follows the per-account VPN rule, CodexBar's own sources do not.
+        if let switcherState = ClaudeSwitcherStateFetchStrategy.makeIfAvailable() {
+            return [switcherState]
+        }
         // An explicitly selected account is the credential authority for this fetch. The global
         // source only controls ambient-account routing and must not redirect a selected account.
         if context.selectedTokenAccountID != nil {

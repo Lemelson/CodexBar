@@ -1,0 +1,869 @@
+import AppKit
+import CodexBarCore
+import LemelsonUsageKit
+import SwiftUI
+
+// Per-account Claude usage panel (a fork addition; upstream CodexBar does not have it).
+//
+// The data comes from the summary written by the Claude Switcher collector
+// (`~/Library/Application Support/ClaudeSwitcher/usage/state.json`). All layout lives in the
+// `LemelsonUsageKit` module; this file only inserts it into the menu. Entry points from CodexBar code:
+//   • `addLemelsonUsagePanel`: at the start of `addMenuCards`;
+//   • `lemelsonRootMenuWillOpen` / `lemelsonAllMenusDidClose`: in `menuWillOpen` / `menuDidClose`;
+//   • `LemelsonPanelSession.shared.stockExtrasVisible`: in `addPrimaryMenuContent`.
+// Keyboard and swipe paging and the page slide: `StatusItemController+LemelsonPaging.swift`.
+
+/// Modes of the Claude tab, switched by the row of buttons at the top of the menu.
+enum LemelsonPanelMode: String, CaseIterable {
+    /// Limits of every account, split into mine / not mine, with a pace mark.
+    case limits
+    /// My Claude Code spend on this Mac.
+    case spend
+    /// What the plan is worth at API prices and whether the limit changes.
+    case value
+    /// The stock CodexBar card, unchanged.
+    case classic
+
+    var title: String {
+        switch self {
+        case .limits: "Limits"
+        case .spend: "Spend"
+        case .value: "Value"
+        case .classic: "Classic"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .limits: "Limits of every account: your share, others, pace"
+        case .spend: "Your Claude Code spend on this Mac"
+        case .value: "What the plan is worth at API prices"
+        case .classic: "The original CodexBar view"
+        }
+    }
+}
+
+@MainActor
+final class LemelsonPanelSession {
+    static let shared = LemelsonPanelSession()
+    private static let defaultModeKey = "lemelsonPanelDefaultMode"
+
+    /// The mode shown now. Every menu open returns to the default mode.
+    var mode: LemelsonPanelMode
+    var isRefreshing = false
+    var lastRefreshStarted: Date?
+    /// Version of the summary the menu was built from: a newer file rebuilds the menu on open.
+    var renderedStateDate: Date?
+    var openSubpanels = 0
+    var rebuildPending = false
+    var storeRefreshPending = false
+    /// Whether the stock CodexBar rows (Cost, Usage history, Plan Usage) stay under the panel.
+    var stockExtrasVisible = true
+    /// The mode whose rows are in the menu now, and rendered rows of the other modes kept for an
+    /// instant switch (a fresh hosting view paints a frame late, which reads as a blink).
+    var renderedMode: LemelsonPanelMode?
+    var warmRows: [LemelsonPanelMode: [String: NSView]] = [:]
+    var warmWidth: CGFloat = 0
+    var isWarming = false
+    var modeWarmTimer: Timer?
+
+    var defaultMode: LemelsonPanelMode {
+        get {
+            UserDefaults.standard.string(forKey: Self.defaultModeKey)
+                .flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.defaultModeKey) }
+    }
+
+    private init() {
+        self.mode = UserDefaults.standard.string(forKey: Self.defaultModeKey)
+            .flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+    }
+}
+
+/// Runs the usage collector: it queries the limits (following the VPN rule) and rewrites the summary.
+private enum LemelsonCollectorRunner {
+    /// `Process` is not `Sendable`; it is only started here and terminated from the timeout below.
+    private final class Box: @unchecked Sendable {
+        let process = Process()
+    }
+
+    /// Returns when the collector exits, or after 45 seconds at most. No thread waits in the meantime.
+    static func run(python: String, tick: String) async {
+        let box = Box()
+        box.process.executableURL = URL(fileURLWithPath: python)
+        box.process.arguments = [tick, "--refresh"]
+        box.process.standardOutput = FileHandle.nullDevice
+        box.process.standardError = FileHandle.nullDevice
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            box.process.terminationHandler = { _ in continuation.resume() }
+            do {
+                try box.process.run()
+            } catch {
+                box.process.terminationHandler = nil
+                continuation.resume()
+                return
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 45) {
+                if box.process.isRunning {
+                    box.process.terminate()
+                }
+            }
+        }
+    }
+}
+
+/// Passes the menu row highlight on to the layout module.
+private struct LemelsonHighlightBridge<Content: View>: View {
+    let content: Content
+    /// Draws the chevron of a row whose detail panel is not a native submenu.
+    var showsChevron = false
+    @Environment(\.menuItemHighlighted) private var isHighlighted
+
+    var body: some View {
+        self.content
+            .environment(\.usageRowHighlighted, self.isHighlighted)
+            .overlay(alignment: .trailing) {
+                if self.showsChevron {
+                    Image(systemName: "chevron.forward")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(MenuHighlightStyle.secondary(self.isHighlighted))
+                        .padding(.trailing, 10)
+                }
+            }
+    }
+}
+
+/// The submenu panel is built only when it opens, so its charts are not drawn on every menu rebuild.
+private final class LemelsonSubpanelMenu: NSMenu, NSMenuDelegate {
+    private var build: (() -> NSView)?
+    var onClose: (() -> Void)?
+
+    init(build: @escaping () -> NSView) {
+        self.build = build
+        super.init(title: "")
+        self.autoenablesItems = false
+        self.delegate = self
+        let placeholder = NSMenuItem()
+        placeholder.isEnabled = true
+        self.addItem(placeholder)
+    }
+
+    @available(*, unavailable)
+    required init(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func menuNeedsUpdate(_: NSMenu) {
+        guard let build = self.build, let item = self.items.first else { return }
+        self.build = nil
+        item.view = build()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        StatusMenuAppearance.pin(menu)
+        LemelsonPanelSession.shared.openSubpanels += 1
+        LemelsonPagingState.shared.openSubpanelMenu = menu
+    }
+
+    func menuDidClose(_: NSMenu) {
+        let session = LemelsonPanelSession.shared
+        session.openSubpanels = max(0, session.openSubpanels - 1)
+        if LemelsonPagingState.shared.openSubpanelMenu === self {
+            LemelsonPagingState.shared.openSubpanelMenu = nil
+        }
+        self.onClose?()
+    }
+}
+
+/// The row of mode buttons and the pin that makes the current mode the default.
+private final class LemelsonModeSwitcherView: NSView {
+    private let modes = LemelsonPanelMode.allCases
+    private var buttons: [NSButton] = []
+    private let pinButton: NSButton
+    private let onSelect: (LemelsonPanelMode) -> Void
+    private let onPin: () -> Void
+    private let preferredSize: NSSize
+    private var pressed: NSButton?
+
+    init(
+        selected: LemelsonPanelMode,
+        defaultMode: LemelsonPanelMode,
+        width: CGFloat,
+        onSelect: @escaping (LemelsonPanelMode) -> Void,
+        onPin: @escaping () -> Void)
+    {
+        self.onSelect = onSelect
+        self.onPin = onPin
+        self.preferredSize = NSSize(width: width, height: 28)
+        let isDefault = selected == defaultMode
+        let pinImage = NSImage(
+            systemSymbolName: isDefault ? "pin.fill" : "pin",
+            accessibilityDescription: "Default mode") ?? NSImage()
+        self.pinButton = NSButton(image: pinImage, target: nil, action: nil)
+        super.init(frame: NSRect(origin: .zero, size: self.preferredSize))
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.distribution = .fillEqually
+        row.spacing = 4
+        row.translatesAutoresizingMaskIntoConstraints = false
+        for (index, mode) in self.modes.enumerated() {
+            let button = PaddedToggleButton(title: mode.title, target: nil, action: nil)
+            button.tag = index
+            button.toolTip = mode.help
+            button.isBordered = false
+            button.setButtonType(.toggle)
+            button.controlSize = .small
+            button.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            button.wantsLayer = true
+            button.layer?.cornerRadius = 6
+            let isSelected = mode == selected
+            button.state = isSelected ? .on : .off
+            button.layer?.backgroundColor = isSelected ? NSColor.controlAccentColor.cgColor : nil
+            button.contentTintColor = isSelected ? .white : .secondaryLabelColor
+            row.addArrangedSubview(button)
+            self.buttons.append(button)
+        }
+
+        self.pinButton.isBordered = false
+        self.pinButton.imageScaling = .scaleProportionallyDown
+        self.pinButton.contentTintColor = isDefault ? .controlAccentColor : .tertiaryLabelColor
+        self.pinButton.toolTip = isDefault
+            ? "CodexBar opens in this mode"
+            : "Open CodexBar in this mode by default"
+        self.pinButton.translatesAutoresizingMaskIntoConstraints = false
+
+        self.addSubview(row)
+        self.addSubview(self.pinButton)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: self.leadingAnchor, constant: 6),
+            row.trailingAnchor.constraint(equalTo: self.pinButton.leadingAnchor, constant: -2),
+            row.centerYAnchor.constraint(equalTo: self.centerYAnchor),
+            row.heightAnchor.constraint(equalToConstant: 26),
+            self.pinButton.trailingAnchor.constraint(equalTo: self.trailingAnchor, constant: -6),
+            self.pinButton.centerYAnchor.constraint(equalTo: self.centerYAnchor),
+            self.pinButton.widthAnchor.constraint(equalToConstant: 24),
+            self.pinButton.heightAnchor.constraint(equalToConstant: 24),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        nil
+    }
+
+    override var intrinsicContentSize: NSSize {
+        self.preferredSize
+    }
+
+    override var fittingSize: NSSize {
+        self.preferredSize
+    }
+
+    override func acceptsFirstMouse(for _: NSEvent?) -> Bool {
+        true
+    }
+
+    // Clicks are handled here rather than by the buttons: inside NSMenu that is more reliable (as in the account row).
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let descendant = super.hitTest(point)
+        if descendant != nil, descendant !== self {
+            self.toolTip = (descendant as? NSButton)?.toolTip
+            return self
+        }
+        self.toolTip = nil
+        return descendant
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        self.pressed = self.button(at: self.convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { self.pressed = nil }
+        guard let pressed = self.pressed,
+              self.button(at: self.convert(event.locationInWindow, from: nil)) === pressed
+        else { return }
+        if pressed === self.pinButton {
+            self.onPin()
+        } else if self.modes.indices.contains(pressed.tag) {
+            self.onSelect(self.modes[pressed.tag])
+        }
+    }
+
+    private func button(at point: NSPoint) -> NSButton? {
+        (self.buttons + [self.pinButton]).first { self.convert($0.bounds, from: $0).contains(point) }
+    }
+}
+
+extension StatusItemController {
+    private static let lemelsonSubpanelWidth: CGFloat = UsageHoverPanelController.panelWidth
+    static let lemelsonLimitRowPrefix = "lemelsonLimit-"
+    private static let lemelsonWarmableModes: [LemelsonPanelMode] = [.limits, .spend, .value]
+
+    // MARK: - Menu insertion
+
+    /// Draws the Claude tab in the selected mode. Returns `false` when there is no summary or the mode is
+    /// Classic: the menu is then built from the stock CodexBar cards.
+    func addLemelsonUsagePanel(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu) -> Bool {
+        let session = LemelsonPanelSession.shared
+        session.stockExtrasVisible = true
+        guard context.currentProvider == .claude,
+              self.menuCardRenderingEnabledForController,
+              let state = UsagePanelStore.load()
+        else { return false }
+        session.renderedStateDate = UsagePanelStore.modificationDate()
+
+        let width = context.menuWidth
+        self.lemelsonExchangeWarmRows(width: width)
+        let switcher = NSMenuItem()
+        switcher.view = LemelsonModeSwitcherView(
+            selected: session.mode,
+            defaultMode: session.defaultMode,
+            width: width,
+            onSelect: { [weak self, weak captureMenu] mode in
+                self?.handleLemelsonModeSelection(mode, menu: captureMenu)
+            },
+            onPin: { [weak self, weak captureMenu] in
+                self?.handleLemelsonDefaultModePin(menu: captureMenu)
+            })
+        switcher.isEnabled = false
+        menu.addItem(switcher)
+        menu.addItem(.separator())
+
+        let now = Date()
+        switch session.mode {
+        case .classic:
+            return false
+        case .limits:
+            self.addLemelsonLimits(state, to: menu, width: width, now: now)
+        case .spend:
+            self.addLemelsonSpend(state, to: menu, width: width, now: now)
+        case .value:
+            self.addLemelsonValue(state, to: menu, width: width, now: now)
+        }
+        // Spend keeps the stock "Cost" and "Usage history" rows below it: they break spend down by project and model.
+        session.stockExtrasVisible = session.mode == .spend
+        self.lemelsonScheduleModeWarmup()
+        return true
+    }
+
+    private func addLemelsonLimits(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {
+        let stamp = Int(state.generatedAt)
+        // Captions with the age of a reading change length, so heights are re-measured every ten minutes.
+        let ageBucket = Int(now.timeIntervalSince1970 / 600)
+        let panelWidth = Self.lemelsonSubpanelWidth
+        var details: [(key: String, build: () -> AnyView)] = []
+        for (index, account) in state.orderedAccounts.enumerated() {
+            menu.addItem(self.makeMenuCardItem(
+                UsageAccountHeaderView(account: account, now: now, width: width),
+                id: "lemelsonHeader-\(index)",
+                width: width,
+                heightCacheScope: "lemelson-header-\(account.uuid)",
+                heightCacheFingerprint: "\(stamp):\(ageBucket)"))
+            for (kind, window) in account.visibleWindows {
+                // The detail view is shown by the hover panel, not by a native submenu: it appears at
+                // once and morphs between rows. The empty click handler keeps the row highlightable.
+                let id = "\(Self.lemelsonLimitRowPrefix)\(index)-\(kind.rawValue)"
+                details.append((key: id, build: {
+                    AnyView(UsageLimitDetailPanelView(
+                        account: account,
+                        kind: kind,
+                        window: window,
+                        now: Date(),
+                        width: panelWidth,
+                        sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: Date())))
+                }))
+                menu.addItem(self.makeMenuCardItem(
+                    LemelsonHighlightBridge(
+                        content: UsageLimitRowView(
+                        kind: kind,
+                        window: window,
+                        now: now,
+                        width: width,
+                        sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: now)),
+                        showsChevron: true),
+                    id: id,
+                    width: width,
+                    heightCacheScope: "lemelson-limit-\(account.uuid)-\(kind.rawValue)",
+                    heightCacheFingerprint: "\(stamp):\(ageBucket)",
+                    onClick: {}))
+            }
+            menu.addItem(.separator())
+        }
+        if !LemelsonPanelSession.shared.isWarming {
+            UsageHoverPanelController.shared.setEntries(details)
+        }
+        self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: true)
+    }
+
+    private func addLemelsonSpend(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {
+        let stamp = Int(state.generatedAt)
+        let panelWidth = Self.lemelsonSubpanelWidth
+        menu.addItem(self.makeMenuCardItem(
+            UsageSpendSummaryView(state: state, now: now, width: width),
+            id: "lemelsonSpendSummary",
+            width: width,
+            heightCacheScope: "lemelson-spend-summary",
+            heightCacheFingerprint: "\(stamp)",
+            containsInteractiveControls: true))
+        menu.addItem(.separator())
+        for (index, account) in state.accounts.enumerated() {
+            let submenu = self.makeLemelsonSubpanel {
+                AnyView(UsageSpendAccountPanelView(state: state, account: account, now: Date(), width: panelWidth))
+            }
+            menu.addItem(self.makeMenuCardItem(
+                LemelsonHighlightBridge(
+                    content: UsageSpendAccountRowView(account: account, colorIndex: index, width: width)),
+                id: "lemelsonSpendAccount-\(index)",
+                width: width,
+                heightCacheScope: "lemelson-spend-account",
+                heightCacheFingerprint: "row",
+                submenu: submenu,
+                submenuIndicatorAlignment: .trailing,
+                submenuIndicatorTopPadding: 0))
+        }
+        menu.addItem(.separator())
+        self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
+    }
+
+    private func addLemelsonValue(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {
+        let stamp = Int(state.generatedAt)
+        menu.addItem(self.makeMenuCardItem(
+            UsageValueCardView(state: state, width: width, now: now),
+            id: "lemelsonValue",
+            width: width,
+            heightCacheScope: "lemelson-value",
+            heightCacheFingerprint: "\(stamp)",
+            containsInteractiveControls: true))
+        menu.addItem(.separator())
+        menu.addItem(self.makeMenuCardItem(
+            UsageDriftCardView(state: state, width: width),
+            id: "lemelsonDrift",
+            width: width,
+            heightCacheScope: "lemelson-drift",
+            heightCacheFingerprint: "\(stamp)",
+            containsInteractiveControls: true))
+        menu.addItem(.separator())
+        self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
+    }
+
+    private func addLemelsonFooter(
+        _ state: UsagePanelState,
+        to menu: NSMenu,
+        width: CGFloat,
+        now: Date,
+        showsLegend: Bool)
+    {
+        let refreshing = LemelsonPanelSession.shared.isRefreshing
+        menu.addItem(self.makeMenuCardItem(
+            UsageFooterView(state: state, now: now, width: width, refreshing: refreshing, showsLegend: showsLegend),
+            id: "lemelsonFooter",
+            width: width,
+            heightCacheScope: "lemelson-footer-\(showsLegend)",
+            heightCacheFingerprint: "\(Int(state.generatedAt)):\(refreshing)"))
+        menu.addItem(.separator())
+    }
+
+    private func makeLemelsonSubpanel(_ panel: @escaping () -> AnyView) -> NSMenu {
+        let panelWidth = Self.lemelsonSubpanelWidth
+        let submenu = LemelsonSubpanelMenu { [weak self] in
+            let hosting = MenuHostingView(rootView: panel())
+            let height = self?.hostedSubviewFittingHeight(for: hosting, width: panelWidth)
+                ?? hosting.fittingSize.height
+            hosting.applyMeasuredHeight(width: panelWidth, height: height)
+            return hosting
+        }
+        submenu.minimumWidth = panelWidth
+        submenu.onClose = { [weak self] in
+            guard let self, LemelsonPanelSession.shared.rebuildPending,
+                  LemelsonPanelSession.shared.openSubpanels == 0
+            else { return }
+            self.lemelsonRebuildOpenMenus()
+        }
+        return submenu
+    }
+
+    // MARK: - Hover panel
+
+    /// Called for every highlight change in a menu: shows the detail panel next to a limit row.
+    func lemelsonMenuWillHighlight(_ item: NSMenuItem?, in menu: NSMenu) {
+        guard menu.supermenu == nil else { return }
+        let panel = UsageHoverPanelController.shared
+        // The rows under the pointer are a moving copy while the page slides.
+        guard !LemelsonPageTransition.shared.isActive else {
+            panel.hide(animated: false)
+            return
+        }
+        guard let item, item.isEnabled,
+              let id = item.representedObject as? String, id.hasPrefix(Self.lemelsonLimitRowPrefix),
+              let view = item.view, let window = view.window
+        else {
+            panel.pointerLeftRows()
+            return
+        }
+        panel.show(
+            key: id,
+            rowRect: window.convertToScreen(view.convert(view.bounds, to: nil)),
+            menuFrame: window.frame,
+            screen: window.screen,
+            appearance: window.effectiveAppearance)
+    }
+
+    // MARK: - Instant mode switch
+
+    /// Runs inside a populate pass, after the outgoing rows were harvested for recycling: keeps the
+    /// rendered rows of the mode being left and hands back the rendered rows of the mode being shown.
+    private func lemelsonExchangeWarmRows(width: CGFloat) {
+        let session = LemelsonPanelSession.shared
+        guard !session.isWarming else { return }
+        if abs(session.warmWidth - width) > 0.5 {
+            session.warmRows.removeAll()
+            session.warmWidth = width
+        }
+        if let leaving = session.renderedMode, leaving != session.mode {
+            var stash: [String: NSView] = [:]
+            for (id, view) in self.menuCardViewRecyclePool where id.hasPrefix("lemelson") {
+                stash[id] = view
+            }
+            for id in stash.keys {
+                self.menuCardViewRecyclePool.removeValue(forKey: id)
+            }
+            if !stash.isEmpty {
+                session.warmRows[leaving] = stash
+            }
+        }
+        if let warm = session.warmRows.removeValue(forKey: session.mode) {
+            for (id, view) in warm where self.menuCardViewRecyclePool[id] == nil {
+                self.menuCardViewRecyclePool[id] = view
+            }
+        }
+        session.renderedMode = session.mode
+    }
+
+    /// Shortly after the menu opens, renders the rows of the modes that were not shown yet.
+    /// A common-modes timer: main-actor tasks do not run while the menu tracks the pointer.
+    private func lemelsonScheduleModeWarmup() {
+        let session = LemelsonPanelSession.shared
+        guard !session.isWarming, session.warmWidth > 0 else { return }
+        guard Self.lemelsonWarmableModes.contains(where: { $0 != session.mode && session.warmRows[$0] == nil })
+        else { return }
+        session.modeWarmTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.15, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                LemelsonPanelSession.shared.modeWarmTimer = nil
+                guard let self else { return }
+                guard !self.lemelsonPostponesWarmup() else {
+                    self.lemelsonScheduleModeWarmup()
+                    return
+                }
+                self.lemelsonWarmOtherModes()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        session.modeWarmTimer = timer
+    }
+
+    private func lemelsonWarmOtherModes() {
+        let session = LemelsonPanelSession.shared
+        guard !self.openMenus.isEmpty, self.menuCardRenderingEnabledForController,
+              let state = UsagePanelStore.load()
+        else { return }
+        let width = session.warmWidth
+        let now = Date()
+        session.isWarming = true
+        defer { session.isWarming = false }
+        for mode in Self.lemelsonWarmableModes where mode != session.mode && session.warmRows[mode] == nil {
+            let scratch = NSMenu()
+            scratch.autoenablesItems = false
+            switch mode {
+            case .limits: self.addLemelsonLimits(state, to: scratch, width: width, now: now)
+            case .spend: self.addLemelsonSpend(state, to: scratch, width: width, now: now)
+            case .value: self.addLemelsonValue(state, to: scratch, width: width, now: now)
+            case .classic: break
+            }
+            var rows: [String: NSView] = [:]
+            for item in scratch.items {
+                guard let id = item.representedObject as? String, id.hasPrefix("lemelson"),
+                      let view = item.view
+                else { continue }
+                // Laying out now makes the first attach draw in the same frame as the switch.
+                view.layoutSubtreeIfNeeded()
+                item.view = nil
+                rows[id] = view
+            }
+            scratch.removeAllItems()
+            session.warmRows[mode] = rows
+        }
+    }
+
+    // MARK: - Modes
+
+    func handleLemelsonModeSelection(_ mode: LemelsonPanelMode, menu: NSMenu?) {
+        self.lemelsonSelectMode(mode, menu: menu)
+    }
+
+    func lemelsonModeRowItem(in menu: NSMenu) -> NSMenuItem? {
+        menu.items.first { $0.view is LemelsonModeSwitcherView }
+    }
+
+    private func handleLemelsonDefaultModePin(menu: NSMenu?) {
+        let session = LemelsonPanelSession.shared
+        guard session.defaultMode != session.mode else { return }
+        session.defaultMode = session.mode
+        self.lemelsonRebuildAfterModeChange(menu: menu)
+    }
+
+    func lemelsonRebuildAfterModeChange(menu: NSMenu?) {
+        self.advanceMenuInteraction(for: menu)
+        // Only the Claude tab depends on the mode, so the rendered rows of the other tabs are kept.
+        // Dropping them made the sibling warm-up render every tab again after each mode switch:
+        // 0.2–0.3 s of main-thread work that delayed the end of the slide and the next key press.
+        self.preservingMergedSwitcherContentCachesDuringInvalidation {
+            self.invalidateMenus()
+        }
+        for key in Array(self.mergedSwitcherContentCaches.keys) {
+            let stale = self.mergedSwitcherContentCaches[key]?.keys.filter { selection in
+                if case let .provider(id) = selection { return id.firstPartyProvider == .claude }
+                return false
+            } ?? []
+            for selection in stale {
+                self.mergedSwitcherContentCaches[key]?.removeValue(forKey: selection)
+            }
+        }
+        if let menu {
+            self.deferSwitcherMenuRebuildIfStillVisible(menu, provider: .claude)
+        }
+    }
+
+    // MARK: - Menu open and limits refresh
+
+    /// The menu opens: return to the default mode, pick up a fresh summary and request the limits.
+    func lemelsonRootMenuWillOpen(_ menu: NSMenu) {
+        // Left/right and sideways swipes page through the tabs and modes, with or without the panel.
+        self.lemelsonInstallMenuEventFilter()
+        LemelsonPagingState.shared.swipe.reset()
+        LemelsonPagingState.shared.smoothScroll = UserDefaults.standard.bool(forKey: "lemelsonSmoothScroll")
+        guard FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path) else { return }
+        self.lemelsonRunSelfTestIfRequested(menu: menu)
+        let session = LemelsonPanelSession.shared
+        UsageHoverPanelController.shared.menuDidOpen()
+        var changed = false
+        if self.openMenus.isEmpty, session.mode != session.defaultMode {
+            session.mode = session.defaultMode
+            changed = true
+        }
+        if UsagePanelStore.modificationDate() != session.renderedStateDate {
+            changed = true
+        }
+        if self.lemelsonStartRefreshIfDue() {
+            changed = true
+        }
+        if changed {
+            self.invalidateMenus()
+        }
+        self.lemelsonScheduleModeWarmup()
+    }
+
+    func lemelsonAllMenusDidClose() {
+        let session = LemelsonPanelSession.shared
+        LemelsonPageTransition.shared.menuDidClose()
+        UsageHoverPanelController.shared.menuDidClose()
+        session.modeWarmTimer?.invalidate()
+        session.modeWarmTimer = nil
+        session.openSubpanels = 0
+        session.rebuildPending = false
+        guard session.storeRefreshPending else { return }
+        session.storeRefreshPending = false
+        self.lemelsonRefreshStore()
+    }
+
+    /// Starts the collector unless it ran in the last 20 seconds. The collector itself queries an account
+    /// at most once every 45 seconds and follows the VPN rule.
+    private func lemelsonStartRefreshIfDue() -> Bool {
+        let session = LemelsonPanelSession.shared
+        guard !session.isRefreshing else { return false }
+        if let last = session.lastRefreshStarted, Date().timeIntervalSince(last) < 20 {
+            return false
+        }
+        guard let collector = UsagePanelStore.load()?.collector,
+              collector.tick.hasSuffix("/usage/tick.py"),
+              FileManager.default.fileExists(atPath: collector.tick),
+              FileManager.default.isExecutableFile(atPath: collector.python)
+        else { return false }
+        session.isRefreshing = true
+        session.lastRefreshStarted = Date()
+        let python = collector.python
+        let tick = collector.tick
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await LemelsonCollectorRunner.run(python: python, tick: tick)
+            await self?.lemelsonRefreshDidFinish()
+        }
+        return true
+    }
+
+    private func lemelsonRefreshDidFinish() {
+        let session = LemelsonPanelSession.shared
+        session.isRefreshing = false
+        if self.openMenus.isEmpty {
+            self.invalidateMenus()
+            self.lemelsonRefreshStore()
+        } else {
+            // The menu bar icon updates after the menu closes: otherwise CodexBar's data refresh would
+            // rebuild the open menu once more and close the panel under the pointer.
+            session.storeRefreshPending = true
+            self.lemelsonRebuildOpenMenus()
+        }
+    }
+
+    private func lemelsonRefreshStore() {
+        Task { [weak self] in
+            guard let self else { return }
+            await self.store.refreshClaudeSwapAccounts()
+            await self.store.refreshProvider(.claude, coalesceIfRefreshing: true)
+        }
+    }
+
+    private func lemelsonRebuildOpenMenus() {
+        let session = LemelsonPanelSession.shared
+        self.invalidateMenus()
+        if session.openSubpanels > 0 {
+            session.rebuildPending = true
+            return
+        }
+        session.rebuildPending = false
+        for menu in self.openMenus.values where menu.supermenu == nil {
+            self.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: .claude)
+        }
+    }
+}
+
+extension StatusItemController {
+    /// `defaults write com.steipete.codexbar lemelsonSelfTest -bool YES` (`….debug` for the debug build)
+    /// makes the menu drive itself
+    /// after it opens, without any pointer or keyboard input, and then close: arrow keys and swipes walk
+    /// the line of pages (they are built as NSEvent objects or scroll samples and handed to the same
+    /// functions the event filter calls; nothing is posted to the system), then a limit row is hovered.
+    /// Each step logs the page it reached:
+    /// `log show --last 2m --info --predicate 'subsystem == "com.steipete.codexbar.lemelson"'`.
+    func lemelsonRunSelfTestIfRequested(menu: NSMenu) {
+        guard UserDefaults.standard.bool(forKey: "lemelsonSelfTest"), menu.supermenu == nil else { return }
+        let log = Self.lemelsonLog
+        LemelsonPageTransition.shared.trace = { message in
+            log.notice("transition: \(message, privacy: .public)")
+        }
+        let page: () -> String = { [weak self] in
+            self?.lemelsonCurrentPageKey() ?? "?"
+        }
+        let key: (UInt16, String) -> Void = { [weak self, weak menu] code, label in
+            guard let self, let menu else { return }
+            let character = String(UnicodeScalar(code == 123 ? 0xF702 : 0xF703)!)
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [.numericPad, .function],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: 0,
+                context: nil,
+                characters: character,
+                charactersIgnoringModifiers: character,
+                isARepeat: false,
+                keyCode: code)
+            else { return }
+            let before = page()
+            let swallowed = self.lemelsonHandleTrackedEvent(event)
+            log.notice("key \(label, privacy: .public): \(before, privacy: .public) -> \(page(), privacy: .public) swallowed=\(swallowed)")
+        }
+        // A two-finger flick: began, travel, ended, then a long momentum tail.
+        let swipe: (CGFloat, CGFloat, String) -> Void = { [weak self, weak menu] stepX, stepY, label in
+            guard let self, let menu else { return }
+            let before = page()
+            var time = ProcessInfo.processInfo.systemUptime
+            var samples = [LemelsonScrollSample(dx: 0, dy: 0, phase: .began, time: time)]
+            for _ in 0..<8 {
+                time += 0.008
+                samples.append(LemelsonScrollSample(dx: stepX, dy: stepY, phase: .changed, time: time))
+            }
+            samples.append(LemelsonScrollSample(dx: 0, dy: 0, phase: .ended, time: time + 0.008))
+            for _ in 0..<20 {
+                time += 0.016
+                samples.append(LemelsonScrollSample(
+                    dx: stepX * 2, dy: stepY * 2, phase: .none, isMomentum: true, time: time))
+            }
+            let claimed = samples.map { self.lemelsonHandleScrollSample($0, menu: menu) }
+            let count = claimed.filter(\.self).count
+            log.notice("swipe \(label, privacy: .public): \(before, privacy: .public) -> \(page(), privacy: .public) claimed \(count)/\(samples.count)")
+        }
+        let rows: () -> [NSMenuItem] = { [weak menu] in
+            (menu?.items ?? []).filter {
+                ($0.representedObject as? String)?.hasPrefix(Self.lemelsonLimitRowPrefix) == true
+            }
+        }
+        let highlight: (Int?) -> Void = { [weak self, weak menu] index in
+            guard let self, let menu else { return }
+            let all = rows()
+            let item = index.flatMap { all.indices.contains($0) ? all[$0] : nil }
+            self.menu(menu, willHighlight: item, eventType: .mouseMoved)
+            log.notice("highlight \(index ?? -1) of \(all.count) limit rows")
+        }
+        let left: UInt16 = 123
+        let right: UInt16 = 124
+        log.notice("self-test start on \(page(), privacy: .public)")
+        let steps: [(TimeInterval, () -> Void)] = [
+            (0.7, { key(right, "right") }),
+            (1.3, { key(right, "right") }),
+            (1.9, { swipe(-6, 0.5, "content-left") }),
+            (2.5, { key(right, "right at the end") }),
+            (2.9, { swipe(0.4, -9, "vertical") }),
+            (3.3, { key(left, "left") }),
+            // Two presses 50 ms apart: the second lands mid-slide.
+            (3.9, { key(left, "left") }),
+            (3.95, { key(left, "left mid-slide") }),
+            (4.6, { swipe(6, -0.5, "content-right") }),
+            (5.3, { key(left, "left") }),
+            (5.9, { key(left, "left at the start") }),
+            (6.4, { key(right, "right") }),
+            // Back again 80 ms later: the strip turns around from where it is.
+            (6.48, { key(left, "left mid-slide, reversal") }),
+            (6.9, { key(right, "right") }),
+            (7.2, { key(right, "right into Claude") }),
+            (7.7, { highlight(0) }),
+            (8.1, { highlight(2) }),
+            (9.2, { [weak menu] in
+                LemelsonPageTransition.shared.trace = nil
+                menu?.cancelTracking()
+            }),
+        ]
+        // With `lemelsonSmoothScroll` on: a slow vertical two-finger scroll and its momentum, one sample
+        // per frame like a real gesture.
+        var scrollSteps: [(TimeInterval, () -> Void)] = [(8.2, { highlight(nil) })]
+        let scrollStart = ProcessInfo.processInfo.systemUptime
+        for index in 0...40 {
+            let sample = index == 0
+                ? LemelsonScrollSample(dx: 0, dy: 0, phase: .began, time: scrollStart)
+                : LemelsonScrollSample(
+                    dx: 0.2,
+                    dy: -3,
+                    phase: index <= 20 ? .changed : .none,
+                    isMomentum: index > 20,
+                    time: scrollStart + Double(index) / 60)
+            scrollSteps.append((8.25 + Double(index) / 60, { [weak self, weak menu] in
+                guard let self, let menu else { return }
+                let scrollView = Self.attachedMenuScrollView(in: menu)
+                let before = scrollView?.contentView.bounds.origin.y ?? -1
+                let claimed = self.lemelsonHandleScrollSample(sample, menu: menu)
+                if index == 0 || index == 40 {
+                    log.notice("smooth scroll sample \(index) claimed=\(claimed) offset \(before)")
+                }
+            }))
+        }
+        for (delay, action) in steps + scrollSteps {
+            let timer = Timer(timeInterval: delay, repeats: false) { _ in
+                MainActor.assumeIsolated(action)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+}

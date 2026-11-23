@@ -38,6 +38,8 @@ let package = Package(
             .executable(name: "CodexBarClaudeWatchdog", targets: ["CodexBarClaudeWatchdog"]),
             .executable(name: "CodexBarWidget", targets: ["CodexBarWidget"]),
             .executable(name: "CodexBarClaudeWebProbe", targets: ["CodexBarClaudeWebProbe"]),
+            // lemelson: renders the accounts panel to a PNG to check the layout.
+            .executable(name: "LemelsonPanelPreview", targets: ["LemelsonPanelPreview"]),
         ])
         #endif
 
@@ -76,6 +78,8 @@ let package = Package(
                 name: "CodexBarCore",
                 dependencies: [
                     "CQuickJS",
+                    // lemelson: date comparison for the macOS 27.2 beta, see Sources/LemelsonCompat.
+                    .target(name: "LemelsonCompat", condition: .when(platforms: [.macOS])),
                     .target(name: "CSQLite3", condition: .when(platforms: [.linux])),
                     .product(name: "Crypto", package: "swift-crypto"),
                     .product(name: "Logging", package: "swift-log"),
@@ -179,8 +183,20 @@ let package = Package(
                 ]),
         ]
 
+        // lemelson: declared on every platform so that CodexBarCore can name it; the file is empty off macOS.
+        targets.append(.target(name: "LemelsonCompat", path: "Sources/LemelsonCompat"))
+
         #if os(macOS)
         targets.append(contentsOf: [
+            // lemelson: the per-account Claude panel (data from the Claude Switcher summary).
+            .target(
+                name: "LemelsonUsageKit",
+                dependencies: ["LemelsonCompat"],
+                path: "Sources/LemelsonUsageKit"),
+            .executableTarget(
+                name: "LemelsonPanelPreview",
+                dependencies: ["LemelsonUsageKit"],
+                path: "Sources/LemelsonPanelPreview"),
             .executableTarget(
                 name: "CodexBarClaudeWatchdog",
                 dependencies: [],
@@ -196,6 +212,7 @@ let package = Package(
                     .product(name: "Vortex", package: "Vortex"),
                     "AdaptiveRefreshCore",
                     "CodexBarCore",
+                    "LemelsonUsageKit",
                 ],
                 path: "Sources/CodexBar",
                 resources: [
