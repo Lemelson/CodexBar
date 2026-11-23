@@ -150,10 +150,7 @@ struct UsageCachePicture: View {
         let reused = self.span.reusedPct
         let paid = max(0, 100 - reused)
         VStack(alignment: .leading, spacing: 6) {
-            UsageSplitBar(
-                parts: [(reused, UsageCacheColors.reused), (paid, UsageCacheColors.paidInFull)],
-                scale: 100,
-                height: 12)
+            UsageCacheBar(reusedPct: reused, height: 12)
             HStack(alignment: .top) {
                 self.legend(
                     color: UsageCacheColors.reused,
@@ -201,6 +198,46 @@ struct UsageCachePicture: View {
     }
 }
 
+/// Reused from the left, paid in full at the right end. The paid part is usually a few percent: drawn to
+/// scale it would sit inside the rounded end of the bar and be clipped to a hairline, so it is always at
+/// least as long as that rounded end plus a little.
+struct UsageCacheBar: View {
+    let reusedPct: Double
+    let height: CGFloat
+
+    /// The paid part as drawn, out of `width`: to scale, or the visible minimum when there is some.
+    static func paidWidth(reusedPct: Double, width: CGFloat, height: CGFloat) -> CGFloat {
+        let paid = max(0, min(100, 100 - reusedPct))
+        guard paid > 0, width > 0 else { return 0 }
+        let scaled = width * CGFloat(paid / 100)
+        return min(width, max(scaled, height / 2 + 3))
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            let paid = Self.paidWidth(reusedPct: self.reusedPct, width: width, height: self.height)
+            // A hairline of the track between the two parts, as on the other split bars.
+            let gap: CGFloat = paid > 0 && paid < width ? 1 : 0
+            HStack(spacing: gap) {
+                if paid < width {
+                    Rectangle()
+                        .fill(UsageCacheColors.reused)
+                        .frame(width: max(0, width - paid - gap))
+                }
+                if paid > 0 {
+                    Rectangle()
+                        .fill(UsageCacheColors.paidInFull)
+                        .frame(width: paid)
+                }
+            }
+        }
+        .frame(height: self.height)
+        .background(UsagePalette.track)
+        .clipShape(Capsule())
+    }
+}
+
 /// "7 days   ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬   94%   saved $927".
 struct UsageCacheLine: View {
     let label: String
@@ -215,11 +252,7 @@ struct UsageCacheLine: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
                 .frame(width: 76, alignment: .leading)
-            UsageSplitBar(
-                parts: [(self.reusedPct, UsageCacheColors.reused),
-                        (max(0, 100 - self.reusedPct), UsageCacheColors.paidInFull)],
-                scale: 100,
-                height: 6)
+            UsageCacheBar(reusedPct: self.reusedPct, height: 6)
             Text(UsageFormat.percent(self.reusedPct))
                 .font(.system(size: 11, weight: .semibold))
                 .monospacedDigit()
