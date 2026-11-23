@@ -210,7 +210,7 @@ public enum UsageSpendBreakdown: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// What one point of the Value page's limit chart ("Is the … limit changing?") stands for.
+/// What one point of the Value page's limit chart ("Is the limit changing?") stands for.
 public enum UsageDriftPeriod: String, CaseIterable, Identifiable, Sendable {
     case month
     case week

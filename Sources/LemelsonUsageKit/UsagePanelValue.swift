@@ -37,7 +37,9 @@ public struct UsageValueCardView: View {
     public var body: some View {
         let scale = max(1, self.state.accounts.compactMap { self.got($0) }.max() ?? 1)
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            // Centered like the Spend and Antigravity headers: the segmented control has no text baseline of
+            // its own, and on the baseline the row was measured taller on its first build after launch.
+            HStack(alignment: .center) {
                 Text("What the plan is worth")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 8)
@@ -332,21 +334,25 @@ public struct UsageDriftCardView: View {
     public var body: some View {
         let points = self.state.accounts.flatMap { self.points(for: $0) }
         VStack(alignment: .leading, spacing: 9) {
-            Text(self.period == .month ? "Is the monthly limit changing?" : "Is the weekly limit changing?")
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-            HStack(spacing: 10) {
+            // In the menu the unit switch needs about 185 pt: next to Month | Week it ran over the card's
+            // edge and the two switches read as one. The period switch goes on the title line, as on the
+            // plan card above, and the units get a line of their own.
+            HStack(alignment: .center) {
+                Text("Is the limit changing?")
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
                 UsageSegmentedControl(
                     options: Array(UsageDriftPeriod.allCases),
                     title: \.title,
                     selection: self.$selection.driftPeriod)
                     .fixedSize()
-                UsageSegmentedControl(
-                    options: Array(UsageDriftUnit.allCases),
-                    title: \.title,
-                    selection: self.$selection.driftUnit,
-                    fillWidth: true)
             }
+            UsageSegmentedControl(
+                options: Array(UsageDriftUnit.allCases),
+                title: \.title,
+                selection: self.$selection.driftUnit,
+                fillWidth: true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(self.periodCaption)
                     .frame(height: 27, alignment: .topLeading)

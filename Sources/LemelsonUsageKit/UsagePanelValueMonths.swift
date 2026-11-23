@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - Weeks of the limit chart turned into calendar months
 
-/// One calendar month of one account on the Month chart of "Is the monthly limit changing?".
+/// One calendar month of one account on the Month chart of "Is the limit changing?".
 ///
 /// Built only from the week values the Week chart draws, so the two positions cannot disagree:
 /// - Every measured week covers the seven days before its end, cut at the summary's time (the days of the
