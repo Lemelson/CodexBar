@@ -271,18 +271,13 @@ struct UsageAntigravitySpendHeader: View {
                 }
                 Spacer(minLength: 6)
                 if self.spend.offered.count > 1 {
-                    Picker("Period", selection: Binding(
-                        get: { self.spend.effective(self.selection.spendPeriod) },
-                        set: { self.selection.spendPeriod = $0 }))
-                    {
-                        ForEach(self.spend.offered) { period in
-                            Text(period.short).tag(period)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .fixedSize()
+                    UsageSegmentedControl(
+                        options: self.spend.offered,
+                        title: \.short,
+                        selection: Binding(
+                            get: { self.spend.effective(self.selection.spendPeriod) },
+                            set: { self.selection.spendPeriod = $0 }))
+                        .fixedSize()
                 }
             }
             HStack(alignment: .top, spacing: 8) {

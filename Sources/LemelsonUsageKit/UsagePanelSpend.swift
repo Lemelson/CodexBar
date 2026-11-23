@@ -43,15 +43,11 @@ struct UsageSpendSummaryHeader: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(.secondary)
                 Spacer(minLength: 6)
-                Picker("Period", selection: self.$selection.spendPeriod) {
-                    ForEach(UsageSpendPeriod.allCases) { period in
-                        Text(period.short).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .fixedSize()
+                UsageSegmentedControl(
+                    options: Array(UsageSpendPeriod.allCases),
+                    title: \.short,
+                    selection: self.$selection.spendPeriod)
+                    .fixedSize()
             }
             HStack(alignment: .top, spacing: 8) {
                 UsageSpendTile(title: "Today", use: self.spend.today.total)
@@ -443,14 +439,13 @@ public struct UsageSpendAccountPanelView: View {
         let accounts = self.state.orderedAccounts
         VStack(alignment: .leading, spacing: 10) {
             if accounts.count > 1 {
-                Picker("Account", selection: self.$selected) {
-                    ForEach(accounts) { account in
-                        Text(Self.tabTitle(account)).tag(account.id)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
+                UsageSegmentedControl(
+                    options: accounts.map(\.id),
+                    title: { id in
+                        accounts.first(where: { $0.id == id }).map(Self.tabTitle) ?? ""
+                    },
+                    selection: self.$selected,
+                    fillWidth: true)
             }
             // All accounts are stacked on top of each other and only one is visible: the panel height does not jump when switching.
             ZStack(alignment: .topLeading) {

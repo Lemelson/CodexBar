@@ -44,15 +44,11 @@ public struct UsageValueCardView: View {
                 Text("What the plan is worth")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 8)
-                Picker("Period", selection: self.$period) {
-                    ForEach(Period.allCases) { period in
-                        Text(period.rawValue).tag(period)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .fixedSize()
+                UsageSegmentedControl(
+                    options: Array(Period.allCases),
+                    title: \.rawValue,
+                    selection: self.$period)
+                    .fixedSize()
             }
             UsageNote(text: "The same usage bought through the API at list prices, if the limit is used up.")
             ForEach(self.state.orderedAccounts) { account in
@@ -289,14 +285,11 @@ public struct UsageDriftCardView: View {
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 0)
             }
-            Picker("Unit", selection: self.$unit) {
-                ForEach(Unit.allCases) { unit in
-                    Text(unit.rawValue).tag(unit)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
+            UsageSegmentedControl(
+                options: Array(Unit.allCases),
+                title: \.rawValue,
+                selection: self.$unit,
+                fillWidth: true)
             Text(self.caption)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
