@@ -9,9 +9,14 @@ import SwiftUI
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--claude-cache real|full|plain|none]
 //       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
+//       [--drift month|week] [--hover-month 0] [--drift-fixture months]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
+// --drift month|week picks the Month / Week switch of the Value page's limit chart (default month, so renders
+// do not depend on an earlier run); --hover-month draws it as if a month were pointed at: 0 is the latest month.
+// --drift-fixture months replaces the limit weeks with made-up ones under made-up account names
+// (ClaudeFixture.driftMonths): one account with several months, one with a single preliminary month.
 // --hover-day draws the per-day spend charts as if that day were pointed at.
 // --period 30|60|90|180 picks the spend period (default 30, so renders do not depend on an earlier run).
 // --breakdown accounts|models picks the split of the per-day spend chart (default accounts).
@@ -119,6 +124,7 @@ struct PreviewRoot: View {
     var detailAccount = 0
     var highlighted = false
     var hoverWeek: Int?
+    var hoverMonth: Int?
     var hoverDay: String?
     var antigravity: UsagePanelState?
 
@@ -282,7 +288,10 @@ struct PreviewRoot: View {
         Divider()
         UsageValueCardView(state: state, width: self.menuWidth, now: self.now)
         Divider().padding(.horizontal, 12)
-        UsageDriftCardView(state: state, width: self.menuWidth, initialHoverIndex: self.hoverWeek)
+        UsageDriftCardView(
+            state: state,
+            width: self.menuWidth,
+            initialHoverIndex: UsagePanelSelection.shared.driftPeriod == .month ? self.hoverMonth : self.hoverWeek)
     }
 
     @ViewBuilder private func details(_ state: UsagePanelState) -> some View {
@@ -326,7 +335,8 @@ guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
         + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
         + "[--fixture name] [--antigravity file] [--claude-cache real|full|plain|none] [--period n] "
-        + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours]\n"
+        + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours] [--drift month|week] "
+        + "[--hover-month n] [--drift-fixture months]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
@@ -349,6 +359,13 @@ if arguments.contains("--fill-missing") {
 }
 if let hours = argument(after: "--manual-age").flatMap(Double.init) {
     state = state.map { ClaudeFixture.agingManualReadings($0, hours: hours) }
+}
+if let name = argument(after: "--drift-fixture") {
+    guard name == "months" else {
+        FileHandle.standardError.write(Data("unknown drift fixture \(name): months\n".utf8))
+        exit(2)
+    }
+    state = state.map(ClaudeFixture.driftMonths)
 }
 let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
 let wantsAntigravity = only?.hasPrefix("antigravity") == true
@@ -389,6 +406,8 @@ UsagePanelSelection.shared.spendPeriod = argument(after: "--period").flatMap(Int
     .flatMap(UsageSpendPeriod.init(rawValue:)) ?? .d30
 UsagePanelSelection.shared.spendBreakdown = argument(after: "--breakdown")
     .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
+UsagePanelSelection.shared.driftPeriod = argument(after: "--drift")
+    .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
 
 let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : .aqua)
 
@@ -401,6 +420,7 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     detailAccount: argument(after: "--account").flatMap(Int.init) ?? 0,
     highlighted: arguments.contains("--highlighted"),
     hoverWeek: argument(after: "--hover-week").flatMap(Int.init),
+    hoverMonth: argument(after: "--hover-month").flatMap(Int.init),
     hoverDay: argument(after: "--hover-day"),
     antigravity: antigravity))
 hosting.appearance = appearance

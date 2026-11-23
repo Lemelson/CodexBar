@@ -210,13 +210,39 @@ public enum UsageSpendBreakdown: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// What one point of the Value page's limit chart ("Is the … limit changing?") stands for.
+public enum UsageDriftPeriod: String, CaseIterable, Identifiable, Sendable {
+    case month
+    case week
+
+    public var id: String {
+        self.rawValue
+    }
+
+    public var title: String {
+        switch self {
+        case .month: "Month"
+        case .week: "Week"
+        }
+    }
+}
+
 /// Choices shared by the spend card, the account rows and the detail panel, kept across menu opens and
-/// restarts: one period and one chart breakdown for the whole menu.
+/// restarts: one period and one chart breakdown for the whole menu, and the Month / Week switch of the
+/// Value page's limit chart.
 @MainActor
 public final class UsagePanelSelection: ObservableObject {
     public static let shared = UsagePanelSelection()
     public static let periodKey = "lemelsonSpendPeriod"
     public static let breakdownKey = "lemelsonSpendBreakdown"
+    public static let driftPeriodKey = "lemelsonDriftPeriod"
+
+    /// Month by default: a month is what the plan is paid for, and the card above it shows a month too.
+    @Published public var driftPeriod: UsageDriftPeriod {
+        didSet {
+            UserDefaults.standard.set(self.driftPeriod.rawValue, forKey: Self.driftPeriodKey)
+        }
+    }
 
     @Published public var spendPeriod: UsageSpendPeriod {
         didSet {
@@ -235,6 +261,8 @@ public final class UsagePanelSelection: ObservableObject {
         self.spendPeriod = UsageSpendPeriod(rawValue: defaults.integer(forKey: Self.periodKey)) ?? .d30
         self.spendBreakdown = defaults.string(forKey: Self.breakdownKey)
             .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
+        self.driftPeriod = defaults.string(forKey: Self.driftPeriodKey)
+            .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
     }
 }
 
