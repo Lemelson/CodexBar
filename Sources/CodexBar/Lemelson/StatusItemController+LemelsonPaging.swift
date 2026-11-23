@@ -164,6 +164,10 @@ final class LemelsonPagingState {
 
     /// When the last page turn was requested. Background rendering waits for a pause in paging.
     var lastPageRequest: CFTimeInterval = 0
+    /// When the pointer last moved in a tracked menu. Background rendering also waits while the pointer
+    /// moves: a render of 50–90 ms that starts as it heads for a row holds back that row's detail panel
+    /// (a hover took 99 ms instead of 6 in a self-test).
+    var lastPointerMove: CFTimeInterval = 0
 
     /// Experimental, off by default: vertical trackpad scrolling moves the menu by the exact deltas
     /// instead of NSMenu's row-by-row steps.
@@ -201,6 +205,9 @@ extension StatusItemController {
 
     /// Returns true when the event was used and must not reach NSMenu.
     func lemelsonHandleTrackedEvent(_ event: NSEvent) -> Bool {
+        if event.type == .mouseMoved {
+            LemelsonPagingState.shared.lastPointerMove = CACurrentMediaTime()
+        }
         // Pointer events over the detail panel are the panel's: its controls work and the menu keeps the
         // row the panel belongs to highlighted.
         if UsageHoverPanelController.shared.routeTrackedEvent(event) {
@@ -352,7 +359,8 @@ extension StatusItemController {
     /// are being turned that would hold back the end of a slide and the next key press, so it waits.
     func lemelsonPostponesWarmup() -> Bool {
         LemelsonPageTransition.shared.isActive ||
-            CACurrentMediaTime() - LemelsonPagingState.shared.lastPageRequest < 0.6
+            CACurrentMediaTime() - LemelsonPagingState.shared.lastPageRequest < 0.6 ||
+            CACurrentMediaTime() - LemelsonPagingState.shared.lastPointerMove < 0.3
     }
 
     /// The mode buttons, arrow keys and swipes all end here.
@@ -1358,6 +1366,17 @@ final class LemelsonPageTransition {
         guard !self.applyingHeight, let window = self.menuWindow else { return }
         let final = window.frame.height
         guard self.phase == .active || self.heightTimer != nil else {
+            // The page at rest changed height by itself: Classic's stock rows add their cost section a
+            // moment after the page is shown (657 -> 1077 pt). Its picture has the old height and the next
+            // visit would slide it in and then jump, so it is taken again once the page rests. Taking a
+            // picture draws into a bitmap only: nothing changes on screen.
+            if abs(final - self.shownHeight) > 0.5, let key = self.currentKey?(), let picture = self.cache[key],
+               abs(picture.size.height - (window.contentView?.bounds.height ?? final)) > 0.5
+            {
+                self.cache[key]?.taken = 0
+                self.log("height \(Int(self.shownHeight)) -> \(Int(final)) at rest, picture \(key) again")
+                self.schedulePicture(of: key)
+            }
             self.shownHeight = final
             return
         }
