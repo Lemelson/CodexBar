@@ -44,7 +44,7 @@ struct UsageSpendSummaryHeader: View {
                 // The period switch is wider in the menu than in a rendering: the short form when the long
                 // one would wrap.
                 ViewThatFits(in: .horizontal) {
-                    ForEach(["This Mac · API prices", "This Mac · API $"], id: \.self) { label in
+                    ForEach(["This Mac · API prices", "API prices"], id: \.self) { label in
                         Text(label)
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
