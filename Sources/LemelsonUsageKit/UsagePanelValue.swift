@@ -8,7 +8,8 @@ public struct UsageValueCardView: View {
     let state: UsagePanelState
     let width: CGFloat
     let now: Date
-    @State private var period: Period = .month
+    /// Month / Week, kept across menu opens and restarts.
+    @ObservedObject private var selection = UsagePanelSelection.shared
 
     public init(state: UsagePanelState, width: CGFloat, now: Date = Date()) {
         self.state = state
@@ -16,13 +17,8 @@ public struct UsageValueCardView: View {
         self.now = now
     }
 
-    enum Period: String, CaseIterable, Identifiable {
-        case month = "Month"
-        case week = "Week"
-
-        var id: String {
-            self.rawValue
-        }
+    private var period: UsageDriftPeriod {
+        self.selection.valuePeriod
     }
 
     /// Shared with the Month chart of the limit card below, so its latest month and "You get" match.
@@ -46,9 +42,9 @@ public struct UsageValueCardView: View {
                     .font(.system(size: 13, weight: .semibold))
                 Spacer(minLength: 8)
                 UsageSegmentedControl(
-                    options: Array(Period.allCases),
-                    title: \.rawValue,
-                    selection: self.$period)
+                    options: Array(UsageDriftPeriod.allCases),
+                    title: \.title,
+                    selection: self.$selection.valuePeriod)
                     .fixedSize()
             }
             UsageNote(text: "The same usage bought through the API at list prices, if the limit is used up.")
@@ -81,7 +77,9 @@ public struct UsageValueCardView: View {
         VStack(alignment: .leading, spacing: 5) {
             UsageValueTitleLine(
                 color: color, name: account.displayName, plan: account.planName, times: account.value?.timesPrice)
-            if let got = self.got(account) {
+            if let unavailable = account.unavailableNote {
+                UsageUnavailableLine(text: unavailable)
+            } else if let got = self.got(account) {
                 if let paid = self.paid(account) {
                     self.bar("You pay", value: paid, scale: scale, color: Color.secondary.opacity(0.7), strong: false)
                 }
@@ -244,7 +242,7 @@ public struct UsageDriftCardView: View {
     /// Only for the PNG preview, which cannot move a pointer: draws the chart as if this week (or month,
     /// in the Month position) were pointed at (0 is the latest, 1 the one before, ...). Nil in the app.
     let initialHoverIndex: Int?
-    @State private var unit: Unit = .opus
+    /// Month / Week and the unit, kept across menu opens and restarts.
     @ObservedObject private var selection = UsagePanelSelection.shared
 
     public init(state: UsagePanelState, width: CGFloat, initialHoverIndex: Int? = nil) {
@@ -257,14 +255,8 @@ public struct UsageDriftCardView: View {
         self.selection.driftPeriod
     }
 
-    enum Unit: String, CaseIterable, Identifiable {
-        case opus = "Opus $"
-        case mix = "My mix"
-        case fable = "Fable $"
-
-        var id: String {
-            self.rawValue
-        }
+    private var unit: UsageDriftUnit {
+        self.selection.driftUnit
     }
 
     private typealias Point = UsageDriftPoint
@@ -310,7 +302,7 @@ public struct UsageDriftCardView: View {
     }
 
     private var ratioNote: String {
-        let parts = self.state.accounts.map { account -> String in
+        let parts = self.state.accounts.filter { !$0.isUnavailable }.map { account -> String in
             let ratio = String(format: "%.2f", self.state.fableWeight(for: account))
             let how = switch account.kSource {
             case "share": "from the server's Fable cap share"
@@ -350,9 +342,9 @@ public struct UsageDriftCardView: View {
                     selection: self.$selection.driftPeriod)
                     .fixedSize()
                 UsageSegmentedControl(
-                    options: Array(Unit.allCases),
-                    title: \.rawValue,
-                    selection: self.$unit,
+                    options: Array(UsageDriftUnit.allCases),
+                    title: \.title,
+                    selection: self.$selection.driftUnit,
                     fillWidth: true)
             }
             VStack(alignment: .leading, spacing: 4) {
@@ -383,16 +375,17 @@ public struct UsageDriftCardView: View {
         .frame(width: self.width, alignment: .leading)
     }
 
-    /// Legend order (the panel's account order), only accounts that have at least one week on the chart.
+    /// Legend order (the panel's account order): every account with a measured week, whatever the unit, so
+    /// a unit in which an account has no value ("My mix" needs spend data) keeps its legend row and the card
+    /// keeps its height (the menu caches it).
     private var series: [UsageDriftSeries] {
         self.state.orderedAccounts.compactMap { account in
-            let points = self.points(for: account)
-            guard !points.isEmpty else { return nil }
+            guard !(account.drift ?? []).isEmpty else { return nil }
             return UsageDriftSeries(
                 id: account.id,
                 name: account.displayName,
                 colorIndex: self.state.colorIndex(of: account),
-                points: points)
+                points: self.points(for: account))
         }
     }
 
@@ -405,7 +398,8 @@ public struct UsageDriftCardView: View {
                 id: series.id,
                 name: series.name,
                 colorIndex: series.colorIndex,
-                months: UsageDriftMonths.months(of: series.points, until: until))
+                months: UsageDriftMonths.months(of: series.points, until: until),
+                hasWeeks: !series.points.isEmpty)
         }
     }
 }
@@ -427,7 +421,11 @@ struct UsageDriftSeries: Identifiable {
     let id: String
     let name: String
     let colorIndex: Int
+    /// Empty when the account has weeks but none in the chosen unit.
     let points: [UsageDriftPoint]
+
+    /// The legend value of an account with weeks but none in this unit ("My mix" needs that week's spend).
+    static let noValueText = "no spend data for this unit"
 }
 
 /// One week on the chart. Accounts reset on their own day and hour, so the same calendar week has
@@ -528,6 +526,9 @@ struct UsageDriftChartView: View {
                 ? "\(UsageFormat.usd(first.usd)) → \(UsageFormat.usd(last.usd)) · \(series.points.count) weeks"
                 : "\(UsageFormat.usd(last.usd)) · 1 week so far")
                 .foregroundStyle(.secondary)
+        } else {
+            Text(UsageDriftSeries.noValueText)
+                .foregroundStyle(.tertiary)
         }
     }
 

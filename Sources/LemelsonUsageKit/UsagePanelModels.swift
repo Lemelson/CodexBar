@@ -227,20 +227,55 @@ public enum UsageDriftPeriod: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// The unit of the Value page's limit chart: the same measured limit in Opus dollars, in dollars at the
+/// model mix actually used, or in Fable dollars.
+public enum UsageDriftUnit: String, CaseIterable, Identifiable, Sendable {
+    case opus
+    case mix
+    case fable
+
+    public var id: String {
+        self.rawValue
+    }
+
+    public var title: String {
+        switch self {
+        case .opus: "Opus $"
+        case .mix: "My mix"
+        case .fable: "Fable $"
+        }
+    }
+}
+
 /// Choices shared by the spend card, the account rows and the detail panel, kept across menu opens and
-/// restarts: one period and one chart breakdown for the whole menu, and the Month / Week switch of the
-/// Value page's limit chart.
+/// restarts: one period and one chart breakdown for the whole menu, and the switches of the Value page
+/// (Month / Week of "What the plan is worth", Month / Week and the unit of its limit chart).
 @MainActor
 public final class UsagePanelSelection: ObservableObject {
     public static let shared = UsagePanelSelection()
     public static let periodKey = "lemelsonSpendPeriod"
     public static let breakdownKey = "lemelsonSpendBreakdown"
     public static let driftPeriodKey = "lemelsonDriftPeriod"
+    public static let driftUnitKey = "lemelsonDriftUnit"
+    public static let valuePeriodKey = "lemelsonValuePeriod"
 
     /// Month by default: a month is what the plan is paid for, and the card above it shows a month too.
     @Published public var driftPeriod: UsageDriftPeriod {
         didSet {
             UserDefaults.standard.set(self.driftPeriod.rawValue, forKey: Self.driftPeriodKey)
+        }
+    }
+
+    @Published public var driftUnit: UsageDriftUnit {
+        didSet {
+            UserDefaults.standard.set(self.driftUnit.rawValue, forKey: Self.driftUnitKey)
+        }
+    }
+
+    /// Month or Week of "What the plan is worth".
+    @Published public var valuePeriod: UsageDriftPeriod {
+        didSet {
+            UserDefaults.standard.set(self.valuePeriod.rawValue, forKey: Self.valuePeriodKey)
         }
     }
 
@@ -262,6 +297,9 @@ public final class UsagePanelSelection: ObservableObject {
         self.spendBreakdown = defaults.string(forKey: Self.breakdownKey)
             .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
         self.driftPeriod = defaults.string(forKey: Self.driftPeriodKey)
+            .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
+        self.driftUnit = defaults.string(forKey: Self.driftUnitKey).flatMap(UsageDriftUnit.init(rawValue:)) ?? .opus
+        self.valuePeriod = defaults.string(forKey: Self.valuePeriodKey)
             .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
     }
 }
@@ -352,7 +390,8 @@ public struct UsageSpendDigest: Sendable, Equatable {
         }
         self.today = whole(1)
         self.week = whole(7)
-        self.legend = state.accounts.map { account in
+        // An account the collector failed on has no days: it stays out of the chart's legend.
+        self.legend = state.accounts.filter { !$0.isUnavailable }.map { account in
             Legend(id: account.id, name: account.displayName, colorIndex: state.colorIndex(of: account))
         }
         var byID: [String: UsageSpendAccountTotals] = [:]
@@ -533,12 +572,15 @@ struct UsageModelHeader: View {
 struct UsageModelBlock: View {
     let title: String
     let split: UsageModelSplit
+    /// The rows to show; by default the split's own. A block whose period changes in place (the account
+    /// panel, measured once) passes the rows of its longest period, so a switch never changes its height.
+    var families: [UsageModelFamily]?
 
     var body: some View {
         let total = self.split.total.usd
         VStack(alignment: .leading, spacing: 5) {
             UsageModelHeader(title: self.title)
-            ForEach(self.split.shownFamilies) { family in
+            ForEach(self.families ?? self.split.shownFamilies) { family in
                 UsageModelRow(
                     name: family.title,
                     use: self.split[family],

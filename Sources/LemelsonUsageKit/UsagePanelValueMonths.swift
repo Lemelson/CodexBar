@@ -93,6 +93,8 @@ struct UsageDriftMonthSeries: Identifiable {
     let name: String
     let colorIndex: Int
     let months: [UsageDriftMonth]
+    /// The account has weeks in the chosen unit (it may still have no month with enough of them).
+    var hasWeeks = true
 }
 
 // MARK: - Month chart with a hover readout
@@ -181,9 +183,12 @@ struct UsageDriftMonthChartView: View {
                     ? "\(Int(last.days.rounded())) days, prelim."
                     : "1 month so far"))
                 .foregroundStyle(.secondary)
-        } else {
+        } else if series.hasWeeks {
             // Every week of this account lies in a month with under half a week measured.
             Text("under half a week so far")
+                .foregroundStyle(.tertiary)
+        } else {
+            Text(UsageDriftSeries.noValueText)
                 .foregroundStyle(.tertiary)
         }
     }

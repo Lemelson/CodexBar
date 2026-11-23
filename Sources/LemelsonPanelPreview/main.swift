@@ -9,7 +9,8 @@ import SwiftUI
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--claude-cache real|full|plain|none]
 //       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
-//       [--drift month|week] [--hover-month 0] [--drift-fixture months]
+//       [--drift month|week] [--hover-month 0] [--drift-fixture months] [--unit opus|mix|fable]
+//       [--value-period month|week] [--broken-account 1] [--cache-error]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
@@ -17,6 +18,10 @@ import SwiftUI
 // do not depend on an earlier run); --hover-month draws it as if a month were pointed at: 0 is the latest month.
 // --drift-fixture months replaces the limit weeks with made-up ones under made-up account names
 // (ClaudeFixture.driftMonths): one account with several months, one with a single preliminary month.
+// --unit picks the unit of that chart (default opus), --value-period the Month / Week switch of "What the plan
+// is worth" (default month).
+// --broken-account 1 turns the account at that position of the summary into the collector's error stub
+// (repeat the flag for more); --cache-error nulls every cache and sets `cacheError`, as a failing cache step does.
 // --hover-day draws the per-day spend charts as if that day were pointed at.
 // --period 30|60|90|180 picks the spend period (default 30, so renders do not depend on an earlier run).
 // --breakdown accounts|models picks the split of the per-day spend chart (default accounts).
@@ -336,14 +341,27 @@ guard arguments.count >= 2 else {
         + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
         + "[--fixture name] [--antigravity file] [--claude-cache real|full|plain|none] [--period n] "
         + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours] [--drift month|week] "
-        + "[--hover-month n] [--drift-fixture months]\n"
+        + "[--hover-month n] [--drift-fixture months] [--unit opus|mix|fable] [--value-period month|week] "
+        + "[--broken-account n] [--cache-error]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
 
 let outputURL = URL(fileURLWithPath: arguments[1])
 let only = argument(after: "--only")
-let stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
+var stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
+let brokenAccounts = arguments.indices.filter { arguments[$0] == "--broken-account" && $0 + 1 < arguments.count }
+    .compactMap { Int(arguments[$0 + 1]) }
+if !brokenAccounts.isEmpty || arguments.contains("--cache-error") {
+    guard let copy = ClaudeFixture.writingFailures(
+        from: stateURL, broken: brokenAccounts, cacheError: arguments.contains("--cache-error"))
+    else {
+        FileHandle.standardError.write(Data("cannot write the failure fixture from \(stateURL.path)\n".utf8))
+        exit(1)
+    }
+    stateURL = copy
+    FileHandle.standardError.write(Data("failures: accounts \(brokenAccounts), cache error \(arguments.contains("--cache-error"))\n".utf8))
+}
 var state = UsagePanelStore.load(from: stateURL)
 if only == "cache" || argument(after: "--claude-cache") != nil {
     let name = argument(after: "--claude-cache") ?? (state?.cache == nil ? "full" : "real")
@@ -407,6 +425,9 @@ UsagePanelSelection.shared.spendPeriod = argument(after: "--period").flatMap(Int
 UsagePanelSelection.shared.spendBreakdown = argument(after: "--breakdown")
     .flatMap(UsageSpendBreakdown.init(rawValue:)) ?? .accounts
 UsagePanelSelection.shared.driftPeriod = argument(after: "--drift")
+    .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
+UsagePanelSelection.shared.driftUnit = argument(after: "--unit").flatMap(UsageDriftUnit.init(rawValue:)) ?? .opus
+UsagePanelSelection.shared.valuePeriod = argument(after: "--value-period")
     .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
 
 let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : .aqua)

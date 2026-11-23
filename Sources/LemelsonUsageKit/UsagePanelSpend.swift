@@ -41,9 +41,17 @@ struct UsageSpendSummaryHeader: View {
         let period = self.selection.spendPeriod
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center) {
-                Text("This Mac · API prices")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
+                // The period switch is wider in the menu than in a rendering: the short form when the long
+                // one would wrap.
+                ViewThatFits(in: .horizontal) {
+                    ForEach(["This Mac · API prices", "This Mac · API $"], id: \.self) { label in
+                        Text(label)
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
+                }
                 Spacer(minLength: 6)
                 UsageSegmentedControl(
                     options: Array(UsageSpendPeriod.allCases),
@@ -433,10 +441,15 @@ public struct UsageSpendAccountRowView: View {
                         .foregroundStyle(UsageInk.secondary(self.highlighted))
                 }
             }
-            HStack(spacing: 0) {
-                self.cell("Today", days: 1)
-                self.cell("7 days", days: 7)
-                self.cell("\(period.days) days", days: period.days)
+            // An account the collector failed on has no spend to show: zeros would read as data.
+            if let unavailable = self.account.unavailableNote {
+                UsageUnavailableLine(text: unavailable)
+            } else {
+                HStack(spacing: 0) {
+                    self.cell("Today", days: 1)
+                    self.cell("7 days", days: 7)
+                    self.cell("\(period.days) days", days: period.days)
+                }
             }
         }
         .padding(.leading, 20)
@@ -537,10 +550,17 @@ struct UsageSpendAccountContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            UsageSpendWeekList(
-                account: self.account, fableWeight: self.fableWeight, isShown: self.isShown, now: self.now)
-            Divider()
-            UsageSpendAccountModels(totals: self.totals)
+            if let unavailable = self.account.unavailableNote {
+                UsagePanelTitle(
+                    title: "\(self.account.displayName) · your Claude Code spend",
+                    subtitle: "This Mac only, dollars at API prices.")
+                UsageUnavailableLine(text: unavailable)
+            } else {
+                UsageSpendWeekList(
+                    account: self.account, fableWeight: self.fableWeight, isShown: self.isShown, now: self.now)
+                Divider()
+                UsageSpendAccountModels(totals: self.totals)
+            }
         }
     }
 }
@@ -552,7 +572,10 @@ struct UsageSpendAccountModels: View {
 
     var body: some View {
         let period = self.selection.spendPeriod
-        UsageModelBlock(title: "By model · \(period.short)", split: self.totals.split(lastDays: period.days))
+        UsageModelBlock(
+            title: "By model · \(period.short)",
+            split: self.totals.split(lastDays: period.days),
+            families: self.totals.split(lastDays: UsageSpendPeriod.allCases.map(\.days).max() ?? 180).shownFamilies)
     }
 }
 
@@ -564,13 +587,15 @@ struct UsageSplitBar: View {
 
     var body: some View {
         GeometryReader { proxy in
+            // The 1 pt gaps between parts come out of the width, so parts that fill the scale end at the
+            // bar's end instead of running past it into the rounded clip.
+            let drawn = self.parts.filter { $0.0 > 0 }
+            let usable = max(0, proxy.size.width - CGFloat(max(0, drawn.count - 1)))
             HStack(spacing: 1) {
-                ForEach(Array(self.parts.enumerated()), id: \.offset) { _, part in
-                    if part.0 > 0 {
-                        Rectangle()
-                            .fill(part.1)
-                            .frame(width: max(1.5, proxy.size.width * CGFloat(min(1, part.0 / self.scale))))
-                    }
+                ForEach(Array(drawn.enumerated()), id: \.offset) { _, part in
+                    Rectangle()
+                        .fill(part.1)
+                        .frame(width: max(1.5, usable * CGFloat(min(1, part.0 / self.scale))))
                 }
                 Spacer(minLength: 0)
             }
