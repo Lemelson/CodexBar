@@ -5,8 +5,9 @@ import SwiftUI
 // Renders the accounts panel to a PNG without launching CodexBar, so the layout can be checked by eye.
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
-//       [--only limits|spend|value|details|antigravity|antigravity-details] [--account 1] [--highlighted]
-//       [--hover-week 0] [--hover-day 2026-11-21] [--fixture full] [--antigravity block.json]
+//       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache]
+//       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
+//       [--antigravity block.json] [--claude-cache real|full|plain|none]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
@@ -15,9 +16,15 @@ import SwiftUI
 // --account picks whose detail panels are drawn: position in the Limits list, 0 is the active account.
 // --warm applies a warm tint, as on a Night Shift screen: shows whether colors blend together.
 //
+// Prompt cache: --only cache draws the Claude Code cache row among stand-ins for the menu's own rows (Status
+// Page, Add Account…) and its detail panel; --only antigravity-cache the same for Antigravity. The Claude
+// numbers come from --claude-cache (CacheFixture: default "real" when the summary has a `cache`, else "full").
+// The Antigravity page (--only antigravity) ends with the same footer stand-in, and antigravity-details adds
+// the cache panel. Rows with a detail panel get the chevron the menu draws.
+//
 // Antigravity (only with --only antigravity or antigravity-details): the summary's own `antigravity` block
 // when it has one, else the built-in fixture "full". --fixture picks a fixture (full, run-out, no-quota,
-// no-spend, one-day, error); --antigravity reads the block from a file (a whole summary or the block alone).
+// no-spend, one-day, error, ...: see AntigravityFixture); --antigravity reads the block from a file (a whole summary or the block alone).
 
 struct ModeChips: View {
     let selected: String
@@ -46,6 +53,64 @@ struct ModeChips: View {
 struct MenuSeparator: View {
     var body: some View {
         Divider().padding(.horizontal, 12).padding(.vertical, 4)
+    }
+}
+
+/// The chevron `LemelsonHighlightBridge` draws on a row with a detail panel.
+struct PreviewChevron: ViewModifier {
+    let shown: Bool
+    let lit: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay(alignment: .trailing) {
+            if self.shown {
+                Image(systemName: "chevron.forward")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(self.lit ? Color.white.opacity(0.84) : Color.secondary)
+                    .padding(.trailing, 10)
+            }
+        }
+    }
+}
+
+/// Stand-in for one of the menu's own action rows ("Status Page"): a 16 pt template icon and the menu font.
+struct MockMenuItem: View {
+    let icon: String
+    let title: String
+    let width: CGFloat
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: self.icon)
+                .font(.system(size: 12))
+                .frame(width: 16, height: 16)
+            Text(self.title)
+                .font(.system(size: NSFont.menuFont(ofSize: 0).pointSize))
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 14)
+        .frame(width: self.width, height: UsageCacheRowView.height, alignment: .leading)
+    }
+}
+
+/// The bottom of the menu: a separator, the cache row with its chevron, and two of the menu's own rows.
+struct MockMenuFooter: View {
+    let summary: UsageCacheSummary
+    let width: CGFloat
+    var highlighted = false
+
+    var body: some View {
+        MenuSeparator()
+        UsageCacheRowView(summary: self.summary, width: self.width)
+            .environment(\.usageRowHighlighted, self.highlighted)
+            .modifier(PreviewChevron(shown: true, lit: self.highlighted))
+            .background(self.highlighted
+                ? RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .selectedContentBackgroundColor))
+                .padding(.horizontal, 6)
+                : nil)
+        MockMenuItem(icon: "waveform.path.ecg", title: "Status Page", width: self.width)
+        MockMenuItem(icon: "plus", title: "Add Account…", width: self.width)
+            .padding(.bottom, 5)
     }
 }
 
@@ -83,11 +148,30 @@ struct PreviewRoot: View {
                     self.details(state)
                 }
             }
+            if self.only == "cache", let state = self.state {
+                if let summary = UsageCacheSummary.claude(state) {
+                    self.cachePair(summary)
+                } else {
+                    self.card(width: self.menuWidth) {
+                        Text("No Claude cache data in this summary.").font(.system(size: 11)).padding(20)
+                    }
+                }
+            }
             if self.only == "antigravity" {
                 self.card(width: self.menuWidth) { self.antigravityPage }
             }
             if self.only == "antigravity-details" {
                 self.antigravityDetails
+            }
+            if self.only == "antigravity-cache", let block = self.antigravity?.antigravity {
+                if let summary = UsageCacheSummary.antigravity(block) {
+                    self.cachePair(summary)
+                } else {
+                    self.card(width: self.menuWidth) {
+                        Text("No Antigravity cache data: the page has no cache row.")
+                            .font(.system(size: 11)).padding(20)
+                    }
+                }
             }
         }
         .environment(\.usagePreviewHoveredDay, self.hoverDay)
@@ -104,6 +188,19 @@ struct PreviewRoot: View {
         self.only == nil || self.only == name
     }
 
+    /// The cache row as the bottom of the menu, and its detail panel next to it.
+    private func cachePair(_ summary: UsageCacheSummary) -> some View {
+        HStack(alignment: .top, spacing: 18) {
+            self.card(width: self.menuWidth) {
+                MockMenuFooter(summary: summary, width: self.menuWidth, highlighted: self.highlighted)
+                    .padding(.top, 2)
+            }
+            self.card(width: self.panelWidth) {
+                UsageCachePanelView(summary: summary, width: self.panelWidth)
+            }
+        }
+    }
+
     /// The page as the menu would stack its rows, with a separator where a row asks for one.
     @ViewBuilder private var antigravityPage: some View {
         if let state = self.antigravity,
@@ -113,10 +210,14 @@ struct PreviewRoot: View {
                 let lit = self.highlighted && row.detail != nil
                 row.view
                     .environment(\.usageRowHighlighted, lit)
+                    .modifier(PreviewChevron(shown: row.detail != nil, lit: lit))
                     .background(lit ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
                 if row.separatorAfter, index < page.rows.count - 1 {
                     MenuSeparator()
                 }
+            }
+            if let summary = UsageCacheSummary.antigravity(page.block) {
+                MockMenuFooter(summary: summary, width: self.menuWidth)
             }
         }
     }
@@ -128,7 +229,7 @@ struct PreviewRoot: View {
                state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
                clock: { [now = self.now] in now })
         {
-            ForEach(page.rows.filter { $0.detail != nil }) { row in
+            ForEach(page.rows.filter { $0.detail != nil } + [page.cacheRow].compactMap(\.self)) { row in
                 if let detail = row.detail {
                     self.card(width: self.panelWidth) { detail() }
                 }
@@ -226,16 +327,25 @@ let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
         + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
-        + "[--fixture name] [--antigravity file]\n"
+        + "[--fixture name] [--antigravity file] [--claude-cache real|full|plain|none]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
 
 let outputURL = URL(fileURLWithPath: arguments[1])
-let stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
-let state = UsagePanelStore.load(from: stateURL)
-let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
 let only = argument(after: "--only")
+let stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
+var state = UsagePanelStore.load(from: stateURL)
+if only == "cache" || argument(after: "--claude-cache") != nil {
+    let name = argument(after: "--claude-cache") ?? (state?.cache == nil ? "full" : "real")
+    guard CacheFixture.names.contains(name) else {
+        FileHandle.standardError.write(Data("unknown cache fixture \(name): \(CacheFixture.names.joined(separator: ", "))\n".utf8))
+        exit(2)
+    }
+    state = CacheFixture.load(from: stateURL, fixture: name)
+    FileHandle.standardError.write(Data("claude cache: \(name)\n".utf8))
+}
+let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
 let wantsAntigravity = only?.hasPrefix("antigravity") == true
 
 if state == nil, !wantsAntigravity {

@@ -4,16 +4,23 @@ import LemelsonUsageKit
 /// Built-in Antigravity blocks for the preview, shaped as `usage/ANTIGRAVITY-STATE.md` describes, with times
 /// relative to `now`. They go through the same JSON decoding as the real summary.
 ///
-///   full      5-hour 0% with a fresh window, weekly 40%, four days of spend, three models, cache miss 6%
+///   full      5-hour 0% with a fresh window, weekly 40%, four days of spend, three models, and every field of
+///             `usage/STATE-ADDITIONS-24.md`: measured 5h sessions per week, value with plan price and per model,
+///             cache with dollars
+///   no-price  "full" with the plan price unknown: "You get" without "You pay" and without ×
+///   no-value  "full" with too few readings for a value: the collector's reason instead of numbers
+///   no-cache  "full" without any cache data: no cache row
+///   legacy    the summary before message 24: old value and cache shapes, sessions from the rates
 ///   run-out   both limits in deficit, the forecast runs out before the reset
 ///   no-quota  spend, but CodexBar never recorded a window
 ///   no-spend  quota readings, but no calls on this Mac
 ///   one-day   history of one day: no rates, no value, cache for today only
 ///   error     the collector's Antigravity step failed
 ///   rolled    "full" after the 5-hour window reset with no newer reading
-///   priced    "full" with a known plan and price: "You pay / You get"
+///   priced    "legacy" with a known plan and price
 enum AntigravityFixture {
-    static let names = ["full", "run-out", "no-quota", "no-spend", "one-day", "error", "rolled", "priced"]
+    static let names = ["full", "no-price", "no-value", "no-cache", "legacy", "run-out", "no-quota", "no-spend",
+                        "one-day", "error", "rolled", "priced"]
 
     static func state(_ name: String, now: Date) -> UsagePanelState? {
         let summary: [String: Any] = [
@@ -112,8 +119,69 @@ enum AntigravityFixture {
                 block["planName"] = "AI Ultra"
                 block["planPriceUsd"] = 250.0
             }
+            if ["full", "no-price", "no-value", "no-cache"].contains(name) {
+                self.addMessage24(to: &block, name)
+            }
         }
         return block
+    }
+
+    /// The fields of `usage/STATE-ADDITIONS-24.md` on top of the older block.
+    private static func addMessage24(to block: inout [String: Any], _ name: String) {
+        if var windows = block["windows"] as? [String: Any], var week = windows["7d"] as? [String: Any] {
+            week["sessions"] = ["perWeek": 14.2, "pairs": 9]
+            windows["7d"] = week
+            block["windows"] = windows
+        }
+        if var rates = block["rates"] as? [String: Any], var week = rates["7d"] as? [String: Any] {
+            week["method"] = "Dollars of this Mac's Gemini use that moved the weekly limit, from 38 pairs of readings."
+            week["pairsUsed"] = 38
+            week["pairsDropped"] = 2
+            rates["7d"] = week
+            block["rates"] = rates
+        }
+        let priced = name != "no-price"
+        func times(_ usd: Double) -> Any {
+            priced ? (usd / 250 * 10).rounded() / 10 : NSNull()
+        }
+        if name == "no-value" {
+            block["value"] = ["confident": false, "pairs": 3, "planName": "AI Ultra", "planPriceUsd": 250.0,
+                              "reason": "1 clean stretch with $230 of this Mac's spend so far; needs 4 with $240 "
+                                  + "(a stretch is $60+ of spend between two readings of the weekly limit)",
+                              "byModel": []]
+        } else {
+            block["value"] = [
+                "planName": "AI Ultra", "planPriceUsd": priced ? 250.0 : NSNull(), "weekUsd": 632.0,
+                "monthUsd": 2748.0, "timesPrice": times(2748), "pairs": 38, "confident": true, "reason": NSNull(),
+                "weekOpusUsd": 632.0, "monthOpusUsd": 2748.0,
+                "byModel": [
+                    ["model": "gemini-4-neon", "label": "Neon", "monthUsd": 2748.0, "timesPrice": times(2748)],
+                    ["model": "gemini-4-carbon", "label": "Carbon", "monthUsd": 4120.0, "timesPrice": times(4120)],
+                    ["model": "gemini-4-hydrogen", "label": "Hydrogen", "monthUsd": 690.0, "timesPrice": times(690)],
+                ],
+            ]
+        }
+        if name == "no-cache" {
+            block["cache"] = [String: Any]()
+            if var models = block["models"] as? [String: [String: Any]] {
+                for key in models.keys {
+                    models[key]?["missPct"] = NSNull()
+                }
+                block["models"] = models
+            }
+        } else {
+            block["cache"] = [
+                "today": ["readPct": 94.9, "missPct": 5.1, "calls": 1110, "readTokens": 168_000_000,
+                          "missTokens": 9_000_000, "writeTokens": 0, "savedUsd": 302.4, "missUsd": 16.2,
+                          "coldCallsPct": 2.0],
+                "7d": ["readPct": 94.0, "missPct": 6.0, "calls": 3095, "readTokens": 525_000_000,
+                       "missTokens": 33_700_000, "writeTokens": 0, "savedUsd": 945.0, "missUsd": 60.7,
+                       "coldCallsPct": 3.1],
+                "30d": ["readPct": 93.6, "missPct": 6.4, "calls": 3101, "readTokens": 525_100_000,
+                        "missTokens": 35_900_000, "writeTokens": 0, "savedUsd": 945.2, "missUsd": 64.6,
+                        "coldCallsPct": 3.3],
+            ]
+        }
     }
 
     /// The 5-hour and weekly windows, rates and value.

@@ -16,14 +16,20 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
     public var error: String?
     /// Last 30 days, by priced model id.
     public var models: [String: ModelStats]
-    /// Share of prompt tokens not read from the cache, by span: "today", "7d", "30d".
-    public var cache: [String: CacheStats]
+    /// Prompt cache by span: "today", "7d", "30d".
+    public var cache: UsageCacheStats
     public var coverage: Coverage?
     public var quotaSource: QuotaSource?
     /// Why `account.value` is missing (too few readings), when it is.
     public var valueReason: String?
     /// How many pairs of readings the weekly value was measured from.
     public var valuePairs: Double?
+    /// The value in the shape of `STATE-ADDITIONS-24.md` (plan, month, ×, per model); nil in older summaries.
+    public var worth: Worth?
+    /// How many full 5-hour windows one weekly window holds, measured by the collector (`windows.7d.sessions`).
+    public var weekSessions: Sessions?
+    /// How the weekly rate was measured (`rates.7d.method`, `pairsUsed`, `pairsDropped`).
+    public var weekRate: RateNote?
 
     public struct ModelStats: Decodable, Sendable, Equatable {
         public var calls: Double?
@@ -38,12 +44,99 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         public var priceConfirmed: Bool?
     }
 
-    public struct CacheStats: Decodable, Sendable, Equatable {
-        /// Percent of prompt tokens (input + cached + cache write) not read from the cache.
-        public var missPct: Double?
-        /// Percent of calls that read nothing from the cache.
-        public var coldCallsPct: Double?
-        public var calls: Double?
+    /// `antigravity.value`: what the plan buys at Gemini API prices.
+    public struct Worth: Decodable, Sendable, Equatable {
+        public var planName: String?
+        /// Nil: the plan price is not known, so there is no "You pay" and no ×.
+        public var planPriceUsd: Double?
+        public var weekUsd: Double?
+        public var monthUsd: Double?
+        public var timesPrice: Double?
+        public var pairs: Double?
+        /// False: too little data; `reason` says why and the page shows it instead of numbers.
+        public var confident: Bool?
+        public var reason: String?
+        public var byModel: [Model]
+
+        public struct Model: Decodable, Sendable, Equatable {
+            public var model: String?
+            public var label: String?
+            public var monthUsd: Double?
+            public var timesPrice: Double?
+
+            public init(from decoder: Decoder) throws {
+                let keys = try? decoder.container(keyedBy: Key.self)
+                self.model = keys?.lenient(String.self, .model)
+                self.label = keys?.lenient(String.self, .label)
+                self.monthUsd = keys?.lenient(Double.self, .monthUsd)
+                self.timesPrice = keys?.lenient(Double.self, .timesPrice)
+            }
+
+            enum Key: String, CodingKey {
+                case model, label, monthUsd, timesPrice
+            }
+        }
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.planName = keys?.lenient(String.self, .planName)
+            self.planPriceUsd = keys?.lenient(Double.self, .planPriceUsd)
+            self.weekUsd = keys?.lenient(Double.self, .weekUsd)
+            self.monthUsd = keys?.lenient(Double.self, .monthUsd)
+            self.timesPrice = keys?.lenient(Double.self, .timesPrice)
+            self.pairs = keys?.lenient(Double.self, .pairs)
+            self.confident = keys?.lenient(Bool.self, .confident)
+            self.reason = keys?.lenient(String.self, .reason)
+            self.byModel = keys?.lenient([Lenient<Model>].self, .byModel)?.compactMap(\.value) ?? []
+        }
+
+        enum Key: String, CodingKey {
+            case planName, planPriceUsd, weekUsd, monthUsd, timesPrice, pairs, confident, reason, byModel
+        }
+
+        /// Written by a collector that knows this shape: it has `confident` or a month figure.
+        var isNewShape: Bool {
+            self.confident != nil || self.monthUsd != nil
+        }
+    }
+
+    public struct Sessions: Decodable, Sendable, Equatable {
+        public var perWeek: Double?
+        public var pairs: Double?
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.perWeek = keys?.lenient(Double.self, .perWeek)
+            self.pairs = keys?.lenient(Double.self, .pairs)
+        }
+
+        enum Key: String, CodingKey {
+            case perWeek, pairs
+        }
+    }
+
+    public struct RateNote: Decodable, Sendable, Equatable {
+        /// One short sentence for the page.
+        public var method: String?
+        public var pairsUsed: Double?
+        /// Pairs thrown out because the limit moved more than this Mac's spend explains.
+        public var pairsDropped: Double?
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.method = keys?.lenient(String.self, .method)
+            self.pairsUsed = keys?.lenient(Double.self, .pairsUsed)
+            self.pairsDropped = keys?.lenient(Double.self, .pairsDropped)
+        }
+
+        enum Key: String, CodingKey {
+            case method, pairsUsed, pairsDropped
+        }
+    }
+
+    /// `windows.7d.sessions` read on its own, so the window itself decodes as before.
+    private struct WeekWindow: Decodable {
+        var sessions: Lenient<Sessions>?
     }
 
     public struct Coverage: Decodable, Sendable, Equatable {
@@ -113,6 +206,9 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         let rates = keys?.lenient([String: Lenient<UsagePanelState.Rate>].self, .rates)?
             .compactMapValues(\.value)
         let name = keys?.lenient(String.self, .name) ?? "Antigravity"
+        let weekSessions = keys?.lenient([String: Lenient<WeekWindow>].self, .windows)?["7d"]?.value?.sessions?.value
+        // The collector's measured count comes first; a share of the week it may also write comes next.
+        let measuredShare = weekSessions?.perWeek.flatMap { $0 > 0 ? 100 / $0 : nil }
         self.account = UsagePanelState.Account(
             uuid: keys?.lenient(String.self, .uuid) ?? "antigravity",
             name: name,
@@ -121,7 +217,7 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
             planName: keys?.lenient(String.self, .planName),
             planPriceUsd: number(.planPriceUsd),
             has5h: keys?.lenient(Bool.self, .has5h),
-            sessionPctOfWeek: number(.sessionPctOfWeek),
+            sessionPctOfWeek: measuredShare ?? number(.sessionPctOfWeek),
             kFable: number(.kFable),
             windows: windows,
             rates: rates,
@@ -140,11 +236,14 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         self.beta = keys?.lenient(Bool.self, .beta) ?? true
         self.error = keys?.lenient(String.self, .error)
         self.models = keys?.lenient([String: Lenient<ModelStats>].self, .models)?.compactMapValues(\.value) ?? [:]
-        self.cache = keys?.lenient([String: Lenient<CacheStats>].self, .cache)?.compactMapValues(\.value) ?? [:]
+        self.cache = keys?.lenient(UsageCacheStats.self, .cache) ?? UsageCacheStats(spans: [:])
         self.coverage = keys?.lenient(Coverage.self, .coverage)
         self.quotaSource = keys?.lenient(QuotaSource.self, .quotaSource)
         self.valueReason = keys?.lenient(String.self, .valueReason)
         self.valuePairs = keys?.lenient(ValuePairs.self, .value)?.pairs
+        self.worth = keys?.lenient(Worth.self, .value).flatMap { $0.isNewShape ? $0 : nil }
+        self.weekSessions = weekSessions
+        self.weekRate = keys?.lenient([String: Lenient<RateNote>].self, .rates)?["7d"]?.value
     }
 }
 

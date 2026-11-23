@@ -78,26 +78,8 @@ public struct UsageValueCardView: View {
     private func block(for account: UsagePanelState.Account, scale: Double) -> some View {
         let color = UsagePalette.account(self.state.colorIndex(of: account))
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(color)
-                    .frame(width: 8, height: 8)
-                Text(account.displayName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                if let plan = account.planName {
-                    Text(plan)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 6)
-                if let times = account.value?.timesPrice {
-                    Text(UsageFormat.times(times))
-                        .font(.system(size: 15, weight: .bold))
-                        .monospacedDigit()
-                        .foregroundStyle(color)
-                }
-            }
+            UsageValueTitleLine(
+                color: color, name: account.displayName, plan: account.planName, times: account.value?.timesPrice)
             if let got = self.got(account) {
                 if let paid = self.paid(account) {
                     self.bar("You pay", value: paid, scale: scale, color: Color.secondary.opacity(0.7), strong: false)
@@ -138,33 +120,89 @@ public struct UsageValueCardView: View {
             (usedLabel, [(usedWeek, UsagePalette.account(self.state.colorIndex(of: account)))], usedWeek),
         ]
         return VStack(alignment: .leading, spacing: 3) {
-            // The first two rows are a ceiling (the whole limit on one model), the last one is what was
-            // actually used; the caption names both so "real use" is not read as a third model.
-            Text("Most the limit can buy on one model, and your real use")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .padding(.top, 2)
+            UsageValueModelCaption()
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(spacing: 6) {
-                    Text(row.0)
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                        .frame(width: 104, alignment: .leading)
-                    UsageSplitBar(parts: row.1, scale: max(1, week), height: 5)
-                    Text(weekPrice > 0 ? UsageFormat.times(row.2 / weekPrice) : "")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .monospacedDigit()
-                        .frame(width: 30, alignment: .trailing)
-                    Text(UsageFormat.usd(row.2 * scale))
-                        .font(.system(size: 10.5))
-                        .monospacedDigit()
-                        .frame(width: 50, alignment: .trailing)
-                }
+                UsageValueModelRow(
+                    label: row.0,
+                    parts: row.1,
+                    scale: max(1, week),
+                    times: weekPrice > 0 ? row.2 / weekPrice : nil,
+                    usd: row.2 * scale)
             }
+        }
+    }
+}
+
+/// An account (or Antigravity) line of the Value card: swatch, name, plan and the large multiple.
+struct UsageValueTitleLine: View {
+    let color: Color
+    let name: String
+    let plan: String?
+    let times: Double?
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(self.color)
+                .frame(width: 8, height: 8)
+            Text(self.name)
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+            if let plan {
+                Text(plan)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 6)
+            if let times {
+                Text(UsageFormat.times(times))
+                    .font(.system(size: 15, weight: .bold))
+                    .monospacedDigit()
+                    .foregroundStyle(self.color)
+            }
+        }
+    }
+}
+
+/// The first rows are a ceiling (the whole limit on one model), the last one is what was actually used;
+/// the caption names both so "real use" is not read as one more model.
+struct UsageValueModelCaption: View {
+    var body: some View {
+        Text("Most the limit can buy on one model, and your real use")
+            .font(.system(size: 10))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .padding(.top, 2)
+    }
+}
+
+/// "Opus only   ▬▬▬▬   ×49   $4,936": a bar on the card's scale, the multiple of the plan price, the dollars.
+struct UsageValueModelRow: View {
+    let label: String
+    let parts: [(Double, Color)]
+    let scale: Double
+    /// Nil without a plan price: the column stays, empty.
+    let times: Double?
+    let usd: Double
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(self.label)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 104, alignment: .leading)
+            UsageSplitBar(parts: self.parts, scale: self.scale, height: 5)
+            Text(self.times.map { UsageFormat.times($0) } ?? "")
+                .font(.system(size: 10.5, weight: .semibold))
+                .monospacedDigit()
+                .frame(width: 30, alignment: .trailing)
+            Text(UsageFormat.usd(self.usd))
+                .font(.system(size: 10.5))
+                .monospacedDigit()
+                .frame(width: 50, alignment: .trailing)
         }
     }
 }
