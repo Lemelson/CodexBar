@@ -219,6 +219,157 @@ public final class UsagePanelSelection: ObservableObject {
     }
 }
 
+// MARK: - Spend numbers, computed once
+
+/// One account's spend for every span the Spend mode shows (Today, 7 days and each period).
+/// Built in a single pass over the account's days, so the rows and the detail panel only read it.
+public struct UsageSpendAccountTotals: Sendable, Equatable {
+    /// Today, 7 days and every selectable period.
+    static let spans: [Int] = [1, 7] + UsageSpendPeriod.allCases.map(\.days)
+    private let splits: [Int: UsageModelSplit]
+
+    public init(account: UsagePanelState.Account, now: Date) {
+        let starts = Self.spans.map { (days: $0, from: UsageDayKey.start(days: $0, now: now)) }
+        var splits: [Int: UsageModelSplit] = [:]
+        for span in Self.spans {
+            splits[span] = UsageModelSplit()
+        }
+        // Same rule as `Account.split(lastDays:)`, in the same day order, so the sums are identical.
+        for day in account.daily ?? [] {
+            let matching = starts.filter { day.day >= $0.from }
+            guard !matching.isEmpty else { continue }
+            let split = day.split
+            for span in matching {
+                splits[span.days, default: UsageModelSplit()].add(split)
+            }
+        }
+        self.splits = splits
+    }
+
+    /// Spend over the last `days` calendar days, counting today. Only the spans above are known.
+    public func split(lastDays days: Int) -> UsageModelSplit {
+        self.splits[days] ?? UsageModelSplit()
+    }
+}
+
+/// Everything the Spend mode draws, computed once per summary: a period switch or a hover then only
+/// reads ready values instead of walking the daily records and the calendar again.
+/// All values depend only on the summary and on today's date.
+public struct UsageSpendDigest: Sendable, Equatable {
+    /// Spend of one account on one day: one bar segment of the chart.
+    public struct Bar: Identifiable, Sendable, Equatable {
+        let key: String
+        let date: Date
+        let account: String
+        let colorIndex: Int
+        let usd: Double
+        let opus: Double
+        let fable: Double
+
+        public var id: String {
+            "\(self.key)-\(self.account)"
+        }
+    }
+
+    /// An account chip under the chart when no day is hovered.
+    public struct Legend: Identifiable, Sendable, Equatable {
+        public let id: String
+        let name: String
+        let colorIndex: Int
+    }
+
+    /// What one period shows: chart range, bars, the whole-period split and the hint above the chart.
+    public struct Period: Sendable, Equatable {
+        public let period: UsageSpendPeriod
+        let domain: ClosedRange<Date>
+        let bars: [Bar]
+        let whole: UsageModelSplit
+        let hint: String
+    }
+
+    public let today: UsageModelSplit
+    public let week: UsageModelSplit
+    let legend: [Legend]
+    private let periods: [Period]
+    private let accounts: [String: UsageSpendAccountTotals]
+
+    public init(state: UsagePanelState, now: Date) {
+        let totals = state.accounts.map { UsageSpendAccountTotals(account: $0, now: now) }
+        // Summed in account order, as `UsagePanelState.split(lastDays:)` does.
+        func whole(_ days: Int) -> UsageModelSplit {
+            totals.reduce(into: UsageModelSplit()) { $0.add($1.split(lastDays: days)) }
+        }
+        self.today = whole(1)
+        self.week = whole(7)
+        self.legend = state.accounts.map { account in
+            Legend(id: account.id, name: account.displayName, colorIndex: state.colorIndex(of: account))
+        }
+        var byID: [String: UsageSpendAccountTotals] = [:]
+        for (account, total) in zip(state.accounts, totals) {
+            byID[account.id] = total
+        }
+        self.accounts = byID
+
+        // Every bar once; each period keeps the ones inside its range (the order stays as before).
+        let allBars = state.accounts.flatMap { account in
+            let colorIndex = state.colorIndex(of: account)
+            return (account.daily ?? []).compactMap { day -> Bar? in
+                guard day.total > 0, let date = UsageDayKey.date(day.day) else { return nil }
+                return Bar(
+                    key: day.day,
+                    date: date,
+                    account: account.displayName,
+                    colorIndex: colorIndex,
+                    usd: day.total,
+                    opus: day.opus ?? 0,
+                    fable: day.fable ?? 0)
+            }
+        }
+        let trackedSince = state.trackedSince
+        self.periods = UsageSpendPeriod.allCases.map { period in
+            let domain = Self.domain(period: period, trackedSince: trackedSince, now: now)
+            let from = UsageDayKey.string(domain.lowerBound)
+            return Period(
+                period: period,
+                domain: domain,
+                bars: allBars.filter { $0.key >= from },
+                whole: whole(period.days),
+                hint: Self.hint(period: period, domain: domain, now: now))
+        }
+    }
+
+    public subscript(period: UsageSpendPeriod) -> Period {
+        self.periods.first { $0.period == period } ?? self.periods[0]
+    }
+
+    public func totals(for account: UsagePanelState.Account) -> UsageSpendAccountTotals? {
+        self.accounts[account.id]
+    }
+
+    /// Claude Code logs on this Mac do not go back forever: the empty part of the chart is not drawn.
+    private static func domain(period: UsageSpendPeriod, trackedSince: Date?, now: Date) -> ClosedRange<Date> {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: now)
+        var start = calendar.date(byAdding: .day, value: -(period.days - 1), to: today) ?? today
+        let shortest = calendar.date(byAdding: .day, value: -29, to: today) ?? today
+        if let tracked = trackedSince.map({ calendar.startOfDay(for: $0) }), tracked > start {
+            start = min(tracked, shortest)
+        }
+        let end = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+        return start...end
+    }
+
+    private static func hint(period: UsageSpendPeriod, domain: ClosedRange<Date>, now: Date) -> String {
+        let calendar = Calendar.current
+        let asked = calendar.date(byAdding: .day, value: -(period.days - 1), to: calendar.startOfDay(for: now))
+        if let asked, domain.lowerBound > asked {
+            return "Per day since \(UsageFormat.format(domain.lowerBound, "MMM d")), the first day on record. "
+                + "Point at a bar."
+        }
+        return "Per day. Point at a bar for that day."
+    }
+}
+
 // MARK: - Shared rows
 
 /// Model row: share bar, tokens, dollars, share of spend.
@@ -280,6 +431,9 @@ struct UsageModelBlock: View {
     let title: String
     let split: UsageModelSplit
     var expanded = false
+    /// Set when the block is one of the stacked period layers: only the visible layer may track the mouse,
+    /// because a tracking area ignores SwiftUI opacity and hit testing.
+    var trackingPeriod: UsageSpendPeriod?
     @State private var otherHovered = false
 
     var body: some View {
@@ -290,11 +444,9 @@ struct UsageModelBlock: View {
             UsageModelRow(name: "Fable", use: self.split[.fable], total: total, color: UsagePalette.fable)
             UsageModelRow(name: "Other", use: self.split.minor, total: total, color: UsagePalette.others)
                 .overlay {
-                    UsageMouseTracker { location in
-                        let inside = location != nil
-                        if self.otherHovered != inside {
-                            self.otherHovered = inside
-                        }
+                    // An expanded block always shows the breakdown: hovering would change nothing.
+                    if !self.expanded {
+                        self.otherTracker
                     }
                 }
             Text(self.expanded || self.otherHovered
@@ -305,6 +457,20 @@ struct UsageModelBlock: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
+        }
+    }
+
+    @ViewBuilder private var otherTracker: some View {
+        let onMoved: (CGPoint?) -> Void = { location in
+            let inside = location != nil
+            if self.otherHovered != inside {
+                self.otherHovered = inside
+            }
+        }
+        if let period = self.trackingPeriod {
+            UsageSpendActiveTracker(period: period, onMoved: onMoved)
+        } else {
+            UsageMouseTracker(onMoved: onMoved)
         }
     }
 }

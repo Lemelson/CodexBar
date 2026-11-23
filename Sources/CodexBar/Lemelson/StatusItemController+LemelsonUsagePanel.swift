@@ -402,8 +402,10 @@ extension StatusItemController {
     private func addLemelsonSpend(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {
         let stamp = Int(state.generatedAt)
         let panelWidth = Self.lemelsonSubpanelWidth
+        // All Spend numbers for every period, computed once: the period switch and hovering only read them.
+        let spend = UsageSpendDigest(state: state, now: now)
         menu.addItem(self.makeMenuCardItem(
-            UsageSpendSummaryView(state: state, now: now, width: width),
+            UsageSpendSummaryView(state: state, now: now, width: width, spend: spend),
             id: "lemelsonSpendSummary",
             width: width,
             heightCacheScope: "lemelson-spend-summary",
@@ -412,11 +414,17 @@ extension StatusItemController {
         menu.addItem(.separator())
         for (index, account) in state.accounts.enumerated() {
             let submenu = self.makeLemelsonSubpanel {
-                AnyView(UsageSpendAccountPanelView(state: state, account: account, now: Date(), width: panelWidth))
+                AnyView(UsageSpendAccountPanelView(
+                    state: state, account: account, now: now, width: panelWidth, spend: spend))
             }
             menu.addItem(self.makeMenuCardItem(
                 LemelsonHighlightBridge(
-                    content: UsageSpendAccountRowView(account: account, colorIndex: index, width: width)),
+                    content: UsageSpendAccountRowView(
+                        account: account,
+                        colorIndex: index,
+                        width: width,
+                        now: now,
+                        totals: spend.totals(for: account))),
                 id: "lemelsonSpendAccount-\(index)",
                 width: width,
                 heightCacheScope: "lemelson-spend-account",
@@ -859,7 +867,18 @@ extension StatusItemController {
                 }
             }))
         }
-        for (delay, action) in steps + scrollSteps {
+        // `lemelsonSelfTestHover` on top of `lemelsonSelfTest`: only hover the first and the last limit
+        // row of the page the menu opened on, to look at how the detail panel joins the menu.
+        let hoverOnly: [(TimeInterval, () -> Void)] = [
+            (0.7, { highlight(0) }),
+            (2.2, { highlight(rows().count - 1) }),
+            (3.7, { [weak menu] in
+                LemelsonPageTransition.shared.trace = nil
+                menu?.cancelTracking()
+            }),
+        ]
+        let plan = UserDefaults.standard.bool(forKey: "lemelsonSelfTestHover") ? hoverOnly : steps + scrollSteps
+        for (delay, action) in plan {
             let timer = Timer(timeInterval: delay, repeats: false) { _ in
                 MainActor.assumeIsolated(action)
             }

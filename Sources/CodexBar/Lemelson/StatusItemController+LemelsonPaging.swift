@@ -449,6 +449,8 @@ final class LemelsonPageTransition {
     static let rebuildTimeout: TimeInterval = 0.6
     /// How long a page built after the strip set off takes to come in from the edge.
     static let entranceDuration: CFTimeInterval = 0.16
+    /// How long the menu window takes to grow or shrink to the height of the new page.
+    static let heightDuration: CFTimeInterval = 0.22
     /// Page snapshots are dropped this long after the menu closes.
     static let cacheLifetime: TimeInterval = 600
 
@@ -531,6 +533,22 @@ final class LemelsonPageTransition {
     private var stripHasArrived = false
     private var lastForward = true
     private var entranceEnd: CFTimeInterval = 0
+    /// The page whose real rows are on screen and move with the strip; nil while the rows under the
+    /// row that stays are masked out and only copies show.
+    private var realKey: String?
+    private let rowMask = CALayer()
+    /// Height animation of the menu window (see "Height" below).
+    private var heightObserver: (any NSObjectProtocol)?
+    private var heightTimer: Timer?
+    private var applyingHeight = false
+    private var shownHeight: CGFloat = 0
+    private var heightFrom: CGFloat = 0
+    private var heightTo: CGFloat = 0
+    private var heightStart: CFTimeInterval = 0
+    private var glassMargin = NSSize.zero
+    private var slideStart: CFTimeInterval = 0
+    private var slideFrom: CGFloat = 0
+    private var slideDuration: CFTimeInterval = 0
     private weak var menu: NSMenu?
     private weak var menuWindow: NSWindow?
     private var boundaryViews: ((NSMenu) -> BoundaryViews)?
@@ -567,6 +585,8 @@ final class LemelsonPageTransition {
             layer.actions = Self.noImplicitActions
         }
         self.clipLayer.masksToBounds = true
+        self.rowMask.backgroundColor = NSColor.black.cgColor
+        self.rowMask.actions = Self.noImplicitActions
         self.topLayer.contentsGravity = .resize
         self.clipLayer.addSublayer(self.stripLayer)
         self.rootLayer.addSublayer(self.clipLayer)
@@ -600,6 +620,14 @@ final class LemelsonPageTransition {
         self.menuWindow = window
         self.boundaryViews = boundaryViews
         self.currentKey = currentKey
+        let wasIdle = self.phase != .active
+        if !wasIdle {
+            self.freezeRealRows()
+        } else {
+            // The picture of the page at rest needs the window at its full height.
+            self.finishHeight()
+        }
+        self.watchHeight(of: window)
 
         if self.phase != .active || self.kind != kind {
             // A fresh strip. If one was moving under another boundary, it restarts from its target page.
@@ -615,7 +643,7 @@ final class LemelsonPageTransition {
             if self.phase != .active {
                 self.cache[from] = start
             }
-            self.startStrip(with: start, key: restartKey, kind: kind, over: window)
+            self.startStrip(with: start, key: restartKey, kind: kind, over: window, showCopy: !wasIdle)
         }
 
         CATransaction.begin()
@@ -640,13 +668,13 @@ final class LemelsonPageTransition {
         self.targetIsFresh = false
         self.stripHasArrived = false
         self.lastForward = forward
-        if let known = self.cached(target, width: self.width) {
-            // The row that stays (its selected button) changes with the first frame of the slide.
-            self.setTop(from: known)
-        }
         CATransaction.commit()
         let duration = self.duration
         self.slideStrip(duration: duration)
+        if wasIdle, let first = self.slot(at: 0) {
+            // Until the menu rebuilds its rows, the page that leaves is the real rows themselves.
+            self.revealRealRows(of: first, enterOffset: nil)
+        }
         self.phase = .active
         self.schedule(after: duration) { [weak self] in
             guard let self else { return }
@@ -663,6 +691,10 @@ final class LemelsonPageTransition {
     /// Hook at the end of `populateMenu`: the real rows now show `currentKey()`.
     func menuDidPopulate(_ menu: NSMenu) {
         guard self.phase == .active, menu === self.menu, let key = self.currentKey?() else { return }
+        // The rows now belong to another page: the copy of the old one takes over, and the new rows
+        // stay out of sight until they are placed.
+        self.freezeRealRows()
+        self.setRowsMasked(true)
         // NSMenu applies the new rows and its new size on its next pass; capture one frame later.
         self.captureTimer?.invalidate()
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: false) { [weak self] _ in
@@ -674,6 +706,10 @@ final class LemelsonPageTransition {
 
     func menuDidClose() {
         self.abort()
+        if let observer = self.heightObserver {
+            NotificationCenter.default.removeObserver(observer)
+            self.heightObserver = nil
+        }
         self.cachePurgeTimer?.invalidate()
         let timer = Timer(timeInterval: Self.cacheLifetime, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -689,22 +725,38 @@ final class LemelsonPageTransition {
 
     private func capture(key: String) {
         self.captureTimer = nil
-        guard self.phase == .active, let menu = self.menu, let window = self.menuWindow,
-              let snapshot = Self.snapshot(
-                  window,
-                  views: self.boundaryViews?(menu) ?? (nil, nil),
-                  excluding: self.rootLayer)
-        else { return }
-        self.cache[key] = snapshot
+        guard self.phase == .active, let menu = self.menu, let window = self.menuWindow else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        // The clip follows the glass background, which already has the new height.
-        self.layoutClip(height: (window.contentView?.bounds.height ?? window.frame.height) - self.boundary)
-        if let slot = self.slots.first(where: { $0.key == key }) {
-            self.fill(slot, from: snapshot, fade: !slot.hasImage)
+        // The picture needs the rows unmasked; nothing is committed until the end of this block.
+        self.setRowsMasked(false)
+        // The window may be between two heights; the picture is taken at the final one.
+        let shown = self.shownHeight
+        let resizing = self.heightTimer != nil
+        if resizing { self.setWindowHeight(self.heightTo, display: false) }
+        let taken = Self.snapshot(
+            window,
+            views: self.boundaryViews?(menu) ?? (nil, nil),
+            excluding: self.rootLayer)
+        if resizing { self.setWindowHeight(shown, display: false) }
+        guard let snapshot = taken else {
+            self.setRowsMasked(true)
+            CATransaction.commit()
+            return
         }
-        if key == self.targetKey {
-            self.setTop(from: snapshot)
+        self.cache[key] = snapshot
+        self.layoutClip(height: (window.contentView?.bounds.height ?? window.frame.height) - self.boundary)
+        let slot = self.slots.first(where: { $0.key == key })
+        var enterOffset: CGFloat?
+        if let slot {
+            enterOffset = self.fill(slot, from: snapshot, fade: !slot.hasImage)
+        }
+        if key == self.targetKey, let slot {
+            // The page that arrives is the real rows, not a picture of them: a picture draws the
+            // dimmed (vibrant) text brighter than the menu does, which showed as a flash at rest.
+            self.revealRealRows(of: slot, enterOffset: enterOffset)
+        } else {
+            self.setRowsMasked(true)
         }
         CATransaction.commit()
         CATransaction.flush()
@@ -728,36 +780,50 @@ final class LemelsonPageTransition {
             return
         }
         self.cancelTimers()
-        // One transaction in one window: the rows appear on the frame the copy disappears.
+        // The real rows are already in place; only the pages that left are removed.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if let window = self.menuWindow { Self.setRowsHidden(false, in: window) }
+        self.setRowsMasked(false)
         self.rootLayer.opacity = 0
         self.clearStrip()
         CATransaction.commit()
         CATransaction.flush()
+        self.realKey = nil
         self.phase = .idle
         self.log("done")
     }
 
     private func abort() {
+        self.finishHeight()
         self.cancelTimers()
         self.captureTimer?.invalidate()
         self.captureTimer = nil
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        if let window = self.menuWindow { Self.setRowsHidden(false, in: window) }
+        self.setRowsMasked(false)
+        for layer in self.lowerRowLayers() {
+            layer.removeAnimation(forKey: Self.followKey)
+            layer.removeAnimation(forKey: Self.enterKey)
+        }
         self.rootLayer.opacity = 0
         self.clearStrip()
         CATransaction.commit()
+        self.realKey = nil
         self.host?.removeFromSuperview()
         self.phase = .idle
     }
 
     // MARK: - Strip
 
-    /// Shows one page at rest, pixel-identical to the rows it covers, and hides the real rows.
-    private func startStrip(with snapshot: Snapshot, key: String, kind: Boundary, over window: NSWindow) {
+    /// Lays out a strip with one page at rest. Who shows that page, its copy or the real rows, is up
+    /// to the caller.
+    private func startStrip(
+        with snapshot: Snapshot,
+        key: String,
+        kind: Boundary,
+        over window: NSWindow,
+        showCopy: Bool)
+    {
         guard let content = window.contentView else { return }
         self.kind = kind
         self.width = content.bounds.width
@@ -780,15 +846,18 @@ final class LemelsonPageTransition {
         self.stripLayer.bounds = CGRect(x: 0, y: 0, width: self.width, height: self.panelHeight - self.boundary)
         self.stripLayer.position.x = self.width / 2
         self.layoutClip(height: content.bounds.height - self.boundary)
-        self.setTop(from: snapshot)
+        if self.phase == .active {
+            // The row that stays may have changed: the mask follows it.
+            self.setRowsMasked(true)
+        }
         let slot = Slot(key: key, index: 0)
         self.slots = [slot]
         self.stripLayer.addSublayer(slot.layer)
         self.fill(slot, from: snapshot, fade: false)
+        // From rest the page is still the real rows; its copy waits, unseen, for the rebuild.
+        slot.layer.isHidden = !showCopy
         self.targetIndex = 0
         self.rootLayer.opacity = 1
-        // Same window, same transaction: the copy appears on the frame the rows disappear.
-        Self.setRowsHidden(true, in: window)
         CATransaction.commit()
         CATransaction.flush()
     }
@@ -838,15 +907,12 @@ final class LemelsonPageTransition {
         self.stripLayer.position.y = clipHeight - self.stripLayer.bounds.height / 2
     }
 
-    private func setTop(from snapshot: Snapshot) {
-        self.topLayer.contents = snapshot.crop(top: 0, height: self.boundary)
-        self.topLayer.contentsScale = snapshot.scale
-    }
-
-    private func fill(_ slot: Slot, from snapshot: Snapshot?, fade: Bool) {
-        guard let snapshot else { return }
+    /// Returns the offset the page comes in from, when it joins a strip that is already moving.
+    @discardableResult
+    private func fill(_ slot: Slot, from snapshot: Snapshot?, fade: Bool) -> CGFloat? {
+        guard let snapshot else { return nil }
         let height = snapshot.size.height - self.boundary
-        guard height > 0 else { return }
+        guard height > 0 else { return nil }
         slot.layer.contents = snapshot.crop(top: self.boundary, height: height)
         slot.layer.contentsScale = snapshot.scale
         slot.layer.frame = CGRect(
@@ -857,13 +923,14 @@ final class LemelsonPageTransition {
         let isNew = !slot.hasImage
         slot.hasImage = true
         if fade, isNew, slot.key == self.targetKey {
-            self.slideIn(slot)
+            return self.slideIn(slot)
         }
+        return nil
     }
 
     /// A page whose rows were built after the strip set off: it comes in from the edge it would have
     /// come from, on top of what is left of the strip's own motion, instead of appearing in place.
-    private func slideIn(_ slot: Slot) {
+    private func slideIn(_ slot: Slot) -> CGFloat? {
         let target = self.width / 2 - CGFloat(self.targetIndex) * self.width
         let remaining = (self.stripLayer.presentation()?.position.x ?? target) - target
         let side: CGFloat = if abs(remaining) > 0.5 {
@@ -872,15 +939,129 @@ final class LemelsonPageTransition {
             self.lastForward ? 1 : -1
         }
         let offset = side * self.width - remaining
-        guard abs(offset) > 1 else { return }
+        guard abs(offset) > 1 else { return nil }
+        slot.layer.add(Self.entrance(from: offset), forKey: Self.enterKey)
+        self.entranceEnd = CACurrentMediaTime() + Self.entranceDuration
+        return offset
+    }
+
+    private static let followKey = "lemelsonFollow"
+    private static let enterKey = "lemelsonEnter"
+    /// Visible on the first frame, halfway in about 55 ms, then a soft landing.
+    private static var slideTiming: CAMediaTimingFunction {
+        CAMediaTimingFunction(controlPoints: 0.3, 0.4, 0.15, 1)
+    }
+
+    private static func entrance(from offset: CGFloat) -> CABasicAnimation {
         let enter = CABasicAnimation(keyPath: "position.x")
         enter.isAdditive = true
         enter.fromValue = offset
         enter.toValue = 0
-        enter.duration = Self.entranceDuration
+        enter.duration = self.entranceDuration
         enter.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.75, 0.2, 1)
-        slot.layer.add(enter, forKey: "enter")
-        self.entranceEnd = CACurrentMediaTime() + Self.entranceDuration
+        return enter
+    }
+
+    // MARK: - Real rows
+
+    private var rowClipView: NSClipView? {
+        self.menuWindow?.contentView?.subviews.lazy.compactMap { ($0 as? NSScrollView)?.contentView }.first
+    }
+
+    /// The menu's own layers that lie under the row that stays. The walk goes over layers, not views:
+    /// the menu draws its plain items (Settings…, Quit) in layers that belong to no view of their own.
+    private func lowerRowLayers() -> [CALayer] {
+        guard let root = self.menuWindow?.contentView?.layer, let document = self.rowClipView?.documentView?.layer
+        else { return [] }
+        var layers: [CALayer] = []
+        func visit(_ layer: CALayer, depth: Int) {
+            for sub in layer.sublayers ?? [] where !sub.isHidden {
+                let rect = sub.convert(sub.bounds, to: root)
+                guard rect.height > 0.5, rect.width > 0.5 else { continue }
+                let top = root.isGeometryFlipped ? rect.minY - root.bounds.minY : root.bounds.maxY - rect.maxY
+                if top >= self.boundary - 1 {
+                    layers.append(sub)
+                } else if top + rect.height > self.boundary + 1, depth < 6 {
+                    visit(sub, depth: depth + 1)
+                }
+            }
+        }
+        visit(document, depth: 0)
+        return layers
+    }
+
+    /// Hides everything the menu draws under the row that stays, or shows it again. The row itself
+    /// and what is above it are never covered: they stay the menu's own.
+    private func setRowsMasked(_ masked: Bool) {
+        guard let content = self.menuWindow?.contentView, let clip = self.rowClipView, let layer = clip.layer else {
+            return
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if masked {
+            let top = NSRect(
+                x: 0,
+                y: content.isFlipped ? 0 : content.bounds.height - self.boundary,
+                width: content.bounds.width,
+                height: self.boundary)
+            // A view's layer uses the view's own coordinates, flipped or not.
+            self.rowMask.frame = clip.convert(top, from: content)
+            if layer.mask !== self.rowMask {
+                layer.mask = self.rowMask
+            }
+        } else if layer.mask === self.rowMask {
+            layer.mask = nil
+        }
+        CATransaction.commit()
+    }
+
+    /// The real rows take the place of `slot`'s picture and move exactly as the strip does.
+    private func revealRealRows(of slot: Slot, enterOffset: CGFloat?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        slot.layer.isHidden = true
+        self.setRowsMasked(false)
+        let rest = self.width / 2 - CGFloat(slot.index) * self.width
+        let target = self.width / 2 - CGFloat(self.targetIndex) * self.width
+        let moving = CACurrentMediaTime() < self.slideStart + self.slideDuration
+        for layer in self.lowerRowLayers() {
+            layer.removeAnimation(forKey: Self.followKey)
+            layer.removeAnimation(forKey: Self.enterKey)
+            if moving || abs(target - rest) > 0.5 {
+                let follow = CABasicAnimation(keyPath: "position.x")
+                follow.isAdditive = true
+                follow.fromValue = self.slideFrom - rest
+                follow.toValue = target - rest
+                follow.duration = self.slideDuration
+                follow.timingFunction = Self.slideTiming
+                follow.beginTime = layer.convertTime(self.slideStart, from: nil)
+                // A page that leaves stays out until its rows are replaced.
+                follow.fillMode = .forwards
+                follow.isRemovedOnCompletion = abs(target - rest) <= 0.5
+                layer.add(follow, forKey: Self.followKey)
+            }
+            if let enterOffset {
+                layer.add(Self.entrance(from: enterOffset), forKey: Self.enterKey)
+            }
+        }
+        CATransaction.commit()
+        self.realKey = slot.key
+        self.log("real rows \(slot.key)")
+    }
+
+    /// The copy of the page takes over from the real rows, in the same place.
+    private func freezeRealRows() {
+        guard let key = self.realKey else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.slots.first { $0.key == key }?.layer.isHidden = false
+        self.setRowsMasked(true)
+        for layer in self.lowerRowLayers() {
+            layer.removeAnimation(forKey: Self.followKey)
+            layer.removeAnimation(forKey: Self.enterKey)
+        }
+        CATransaction.commit()
+        self.realKey = nil
     }
 
     /// Moves the strip to the target page from wherever it is now.
@@ -891,8 +1072,10 @@ final class LemelsonPageTransition {
         slide.fromValue = current
         slide.toValue = target
         slide.duration = duration
-        // Visible on the first frame, halfway in about 55 ms, then a soft landing.
-        slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.3, 0.4, 0.15, 1)
+        slide.timingFunction = Self.slideTiming
+        self.slideStart = CACurrentMediaTime()
+        self.slideFrom = current
+        self.slideDuration = duration
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         self.stripLayer.position.x = target
@@ -926,6 +1109,105 @@ final class LemelsonPageTransition {
         return snapshot
     }
 
+    // MARK: - Height
+
+    /// NSMenu gives its window the height of the new page in one step. While a page turns, that step
+    /// is taken back on the spot (the resize notification arrives before anything is drawn) and the
+    /// window is walked to the new height over a few frames instead. Its top edge stays where it is.
+    private func watchHeight(of window: NSWindow) {
+        guard self.heightObserver == nil else { return }
+        self.shownHeight = window.frame.height
+        if let glass = window.childWindows?.first {
+            self.glassMargin = NSSize(
+                width: (glass.frame.width - window.frame.width) / 2,
+                height: (glass.frame.height - window.frame.height) / 2)
+        }
+        self.heightObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: nil)
+        { [weak self] _ in
+            MainActor.assumeIsolated { self?.windowDidResize() }
+        }
+    }
+
+    private func windowDidResize() {
+        guard !self.applyingHeight, let window = self.menuWindow else { return }
+        let final = window.frame.height
+        guard self.phase == .active || self.heightTimer != nil else {
+            self.shownHeight = final
+            return
+        }
+        guard abs(final - self.shownHeight) > 0.5 else { return }
+        self.heightFrom = self.shownHeight
+        self.heightTo = final
+        self.heightStart = CACurrentMediaTime()
+        self.setWindowHeight(self.shownHeight, display: false)
+        self.log("height \(Int(self.heightFrom)) -> \(Int(final))")
+        guard self.heightTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickHeight() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.heightTimer = timer
+    }
+
+    private func tickHeight() {
+        let progress = min(1, (CACurrentMediaTime() - self.heightStart) / Self.heightDuration)
+        let eased = 1 - pow(1 - progress, 3)
+        if progress >= 1 {
+            self.finishHeight()
+        } else {
+            let height = self.heightFrom + (self.heightTo - self.heightFrom) * eased
+            self.setWindowHeight((height * 2).rounded() / 2, display: true)
+        }
+    }
+
+    private func finishHeight() {
+        guard let timer = self.heightTimer else { return }
+        timer.invalidate()
+        self.heightTimer = nil
+        self.setWindowHeight(self.heightTo, display: true)
+        // Back to the menu's own layout: the scroll view fills the window.
+        if let content = self.menuWindow?.contentView {
+            for case let scroll as NSScrollView in content.subviews where scroll.frame != content.bounds {
+                scroll.frame = content.bounds
+            }
+        }
+    }
+
+    private func setWindowHeight(_ height: CGFloat, display: Bool) {
+        guard let window = self.menuWindow, height > 1 else { return }
+        var frame = window.frame
+        guard abs(frame.height - height) > 0.01 else { return }
+        frame.origin.y = frame.maxY - height
+        frame.size.height = height
+        self.applyingHeight = true
+        window.setFrame(frame, display: display)
+        // The glass background is a child window of its own; it does not resize with its parent.
+        if let glass = window.childWindows?.first {
+            glass.setFrame(
+                frame.insetBy(dx: -self.glassMargin.width, dy: -self.glassMargin.height),
+                display: display)
+        }
+        // The menu's scroll view keeps its own height and sits at the bottom of the window; between
+        // two heights it is held against the top instead, so the rows do not ride up or down.
+        if let content = window.contentView, !content.isFlipped {
+            for case let scroll as NSScrollView in content.subviews {
+                let y = content.bounds.height - scroll.frame.height
+                if abs(scroll.frame.minY - y) > 0.01 {
+                    scroll.setFrameOrigin(NSPoint(x: scroll.frame.minX, y: y))
+                }
+            }
+        }
+        self.applyingHeight = false
+        self.shownHeight = height
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        self.layoutClip(height: height - self.boundary)
+        CATransaction.commit()
+    }
+
     // MARK: - Plumbing
 
     private func schedule(after delay: TimeInterval, _ action: @escaping @MainActor () -> Void) {
@@ -947,29 +1229,8 @@ final class LemelsonPageTransition {
         self.trace?(message)
     }
 
-    /// Hides what the menu window draws (its rows and scroll arrows) but not the window: its glass
-    /// background lives in a separate window that follows the menu window's alpha.
-    private static func setRowsHidden(_ hidden: Bool, in window: NSWindow) {
-        guard let content = window.contentView else { return }
-        let alpha: CGFloat = hidden ? 0 : 1
-        // Without actions: a layer's opacity otherwise fades over a quarter of a second, and the old
-        // rows show through the copy as a ghost.
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for view in content.subviews where !(view is HostView) {
-            let target = (view as? NSScrollView)?.contentView ?? view
-            target.alphaValue = alpha
-            // The layer too, so the change belongs to the caller's transaction.
-            target.layer?.opacity = Float(alpha)
-            target.layer?.removeAnimation(forKey: "opacity")
-        }
-        CATransaction.commit()
-    }
-
     private static func snapshot(_ window: NSWindow, views: BoundaryViews, excluding copy: CALayer) -> Snapshot? {
         guard let content = window.contentView else { return nil }
-        // The rows may be hidden under the copy right now; draw them as they are on screen otherwise.
-        let wasHidden = content.subviews.contains { ($0 as? NSScrollView)?.contentView.alphaValue == 0 }
         // The copy sits in the same window and must not end up in the picture. Nothing is committed
         // in between, so neither change reaches the screen. (Hiding the copy's view instead is no
         // good: AppKit brings a view back with a fade.)
@@ -978,13 +1239,7 @@ final class LemelsonPageTransition {
         CATransaction.setDisableActions(true)
         copy.opacity = 0
         CATransaction.commit()
-        if wasHidden {
-            self.setRowsHidden(false, in: window)
-        }
         defer {
-            if wasHidden {
-                self.setRowsHidden(true, in: window)
-            }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             copy.opacity = copyOpacity

@@ -5,9 +5,10 @@ import SwiftUI
 // Renders the accounts panel to a PNG without launching CodexBar, so the layout can be checked by eye.
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
-//       [--only limits|spend|value|details] [--account 1] [--highlighted]
+//       [--only limits|spend|value|details] [--account 1] [--highlighted] [--hover-week 0]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
+// --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
 // --account picks whose detail panels are drawn: position in the Limits list, 0 is the active account.
 // --warm applies a warm tint, as on a Night Shift screen: shows whether colors blend together.
 
@@ -41,6 +42,7 @@ struct PreviewRoot: View {
     let warm: Bool
     var detailAccount = 0
     var highlighted = false
+    var hoverWeek: Int?
 
     private let menuWidth: CGFloat = 310
     private let panelWidth: CGFloat = 340
@@ -124,7 +126,7 @@ struct PreviewRoot: View {
         Divider()
         UsageValueCardView(state: self.state, width: self.menuWidth, now: self.now)
         Divider().padding(.horizontal, 12)
-        UsageDriftCardView(state: self.state, width: self.menuWidth)
+        UsageDriftCardView(state: self.state, width: self.menuWidth, initialHoverIndex: self.hoverWeek)
     }
 
     @ViewBuilder private var details: some View {
@@ -166,7 +168,7 @@ func argument(after flag: String) -> String? {
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
-        + "[--only part] [--account n] [--highlighted]\n"
+        + "[--only part] [--account n] [--highlighted] [--hover-week n]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
@@ -188,7 +190,8 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     only: argument(after: "--only"),
     warm: arguments.contains("--warm"),
     detailAccount: argument(after: "--account").flatMap(Int.init) ?? 0,
-    highlighted: arguments.contains("--highlighted")))
+    highlighted: arguments.contains("--highlighted"),
+    hoverWeek: argument(after: "--hover-week").flatMap(Int.init)))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)

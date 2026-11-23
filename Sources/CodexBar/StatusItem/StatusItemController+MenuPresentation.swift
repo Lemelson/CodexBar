@@ -422,6 +422,9 @@ final class MenuRowContainerView: NSView, MenuCardHighlighting, MenuCardMeasurin
 
     private func hitsHostedInteractiveControl(at point: NSPoint) -> Bool {
         guard self.containsInteractiveControls else { return false }
+        // lemelson: with no registered region the answer is always false; skip `fittingSize`, which forces a
+        // synchronous SwiftUI layout (a whole chart) on every mouse event right after the content changed.
+        guard !self.interactiveRegionStore.regions.isEmpty else { return false }
         let hostedPoint = self.hosting.convert(point, from: self)
         return self.interactiveRegionStore.contains(
             hostedPoint,

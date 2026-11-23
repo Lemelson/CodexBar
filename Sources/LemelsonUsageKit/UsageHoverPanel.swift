@@ -81,6 +81,11 @@ public enum UsageHoverShape: String, CaseIterable, Sendable {
 enum UsageHoverOutline {
     static let radius: CGFloat = 13
     static let fillet: CGFloat = 11
+    /// How far the panel reaches under the menu to cover the menu's own hairline border.
+    static let overlap: CGFloat = 2
+    /// Distance from the panel's right edge to the middle of the menu's hairline border. The concave
+    /// corners end there, so their line runs into the menu's border instead of past it.
+    static let joinInset: CGFloat = 1.5
 
     /// Closed outline in a `size` box with the origin at the bottom left.
     static func closed(size: CGSize, topFillet: Bool, bottomFillet: Bool) -> CGPath {
@@ -116,10 +121,16 @@ enum UsageHoverOutline {
         let top = h - f
         let bottom = f
         // Starts at the right end of the top edge and runs counter-clockwise, so the shared edge is last.
+        let join = w - self.joinInset
         if topFillet {
-            path.move(to: CGPoint(x: w, y: h))
+            if rightEdge {
+                path.move(to: CGPoint(x: w, y: h))
+                path.addLine(to: CGPoint(x: join, y: h))
+            } else {
+                path.move(to: CGPoint(x: join, y: h))
+            }
             path.addArc(
-                center: CGPoint(x: w - f, y: h), radius: f, startAngle: 0, endAngle: -.pi / 2, clockwise: true)
+                center: CGPoint(x: join - f, y: h), radius: f, startAngle: 0, endAngle: -.pi / 2, clockwise: true)
         } else {
             path.move(to: CGPoint(x: w, y: top - r))
             path.addArc(
@@ -132,9 +143,12 @@ enum UsageHoverOutline {
         path.addArc(
             center: CGPoint(x: r, y: bottom + r), radius: r, startAngle: .pi, endAngle: 1.5 * .pi, clockwise: false)
         if bottomFillet {
-            path.addLine(to: CGPoint(x: w - f, y: bottom))
+            path.addLine(to: CGPoint(x: join - f, y: bottom))
             path.addArc(
-                center: CGPoint(x: w - f, y: 0), radius: f, startAngle: .pi / 2, endAngle: 0, clockwise: true)
+                center: CGPoint(x: join - f, y: 0), radius: f, startAngle: .pi / 2, endAngle: 0, clockwise: true)
+            if rightEdge {
+                path.addLine(to: CGPoint(x: w, y: 0))
+            }
         } else {
             path.addLine(to: CGPoint(x: w - r, y: bottom))
             path.addArc(
@@ -342,7 +356,7 @@ public final class UsageHoverPanelController: NSObject {
             self.menuFrame = menuFrame
             self.shape = shape
             // Fused: cover the menu's own hairline border. Card: leave a gap.
-            let overlap: CGFloat = shape == .fused ? 2 : -6
+            let overlap: CGFloat = shape == .fused ? UsageHoverOutline.overlap : -6
             let right = menuFrame.minX + overlap
             let frame = NSRect(
                 x: right - Self.panelWidth - Self.shadowMargin,
