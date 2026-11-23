@@ -157,7 +157,8 @@ struct LemelsonSwipeRecognizer {
 final class LemelsonPagingState {
     static let shared = LemelsonPagingState()
     var swipe = LemelsonSwipeRecognizer()
-    /// The Spend account rows open this native submenu; a swipe closes it before turning the page.
+    /// With `lemelsonDetailPanel native`, the Spend account rows open this native submenu; a swipe closes
+    /// it before turning the page.
     weak var openSubpanelMenu: NSMenu?
 
     /// When the last page turn was requested. Background rendering waits for a pause in paging.
@@ -181,6 +182,9 @@ extension StatusItemController {
         LemelsonMenuEventFilter.handler = { [weak self] event in
             self?.lemelsonHandleTrackedEvent(event) ?? false
         }
+        LemelsonMenuEventFilter.rewrite = { event in
+            UsageHoverPanelController.shared.rewriteNestedEvent(event)
+        }
     }
 
     /// The root menu that pages, while it is open: the merged menu with the provider row, or a menu that
@@ -196,6 +200,11 @@ extension StatusItemController {
 
     /// Returns true when the event was used and must not reach NSMenu.
     func lemelsonHandleTrackedEvent(_ event: NSEvent) -> Bool {
+        // Pointer events over the detail panel are the panel's: its controls work and the menu keeps the
+        // row the panel belongs to highlighted.
+        if UsageHoverPanelController.shared.routeTrackedEvent(event) {
+            return true
+        }
         switch event.type {
         case .keyDown:
             guard let menu = self.lemelsonPagedRootMenu() else { return false }
@@ -398,6 +407,8 @@ extension StatusItemController {
     {
         guard let window = self.lemelsonMenuWindow(of: menu) else { return }
         LemelsonPagingState.shared.lastPageRequest = CACurrentMediaTime()
+        // The rows the panel belongs to are leaving.
+        UsageHoverPanelController.shared.hide(animated: false)
         LemelsonPageTransition.shared.begin(
             menu: menu,
             window: window,
@@ -415,6 +426,7 @@ extension StatusItemController {
 
     /// Hook at the end of `populateMenu`.
     func lemelsonMenuDidPopulate(_ menu: NSMenu) {
+        self.lemelsonDetailMenuDidPopulate(menu)
         LemelsonPageTransition.shared.menuDidPopulate(menu)
     }
 }

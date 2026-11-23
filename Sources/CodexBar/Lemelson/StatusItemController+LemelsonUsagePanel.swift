@@ -301,6 +301,7 @@ private final class LemelsonModeSwitcherView: NSView {
 extension StatusItemController {
     private static let lemelsonSubpanelWidth: CGFloat = UsageHoverPanelController.panelWidth
     static let lemelsonLimitRowPrefix = "lemelsonLimit-"
+    static let lemelsonSpendAccountPrefix = "lemelsonSpendAccount-"
     private static let lemelsonWarmableModes: [LemelsonPanelMode] = [.limits, .spend, .value]
 
     // MARK: - Menu insertion
@@ -355,7 +356,6 @@ extension StatusItemController {
         // Captions with the age of a reading change length, so heights are re-measured every ten minutes.
         let ageBucket = Int(now.timeIntervalSince1970 / 600)
         let panelWidth = Self.lemelsonSubpanelWidth
-        var details: [(key: String, build: () -> AnyView)] = []
         for (index, account) in state.orderedAccounts.enumerated() {
             menu.addItem(self.makeMenuCardItem(
                 UsageAccountHeaderView(account: account, now: now, width: width),
@@ -367,7 +367,7 @@ extension StatusItemController {
                 // The detail view is shown by the hover panel, not by a native submenu: it appears at
                 // once and morphs between rows. The empty click handler keeps the row highlightable.
                 let id = "\(Self.lemelsonLimitRowPrefix)\(index)-\(kind.rawValue)"
-                details.append((key: id, build: {
+                self.lemelsonRegisterDetail(.swiftUI(key: id, width: panelWidth) {
                     AnyView(UsageLimitDetailPanelView(
                         account: account,
                         kind: kind,
@@ -375,7 +375,7 @@ extension StatusItemController {
                         now: Date(),
                         width: panelWidth,
                         sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: Date())))
-                }))
+                })
                 menu.addItem(self.makeMenuCardItem(
                     LemelsonHighlightBridge(
                         content: UsageLimitRowView(
@@ -393,9 +393,6 @@ extension StatusItemController {
             }
             menu.addItem(.separator())
         }
-        if !LemelsonPanelSession.shared.isWarming {
-            UsageHoverPanelController.shared.setEntries(details)
-        }
         self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: true)
     }
 
@@ -412,26 +409,44 @@ extension StatusItemController {
             heightCacheFingerprint: "\(stamp)",
             containsInteractiveControls: true))
         menu.addItem(.separator())
+        let usesPanel = !LemelsonDetailPanel.usesNativeSubmenus
         for (index, account) in state.accounts.enumerated() {
-            let submenu = self.makeLemelsonSubpanel {
+            let id = "\(Self.lemelsonSpendAccountPrefix)\(index)"
+            let row = UsageSpendAccountRowView(
+                account: account,
+                colorIndex: index,
+                width: width,
+                now: now,
+                totals: spend.totals(for: account))
+            guard usesPanel else {
+                let submenu = self.makeLemelsonSubpanel {
+                    AnyView(UsageSpendAccountPanelView(
+                        state: state, account: account, now: now, width: panelWidth, spend: spend))
+                }
+                menu.addItem(self.makeMenuCardItem(
+                    LemelsonHighlightBridge(content: row),
+                    id: id,
+                    width: width,
+                    heightCacheScope: "lemelson-spend-account",
+                    heightCacheFingerprint: "row",
+                    submenu: submenu,
+                    submenuIndicatorAlignment: .trailing,
+                    submenuIndicatorTopPadding: 0))
+                continue
+            }
+            // The account switcher, the weeks and the models are shown by the detail panel, joined to the
+            // menu like the limit rows. The empty click handler keeps the row highlightable.
+            self.lemelsonRegisterDetail(.swiftUI(key: id, width: panelWidth) {
                 AnyView(UsageSpendAccountPanelView(
                     state: state, account: account, now: now, width: panelWidth, spend: spend))
-            }
+            })
             menu.addItem(self.makeMenuCardItem(
-                LemelsonHighlightBridge(
-                    content: UsageSpendAccountRowView(
-                        account: account,
-                        colorIndex: index,
-                        width: width,
-                        now: now,
-                        totals: spend.totals(for: account))),
-                id: "lemelsonSpendAccount-\(index)",
+                LemelsonHighlightBridge(content: row, showsChevron: true),
+                id: id,
                 width: width,
                 heightCacheScope: "lemelson-spend-account",
                 heightCacheFingerprint: "row",
-                submenu: submenu,
-                submenuIndicatorAlignment: .trailing,
-                submenuIndicatorTopPadding: 0))
+                onClick: {}))
         }
         menu.addItem(.separator())
         self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
@@ -492,32 +507,6 @@ extension StatusItemController {
             self.lemelsonRebuildOpenMenus()
         }
         return submenu
-    }
-
-    // MARK: - Hover panel
-
-    /// Called for every highlight change in a menu: shows the detail panel next to a limit row.
-    func lemelsonMenuWillHighlight(_ item: NSMenuItem?, in menu: NSMenu) {
-        guard menu.supermenu == nil else { return }
-        let panel = UsageHoverPanelController.shared
-        // The rows under the pointer are a moving copy while the page slides.
-        guard !LemelsonPageTransition.shared.isActive else {
-            panel.hide(animated: false)
-            return
-        }
-        guard let item, item.isEnabled,
-              let id = item.representedObject as? String, id.hasPrefix(Self.lemelsonLimitRowPrefix),
-              let view = item.view, let window = view.window
-        else {
-            panel.pointerLeftRows()
-            return
-        }
-        panel.show(
-            key: id,
-            rowRect: window.convertToScreen(view.convert(view.bounds, to: nil)),
-            menuFrame: window.frame,
-            screen: window.screen,
-            appearance: window.effectiveAppearance)
     }
 
     // MARK: - Instant mode switch
@@ -654,10 +643,11 @@ extension StatusItemController {
         self.lemelsonInstallMenuEventFilter()
         LemelsonPagingState.shared.swipe.reset()
         LemelsonPagingState.shared.smoothScroll = UserDefaults.standard.bool(forKey: "lemelsonSmoothScroll")
+        // The detail panel serves every tab, with or without the Claude summary.
+        self.lemelsonDetailRootMenuWillOpen(menu)
         guard FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path) else { return }
         self.lemelsonRunSelfTestIfRequested(menu: menu)
         let session = LemelsonPanelSession.shared
-        UsageHoverPanelController.shared.menuDidOpen()
         var changed = false
         if self.openMenus.isEmpty, session.mode != session.defaultMode {
             session.mode = session.defaultMode
@@ -678,7 +668,7 @@ extension StatusItemController {
     func lemelsonAllMenusDidClose() {
         let session = LemelsonPanelSession.shared
         LemelsonPageTransition.shared.menuDidClose()
-        UsageHoverPanelController.shared.menuDidClose()
+        self.lemelsonDetailAllMenusDidClose()
         session.modeWarmTimer?.invalidate()
         session.modeWarmTimer = nil
         session.openSubpanels = 0
@@ -819,34 +809,40 @@ extension StatusItemController {
         let left: UInt16 = 123
         let right: UInt16 = 124
         log.notice("self-test start on \(page(), privacy: .public)")
+        // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Gemini, Antigravity,
+        // opened on Claude Limits. The log names the page after each step, so another line still reads.
         let steps: [(TimeInterval, () -> Void)] = [
-            (0.7, { key(right, "right") }),
-            (1.3, { key(right, "right") }),
-            (1.9, { swipe(-6, 0.5, "content-left") }),
-            (2.5, { key(right, "right at the end") }),
-            (2.9, { swipe(0.4, -9, "vertical") }),
-            (3.3, { key(left, "left") }),
+            (0.7, { key(right, "right, to Spend") }),
+            (1.3, { key(right, "right, to Value") }),
+            (1.9, { swipe(-6, 0.5, "content-left, to Classic") }),
+            (2.5, { key(right, "right, to Gemini") }),
+            (3.1, { key(right, "right, to Antigravity (last page)") }),
+            (3.7, { key(right, "right at the end, stays") }),
+            (4.1, { swipe(0.4, -9, "vertical, no page") }),
+            (4.5, { key(left, "left, to Gemini") }),
             // Two presses 50 ms apart: the second lands mid-slide.
-            (3.9, { key(left, "left") }),
-            (3.95, { key(left, "left mid-slide") }),
-            (4.6, { swipe(6, -0.5, "content-right") }),
-            (5.3, { key(left, "left") }),
-            (5.9, { key(left, "left at the start") }),
-            (6.4, { key(right, "right") }),
+            (5.1, { key(left, "left, to Classic") }),
+            (5.15, { key(left, "left mid-slide, to Value") }),
+            (5.8, { swipe(6, -0.5, "content-right, to Spend") }),
+            (6.5, { key(left, "left, to Limits") }),
+            (7.1, { key(left, "left, to Codex") }),
+            (7.7, { key(left, "left, to Overview (first page)") }),
+            (8.3, { key(left, "left at the start, stays") }),
+            (8.8, { key(right, "right, to Codex") }),
             // Back again 80 ms later: the strip turns around from where it is.
-            (6.48, { key(left, "left mid-slide, reversal") }),
-            (6.9, { key(right, "right") }),
-            (7.2, { key(right, "right into Claude") }),
-            (7.7, { highlight(0) }),
-            (8.1, { highlight(2) }),
-            (9.2, { [weak menu] in
+            (8.88, { key(left, "left mid-slide, reversal, to Overview") }),
+            (9.3, { key(right, "right, to Codex") }),
+            (9.6, { key(right, "right into Claude Limits") }),
+            (10.1, { highlight(0) }),
+            (10.5, { highlight(2) }),
+            (11.6, { [weak menu] in
                 LemelsonPageTransition.shared.trace = nil
                 menu?.cancelTracking()
             }),
         ]
         // With `lemelsonSmoothScroll` on: a slow vertical two-finger scroll and its momentum, one sample
         // per frame like a real gesture.
-        var scrollSteps: [(TimeInterval, () -> Void)] = [(8.2, { highlight(nil) })]
+        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.6, { highlight(nil) })]
         let scrollStart = ProcessInfo.processInfo.systemUptime
         for index in 0...40 {
             let sample = index == 0
@@ -857,7 +853,7 @@ extension StatusItemController {
                     phase: index <= 20 ? .changed : .none,
                     isMomentum: index > 20,
                     time: scrollStart + Double(index) / 60)
-            scrollSteps.append((8.25 + Double(index) / 60, { [weak self, weak menu] in
+            scrollSteps.append((10.65 + Double(index) / 60, { [weak self, weak menu] in
                 guard let self, let menu else { return }
                 let scrollView = Self.attachedMenuScrollView(in: menu)
                 let before = scrollView?.contentView.bounds.origin.y ?? -1
@@ -877,7 +873,15 @@ extension StatusItemController {
                 menu?.cancelTracking()
             }),
         ]
-        let plan = UserDefaults.standard.bool(forKey: "lemelsonSelfTestHover") ? hoverOnly : steps + scrollSteps
+        let plan = if UserDefaults.standard.bool(forKey: "lemelsonSelfTestAdopted") {
+            self.lemelsonAdoptedSelfTestPlan(menu: menu)
+        } else if Self.lemelsonDetailSelfTestRequested {
+            self.lemelsonDetailSelfTestPlan(menu: menu)
+        } else if UserDefaults.standard.bool(forKey: "lemelsonSelfTestHover") {
+            hoverOnly
+        } else {
+            steps + scrollSteps
+        }
         for (delay, action) in plan {
             let timer = Timer(timeInterval: delay, repeats: false) { _ in
                 MainActor.assumeIsolated(action)

@@ -223,6 +223,8 @@ extension StatusItemController {
     }
 
     func populateMenu(_ menu: NSMenu, provider: UsageProvider?) {
+        // lemelson: rows whose submenu the detail panel took over get it back before anything reads it.
+        self.lemelsonMenuWillPopulate(menu)
         let trace = self.beginMenuOperationTrace(
             "populateMenu",
             breadcrumb: "populateMenu:\(provider?.rawValue ?? "merged")")

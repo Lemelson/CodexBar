@@ -80,6 +80,9 @@ func performAfterClosingSessionMenu(_ menu: NSMenu?, action: @escaping @MainActo
     while let parent = root?.supermenu {
         root = parent
     }
+    // lemelson: a chart shown in the detail panel lives in a copy that is never opened; close the menu
+    // the panel belongs to instead.
+    root = LemelsonDetailPanelState.menuToClose(for: root)
     root?.cancelTrackingWithoutAnimation()
     // Present only once AppKit has left all nested menu tracking loops.
     RunLoop.main.perform(inModes: [.default]) {

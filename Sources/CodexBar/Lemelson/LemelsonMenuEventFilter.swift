@@ -13,6 +13,10 @@ import ObjectiveC
 enum LemelsonMenuEventFilter {
     /// Returns true to swallow the event. Called only for events dequeued in event-tracking mode.
     static var handler: (@MainActor (NSEvent) -> Bool)?
+    /// Returns a replacement for a dequeued event, in any mode. The detail panel uses it while a control
+    /// inside it tracks the mouse in a loop of its own: that loop reads the events through this same
+    /// call, and they must be addressed to the panel window wherever the pointer is.
+    static var rewrite: (@MainActor (NSEvent) -> NSEvent?)?
     #if DEBUG
     /// Every event dequeued in any mode, before `handler`. Used by the self-test probe.
     static var probe: (@MainActor (NSEvent, String, Bool) -> Void)?
@@ -32,8 +36,13 @@ enum LemelsonMenuEventFilter {
         let replacement: @convention(block) (NSApplication, UInt64, NSDate?, NSString, ObjCBool) -> NSEvent? = {
             app, mask, expiration, mode, dequeue in
             while true {
-                guard let event = original(app, selector, mask, expiration, mode, dequeue) else { return nil }
+                guard let dequeued = original(app, selector, mask, expiration, mode, dequeue) else { return nil }
+                // Runs on the main thread (this is the main thread's event loop); NSEvent is not Sendable.
+                nonisolated(unsafe) var event = dequeued
                 let swallow = MainActor.assumeIsolated { () -> Bool in
+                    if dequeue.boolValue, let replacement = Self.rewrite?(event) {
+                        event = replacement
+                    }
                     #if DEBUG
                     Self.probe?(event, mode as String, dequeue.boolValue)
                     #endif
