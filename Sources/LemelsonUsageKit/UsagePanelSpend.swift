@@ -3,11 +3,12 @@ import SwiftUI
 
 // MARK: - Spend on this Mac: totals and per-day chart
 
-/// Readable replacement for the "This Mac" block: three totals, spend per day (each account in its own color) and models.
-/// The period is chosen with 30/60/90/180-day buttons; hovering a day shows its total.
+/// Readable replacement for the "This Mac" block: three totals, spend per day (split by account or by model)
+/// and models. The period is chosen with 30/60/90/180-day buttons, the split with Accounts / Models;
+/// hovering a day shows its total.
 ///
-/// Switching the period must feel instant, so nothing is rebuilt on a switch: all numbers come precomputed
-/// in `UsageSpendDigest`, every period's chart is laid out once in a stack, and the switch only flips which
+/// Switching must feel instant, so nothing is rebuilt on a switch: all numbers come precomputed in
+/// `UsageSpendDigest`, every period's two charts are laid out once in a stack, and a switch only flips which
 /// layer is visible. Only small leaf views observe the shared selection.
 public struct UsageSpendSummaryView: View {
     let spend: UsageSpendDigest
@@ -21,6 +22,7 @@ public struct UsageSpendSummaryView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             UsageSpendSummaryHeader(spend: self.spend)
+            UsageSpendBreakdownRow()
             UsageSpendPeriodStack(spend: self.spend)
         }
         .padding(.horizontal, 20)
@@ -84,6 +86,26 @@ struct UsageSpendTile: View {
     }
 }
 
+/// "Per day, split by  [Accounts | Models]", right under the totals and lined up with the period buttons.
+struct UsageSpendBreakdownRow: View {
+    @ObservedObject private var selection = UsagePanelSelection.shared
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Text("Per day, split by")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 6)
+            UsageSegmentedControl(
+                options: Array(UsageSpendBreakdown.allCases),
+                title: \.title,
+                selection: self.$selection.spendBreakdown)
+                .fixedSize()
+        }
+        .padding(.top, 2)
+    }
+}
+
 /// All four periods stacked, one visible. The layers are equatable and do not observe the selection,
 /// so a switch re-evaluates only this stack and the opacity of two layers, never a chart.
 /// Every layer has the same fixed-height parts, so the stack (and the cached menu row height) never
@@ -114,12 +136,39 @@ struct UsageSpendPeriodLayer: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             // Hover state lives inside the chart view, so pointing at bars does not rebuild the models below.
-            UsageSpendDayChart(data: self.data.chart)
-            UsageModelBlock(
-                title: "By model · \(self.data.period.short)",
-                split: self.data.whole,
-                trackingPeriod: self.data.period)
+            UsageSpendChartPair(data: self.data)
+            UsageModelBlock(title: "By model · \(self.data.period.short)", split: self.data.whole)
         }
+    }
+}
+
+/// The period's chart by account and by model, both laid out, one visible. Only this leaf observes
+/// the breakdown, and the charts inside are equatable, so a switch changes two opacities.
+struct UsageSpendChartPair: View {
+    let data: UsageSpendDigest.Period
+    @ObservedObject private var selection = UsagePanelSelection.shared
+
+    var body: some View {
+        let chosen = self.selection.spendBreakdown
+        ZStack(alignment: .topLeading) {
+            ForEach(UsageSpendBreakdown.allCases) { breakdown in
+                let shown = breakdown == chosen
+                UsageSpendChartLayer(data: self.data.chart(breakdown), breakdown: breakdown)
+                    .equatable()
+                    .opacity(shown ? 1 : 0)
+                    .allowsHitTesting(shown)
+                    .accessibilityHidden(!shown)
+            }
+        }
+    }
+}
+
+struct UsageSpendChartLayer: View, Equatable {
+    let data: UsageDayChartData
+    let breakdown: UsageSpendBreakdown
+
+    var body: some View {
+        UsageSpendDayChart(data: self.data, breakdown: self.breakdown)
     }
 }
 
@@ -132,6 +181,8 @@ enum UsageSeriesColor: Hashable, Sendable {
     case account(Int)
     /// A Gemini model, in the order of `UsageAntigravitySpend`.
     case model(Int)
+    /// A Claude model.
+    case claude(UsageModelFamily)
     /// Everything without a color of its own.
     case other
 
@@ -139,6 +190,7 @@ enum UsageSeriesColor: Hashable, Sendable {
         switch self {
         case let .account(index): UsagePalette.account(index)
         case let .model(index): UsagePalette.model(index)
+        case let .claude(family): family.color
         case .other: UsagePalette.others
         }
     }
@@ -190,6 +242,8 @@ struct UsageSpendDayChart: View {
     let data: UsageDayChartData
     /// The periods the page offers; a layer tracks the mouse while its period is the one shown.
     var offered: [UsageSpendPeriod] = UsageSpendPeriod.allCases
+    /// Claude Spend lays out one chart per breakdown: only the shown one may track the mouse.
+    var breakdown: UsageSpendBreakdown?
     @State private var pointedDay: String?
     @Environment(\.usagePreviewHoveredDay) private var previewDay
 
@@ -284,7 +338,7 @@ struct UsageSpendDayChart: View {
             GeometryReader { geometry in
                 // The tracker leaf decides by itself whether this period is visible, so the chart
                 // does not depend on the selection and is not rebuilt when it changes.
-                UsageSpendActiveTracker(period: self.data.period, offered: self.offered) { location in
+                UsageSpendActiveTracker(period: self.data.period, offered: self.offered, breakdown: self.breakdown) { location in
                     self.updateHover(location: location, proxy: proxy, geometry: geometry)
                 }
             }
@@ -316,11 +370,14 @@ struct UsageSpendDayChart: View {
 struct UsageSpendActiveTracker: View {
     let period: UsageSpendPeriod
     var offered: [UsageSpendPeriod] = UsageSpendPeriod.allCases
+    /// Set for a chart that is one of the Accounts / Models pair: it tracks only while its breakdown is shown.
+    var breakdown: UsageSpendBreakdown?
     let onMoved: (CGPoint?) -> Void
     @ObservedObject private var selection = UsagePanelSelection.shared
 
     var body: some View {
         let active = UsageSpendPeriod.effective(self.selection.spendPeriod, offered: self.offered) == self.period
+            && (self.breakdown == nil || self.breakdown == self.selection.spendBreakdown)
         ZStack {
             if active {
                 UsageMouseTracker(onMoved: self.onMoved)
@@ -453,6 +510,7 @@ public struct UsageSpendAccountPanelView: View {
                     let shown = account.id == self.selected
                     UsageSpendAccountContent(
                         account: account,
+                        now: self.now,
                         fableWeight: self.state.fableWeight(for: account),
                         totals: self.spend.totals(for: account)
                             ?? UsageSpendAccountTotals(account: account, now: self.now),
@@ -471,6 +529,7 @@ public struct UsageSpendAccountPanelView: View {
 
 struct UsageSpendAccountContent: View {
     let account: UsagePanelState.Account
+    let now: Date
     /// How many times faster a Fable dollar uses up the weekly limit than an Opus dollar.
     let fableWeight: Double
     let totals: UsageSpendAccountTotals
@@ -478,7 +537,8 @@ struct UsageSpendAccountContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            UsageSpendWeekList(account: self.account, fableWeight: self.fableWeight, isShown: self.isShown)
+            UsageSpendWeekList(
+                account: self.account, fableWeight: self.fableWeight, isShown: self.isShown, now: self.now)
             Divider()
             UsageSpendAccountModels(totals: self.totals)
         }
@@ -492,176 +552,7 @@ struct UsageSpendAccountModels: View {
 
     var body: some View {
         let period = self.selection.spendPeriod
-        UsageModelBlock(
-            title: "By model · \(period.short)",
-            split: self.totals.split(lastDays: period.days),
-            expanded: true)
-    }
-}
-
-/// Title, weekly limit windows and the breakdown of the hovered week.
-struct UsageSpendWeekList: View {
-    let account: UsagePanelState.Account
-    let fableWeight: Double
-    /// Hidden accounts in the stack must not track the mouse: tracking areas ignore SwiftUI opacity,
-    /// so a hidden account would follow the pointer over the visible one's weeks.
-    let isShown: Bool
-    @State private var hoveredWeek: Double?
-
-    private var weeks: [UsagePanelState.Week] {
-        self.account.weeks ?? []
-    }
-
-    /// How many Opus dollars this account's weekly limit holds.
-    private var capacity: Double? {
-        self.account.rates?["7d"]?.usdPer100
-    }
-
-    var body: some View {
-        let weeks = self.weeks
-        let maxWeek = max(1, weeks.map(\.split.total.usd).max() ?? 1)
-        let shown = weeks.first { $0.id == self.hoveredWeek } ?? weeks.first
-        VStack(alignment: .leading, spacing: 10) {
-            UsagePanelTitle(
-                title: "\(self.account.displayName) · your Claude Code spend",
-                subtitle: "This Mac only, dollars at API prices.")
-            if let shown {
-                UsageSectionLabel(text: "By weekly limit window · point at a week")
-                VStack(spacing: 1) {
-                    ForEach(weeks) { week in
-                        self.weekRow(week, maxUsd: maxWeek, selected: week.id == shown.id)
-                            .overlay {
-                                if self.isShown {
-                                    UsageMouseTracker { location in
-                                        self.hover(week.id, inside: location != nil)
-                                    }
-                                }
-                            }
-                    }
-                }
-                self.weekDetail(shown)
-            } else {
-                UsageNote(text: "Weekly windows appear after the first limit reading of this account.")
-            }
-        }
-        .onChange(of: self.isShown) { _, isShown in
-            if !isShown, self.hoveredWeek != nil {
-                self.hoveredWeek = nil
-            }
-        }
-    }
-
-    private func hover(_ id: Double, inside: Bool) {
-        if inside {
-            if self.hoveredWeek != id {
-                self.hoveredWeek = id
-            }
-        } else if self.hoveredWeek == id {
-            self.hoveredWeek = nil
-        }
-    }
-
-    private func weekRow(_ week: UsagePanelState.Week, maxUsd: Double, selected: Bool) -> some View {
-        let split = week.split
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(UsageFormat.dayRange(week.start, week.end))
-                    .font(.system(size: 11, weight: .medium))
-                if week.current == true {
-                    Text("now")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(UsagePalette.you.opacity(0.22), in: Capsule())
-                }
-                Spacer(minLength: 6)
-                Text("\(UsageFormat.usd(split.total.usd)) · \(UsageFormat.tokens(split.total.tokens))")
-                    .font(.system(size: 11, weight: .semibold))
-                    .monospacedDigit()
-            }
-            HStack(spacing: 8) {
-                UsageSplitBar(
-                    parts: [
-                        (split[.opus].usd, UsagePalette.opus),
-                        (split[.fable].usd, UsagePalette.fable),
-                        (split.minor.usd, UsagePalette.others),
-                    ],
-                    scale: maxUsd)
-                Text(week.peakPct.map { "limit \(UsageFormat.percent($0))" } ?? "limit —")
-                    .font(.system(size: 10))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 58, alignment: .trailing)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(
-            Color.primary.opacity(selected ? 0.08 : 0),
-            in: RoundedRectangle(cornerRadius: 5))
-        .padding(.horizontal, -6)
-    }
-
-    /// Breakdown of the selected week: each model in tokens, dollars and percent of the weekly limit.
-    private func weekDetail(_ week: UsagePanelState.Week) -> some View {
-        let split = week.split
-        let reached = week.peakPct.map { "limit reached \(UsageFormat.percent($0)), all sources" }
-            ?? "no limit readings"
-        return VStack(alignment: .leading, spacing: 4) {
-            Text("\(UsageFormat.dayRange(week.start, week.end)) · \(reached)")
-                .font(.system(size: 10.5, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-            self.detailRow("Opus", split[.opus], weight: 1, color: UsagePalette.opus)
-            self.detailRow("Fable", split[.fable], weight: self.fableWeight, color: UsagePalette.fable)
-            self.detailRow("Other", split.minor, weight: 1, color: UsagePalette.others)
-            Text(split.minorText)
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.85)
-            if let capacity = self.capacity {
-                Text("“Of limit” is your part of this account's weekly limit: a full week holds "
-                    + "≈ \(UsageFormat.usd(capacity)) of Opus, and $1 of Fable counts as "
-                    + "$\(String(format: "%.2f", self.fableWeight)).")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private func detailRow(_ name: String, _ use: UsageModelUse, weight: Double, color: Color) -> some View {
-        let share = self.capacity.map { use.usd * weight / max(1, $0) * 100 }
-        return HStack(spacing: 6) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(color)
-                .frame(width: 8, height: 8)
-            Text(name)
-                .font(.system(size: 11))
-                .frame(width: 36, alignment: .leading)
-            Text("\(UsageFormat.tokens(use.tokens)) tok")
-                .font(.system(size: 10.5))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 66, alignment: .trailing)
-            Text(UsageFormat.usdFine(use.usd))
-                .font(.system(size: 11, weight: .semibold))
-                .monospacedDigit()
-                .frame(width: 54, alignment: .trailing)
-            Spacer(minLength: 4)
-            if let share {
-                Text("≈ \(UsageFormat.percentFine(share)) of limit")
-                    .font(.system(size: 10.5))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .lineLimit(1)
+        UsageModelBlock(title: "By model · \(period.short)", split: self.totals.split(lastDays: period.days))
     }
 }
 
