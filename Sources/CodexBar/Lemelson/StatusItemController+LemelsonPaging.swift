@@ -450,7 +450,12 @@ final class LemelsonPageTransition {
     /// How long a page built after the strip set off takes to come in from the edge.
     static let entranceDuration: CFTimeInterval = 0.16
     /// How long the menu window takes to grow or shrink to the height of the new page.
-    static let heightDuration: CFTimeInterval = 0.22
+    /// Seconds the menu window takes to reach the height of the new page.
+    /// `defaults write com.steipete.codexbar lemelsonHeightDuration -float 0.4` changes it without a rebuild.
+    static var heightDuration: CFTimeInterval {
+        let custom = UserDefaults.standard.double(forKey: "lemelsonHeightDuration")
+        return custom >= 0.06 && custom <= 1 ? custom : 0.3
+    }
     /// Page snapshots are dropped this long after the menu closes.
     static let cacheLifetime: TimeInterval = 600
 
@@ -546,6 +551,9 @@ final class LemelsonPageTransition {
     private var heightTo: CGFloat = 0
     private var heightStart: CFTimeInterval = 0
     private var glassMargin = NSSize.zero
+    /// Height the menu's scroll view is given while the window is between two heights: the taller of
+    /// the two, so the rows that a growing window uncovers are already drawn.
+    private var scrollHeight: CGFloat?
     private var slideStart: CFTimeInterval = 0
     private var slideFrom: CGFloat = 0
     private var slideDuration: CFTimeInterval = 0
@@ -1142,7 +1150,8 @@ final class LemelsonPageTransition {
         self.heightFrom = self.shownHeight
         self.heightTo = final
         self.heightStart = CACurrentMediaTime()
-        self.setWindowHeight(self.shownHeight, display: false)
+        self.scrollHeight = max(self.heightFrom, final)
+        self.setWindowHeight(self.shownHeight, display: false, force: true)
         self.log("height \(Int(self.heightFrom)) -> \(Int(final))")
         guard self.heightTimer == nil else { return }
         let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
@@ -1167,6 +1176,7 @@ final class LemelsonPageTransition {
         guard let timer = self.heightTimer else { return }
         timer.invalidate()
         self.heightTimer = nil
+        self.scrollHeight = nil
         self.setWindowHeight(self.heightTo, display: true)
         // Back to the menu's own layout: the scroll view fills the window.
         if let content = self.menuWindow?.contentView {
@@ -1176,10 +1186,10 @@ final class LemelsonPageTransition {
         }
     }
 
-    private func setWindowHeight(_ height: CGFloat, display: Bool) {
+    private func setWindowHeight(_ height: CGFloat, display: Bool, force: Bool = false) {
         guard let window = self.menuWindow, height > 1 else { return }
         var frame = window.frame
-        guard abs(frame.height - height) > 0.01 else { return }
+        guard force || abs(frame.height - height) > 0.01 else { return }
         frame.origin.y = frame.maxY - height
         frame.size.height = height
         self.applyingHeight = true
@@ -1190,13 +1200,20 @@ final class LemelsonPageTransition {
                 frame.insetBy(dx: -self.glassMargin.width, dy: -self.glassMargin.height),
                 display: display)
         }
-        // The menu's scroll view keeps its own height and sits at the bottom of the window; between
-        // two heights it is held against the top instead, so the rows do not ride up or down.
+        // The menu's scroll view keeps its own height and sits at the bottom of the window. Between
+        // two heights it gets the taller one and is held against the top, so the rows neither ride
+        // up or down nor stay undrawn in the part a growing window uncovers.
         if let content = window.contentView, !content.isFlipped {
             for case let scroll as NSScrollView in content.subviews {
-                let y = content.bounds.height - scroll.frame.height
-                if abs(scroll.frame.minY - y) > 0.01 {
-                    scroll.setFrameOrigin(NSPoint(x: scroll.frame.minX, y: y))
+                let scrollHeight = self.scrollHeight ?? scroll.frame.height
+                let target = NSRect(
+                    x: scroll.frame.minX,
+                    y: content.bounds.height - scrollHeight,
+                    width: scroll.frame.width,
+                    height: scrollHeight)
+                if abs(scroll.frame.minY - target.minY) > 0.01 || abs(scroll.frame.height - scrollHeight) > 0.01 {
+                    scroll.frame = target
+                    scroll.layoutSubtreeIfNeeded()
                 }
             }
         }
