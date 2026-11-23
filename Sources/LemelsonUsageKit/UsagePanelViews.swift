@@ -4,6 +4,9 @@ import SwiftUI
 extension EnvironmentValues {
     /// Menu row under the cursor: on the colored highlight, text and bar are drawn light.
     @Entry public var usageRowHighlighted: Bool = false
+    /// Only for the PNG preview, which cannot move a pointer: per-day spend charts draw this day
+    /// ("2026-11-21") as pointed at. Nil in the app.
+    @Entry public var usagePreviewHoveredDay: String? = nil
 }
 
 // MARK: - Colors
@@ -38,6 +41,22 @@ public enum UsagePalette {
     public static func account(_ index: Int) -> Color {
         self.accounts[index % self.accounts.count]
     }
+
+    /// Gemini models on the Antigravity page, most used first: the account colors in another order,
+    /// so the first three differ in hue and brightness on a warm screen too. Past four: grey.
+    public static let models: [Color] = [
+        UsagePalette.dynamic(light: 0x2563EB, dark: 0x5B9BFF),
+        UsagePalette.dynamic(light: 0x4D9A0E, dark: 0xA3E635),
+        UsagePalette.dynamic(light: 0xE8590C, dark: 0xFF8A3D),
+        UsagePalette.dynamic(light: 0xD6409F, dark: 0xF472B6),
+    ]
+
+    public static func model(_ index: Int) -> Color {
+        self.models.indices.contains(index) ? self.models[index] : self.others
+    }
+
+    /// A limit with no split by source (Antigravity): the whole bar is one color.
+    public static let single = UsagePalette.models[0]
 
     static func dynamic(light: UInt32, dark: UInt32) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -123,6 +142,8 @@ extension UsagePanelState.WindowKind {
 struct UsageSegment: Identifiable {
     enum Kind: String {
         case you, code, otherCode, chat, cowork, other, others, unknown
+        /// All use of a limit that has no split by source.
+        case all
     }
 
     let kind: Kind
@@ -143,6 +164,7 @@ struct UsageSegment: Identifiable {
         case .chat: UsagePalette.chat
         case .cowork: UsagePalette.cowork
         case .other, .others, .unknown: UsagePalette.others
+        case .all: UsagePalette.single
         }
     }
 
@@ -156,6 +178,7 @@ struct UsageSegment: Identifiable {
         case .other: "Other"
         case .others: "Others"
         case .unknown: "Not split yet"
+        case .all: "Used"
         }
     }
 
@@ -169,6 +192,7 @@ struct UsageSegment: Identifiable {
         case .other: "Other"
         case .others: "Others (not this Mac)"
         case .unknown: "Not split yet"
+        case .all: "Used"
         }
     }
 
@@ -177,12 +201,17 @@ struct UsageSegment: Identifiable {
     }
 
     /// Splits the window percentage into "mine" and the rest. For the week, the remainder is split by the server's breakdown.
+    /// A limit with a single source is one segment.
     static func build(
         for window: UsagePanelState.Window,
-        kind: UsagePanelState.WindowKind) -> [UsageSegment]
+        kind: UsagePanelState.WindowKind,
+        sources: UsageLimitSources = .split) -> [UsageSegment]
     {
         let total = max(0, window.pct ?? 0)
         guard total > 0 else { return [] }
+        if sources == .single {
+            return [UsageSegment(kind: .all, value: total, barValue: total, usd: window.usd?.total)]
+        }
         guard let rawMine = window.mine else {
             // No rate for this account yet, so "mine" is unknown. The weekly window still has the server's
             // own breakdown: show it instead of one grey "Not split yet" bar.
@@ -230,6 +259,14 @@ struct UsageSegment: Identifiable {
         }
         return result
     }
+}
+
+/// Whether a limit's use can be split by where it came from.
+public enum UsageLimitSources: Sendable, Equatable {
+    /// Claude: this Mac, other Claude Code, chat, Cowork. The bar has a part per source and a legend line.
+    case split
+    /// Antigravity: one quota and no split. One bar segment, no legend line, no "Where it went".
+    case single
 }
 
 // MARK: - Pace
@@ -374,6 +411,9 @@ struct UsageSegmentBar: View {
 
             if let pace = self.pace {
                 let center = min(size.width - 1.5, max(1.5, size.width * CGFloat(pace.expected) / 100))
+                // An old reading says little about the pace now: its mark is drawn pale.
+                let ink = self.highlighted ? Color.white : pace.color
+                let opacity = pace.isStale ? 0.45 : 1
                 context.blendMode = .destinationOut
                 context.fill(
                     Path(CGRect(x: center - 2.5, y: 0, width: 5, height: size.height)),
@@ -383,7 +423,7 @@ struct UsageSegmentBar: View {
                     Path(
                         roundedRect: CGRect(x: center - 1, y: 0, width: 2, height: size.height),
                         cornerRadius: 1),
-                    with: .color(self.highlighted ? .white : pace.color))
+                    with: .color(ink.opacity(opacity)))
             }
         }
         .frame(height: 13)
@@ -518,6 +558,9 @@ public struct UsageLimitRowView: View {
     let width: CGFloat
     /// Weekly row only: see `UsageSessionsLeft.make(for:account:in:now:)`.
     let sessionsLeft: UsageSessionsLeft?
+    /// Replaces the short window title ("Session"), e.g. "5-hour" on the Antigravity page.
+    let title: String?
+    let sources: UsageLimitSources
     @Environment(\.usageRowHighlighted) private var highlighted
 
     public init(
@@ -525,13 +568,17 @@ public struct UsageLimitRowView: View {
         window: UsagePanelState.Window,
         now: Date,
         width: CGFloat,
-        sessionsLeft: UsageSessionsLeft? = nil)
+        sessionsLeft: UsageSessionsLeft? = nil,
+        title: String? = nil,
+        sources: UsageLimitSources = .split)
     {
         self.kind = kind
         self.window = window
         self.now = now
         self.width = width
         self.sessionsLeft = sessionsLeft
+        self.title = title
+        self.sources = sources
     }
 
     private var percent: Double {
@@ -558,11 +605,11 @@ public struct UsageLimitRowView: View {
     }
 
     public var body: some View {
-        let segments = UsageSegment.build(for: self.window, kind: self.kind)
+        let segments = UsageSegment.build(for: self.window, kind: self.kind, sources: self.sources)
         let pace = UsagePace.make(window: self.window, kind: self.kind, now: self.now)
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(self.kind.title)
+                Text(self.title ?? self.kind.title)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(UsageInk.primary(self.highlighted))
                 Text("\(UsageFormat.percent(self.percent)) used")
@@ -576,7 +623,8 @@ public struct UsageLimitRowView: View {
                     .lineLimit(1)
             }
             UsageSegmentBar(segments: segments, pace: pace)
-            if !segments.isEmpty {
+            // One source needs no legend: the bar is the percentage above it.
+            if !segments.isEmpty, self.sources == .split {
                 UsageFlowLayout {
                     ForEach(segments) { segment in
                         UsageChip(color: segment.color, text: segment.chipText)
@@ -604,11 +652,14 @@ public struct UsageAccountHeaderView: View {
     let account: UsagePanelState.Account
     let now: Date
     let width: CGFloat
+    /// The dot says which Claude account is signed in; a page with a single account leaves it out.
+    let showsDot: Bool
 
-    public init(account: UsagePanelState.Account, now: Date, width: CGFloat) {
+    public init(account: UsagePanelState.Account, now: Date, width: CGFloat, showsDot: Bool = true) {
         self.account = account
         self.now = now
         self.width = width
+        self.showsDot = showsDot
     }
 
     /// "Max 5x · 52m ago": the plan and how long ago the limits were read. The green dot already says
@@ -636,10 +687,12 @@ public struct UsageAccountHeaderView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Circle()
-                    .fill(self.account.isActive ? UsagePalette.paceGood : Color.secondary.opacity(0.35))
-                    .frame(width: 7, height: 7)
-                    .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                if self.showsDot {
+                    Circle()
+                        .fill(self.account.isActive ? UsagePalette.paceGood : Color.secondary.opacity(0.35))
+                        .frame(width: 7, height: 7)
+                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                }
                 Text(self.account.displayName)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
@@ -674,13 +727,27 @@ public struct UsageFooterView: View {
     let width: CGFloat
     let refreshing: Bool
     let showsLegend: Bool
+    /// The "You = Claude Code on this Mac" chip of the legend; a page without a source split leaves it out.
+    let showsYouChip: Bool
+    /// A footnote above the status line: what is exact and what is estimated.
+    let note: String?
 
-    public init(state: UsagePanelState, now: Date, width: CGFloat, refreshing: Bool, showsLegend: Bool) {
+    public init(
+        state: UsagePanelState,
+        now: Date,
+        width: CGFloat,
+        refreshing: Bool,
+        showsLegend: Bool,
+        showsYouChip: Bool = true,
+        note: String? = nil)
+    {
         self.state = state
         self.now = now
         self.width = width
         self.refreshing = refreshing
         self.showsLegend = showsLegend
+        self.showsYouChip = showsYouChip
+        self.note = note
     }
 
     private var status: String {
@@ -698,7 +765,9 @@ public struct UsageFooterView: View {
         VStack(alignment: .leading, spacing: 4) {
             if self.showsLegend {
                 UsageFlowLayout(spacing: 12) {
-                    UsageChip(color: UsagePalette.you, text: "You = Claude Code on this Mac")
+                    if self.showsYouChip {
+                        UsageChip(color: UsagePalette.you, text: "You = Claude Code on this Mac")
+                    }
                     // The mark is the only place a row shows reserve or deficit, so the legend names both colors.
                     HStack(spacing: 5) {
                         RoundedRectangle(cornerRadius: 1)
@@ -719,6 +788,9 @@ public struct UsageFooterView: View {
                         .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
                 }
+            }
+            if let note {
+                UsageNote(text: note)
             }
             Text(self.status)
                 .font(.system(size: 10.5))

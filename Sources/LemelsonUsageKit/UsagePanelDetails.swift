@@ -10,6 +10,11 @@ public struct UsageLimitDetailPanelView: View {
     let width: CGFloat
     /// Weekly limit only: see `UsageSessionsLeft.make(for:account:in:now:)`.
     let sessionsLeft: UsageSessionsLeft?
+    /// Replaces the long window title ("5-hour session limit"), e.g. "5-hour limit" for Antigravity.
+    let title: String?
+    /// `.single` (Antigravity): no "You" line or "Where it went", dollars read as "your use", and a plain
+    /// sentence instead of a chart with fewer than two readings.
+    let sources: UsageLimitSources
 
     public init(
         account: UsagePanelState.Account,
@@ -17,7 +22,9 @@ public struct UsageLimitDetailPanelView: View {
         window: UsagePanelState.Window,
         now: Date,
         width: CGFloat,
-        sessionsLeft: UsageSessionsLeft? = nil)
+        sessionsLeft: UsageSessionsLeft? = nil,
+        title: String? = nil,
+        sources: UsageLimitSources = .split)
     {
         self.account = account
         self.kind = kind
@@ -25,6 +32,8 @@ public struct UsageLimitDetailPanelView: View {
         self.now = now
         self.width = width
         self.sessionsLeft = sessionsLeft
+        self.title = title
+        self.sources = sources
     }
 
     private struct Sample: Identifiable {
@@ -71,22 +80,33 @@ public struct UsageLimitDetailPanelView: View {
     }
 
     public var body: some View {
-        let segments = UsageSegment.build(for: self.window, kind: self.kind)
+        let segments = self.sources == .split ? UsageSegment.build(for: self.window, kind: self.kind) : []
         let pace = UsagePace.make(window: self.window, kind: self.kind, now: self.now)
         let forecast = self.window.liveForecast(now: self.now)
+        let title = self.title ?? self.kind.longTitle
         VStack(alignment: .leading, spacing: 10) {
-            UsagePanelTitle(title: "\(self.account.displayName) · \(self.kind.longTitle)", subtitle: self.subtitle)
-            if let range = self.range {
+            UsagePanelTitle(title: "\(self.account.displayName) · \(title)", subtitle: self.subtitle)
+            if let sparse = self.sparseReadings {
+                Text(sparse)
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let range = self.range {
                 self.chart(range: range)
                 if let first = self.window.points.first,
                    first.time > range.lowerBound.timeIntervalSince1970 + 0.15 * self.kind.span
                 {
-                    UsageNote(text: "No readings of this limit before \(self.stamp(first.time)): "
-                        + "the account was not being checked then.")
+                    UsageNote(text: self.sources == .split
+                        ? "No readings of this limit before \(self.stamp(first.time)): "
+                        + "the account was not being checked then."
+                        : "No readings of this limit before \(self.stamp(first.time)).")
                 }
                 UsageFlowLayout(spacing: 12) {
-                    UsageChip(color: .primary, text: "Used, all sources", dashed: true)
-                    UsageChip(color: UsagePalette.you, text: "You")
+                    if self.sources == .split {
+                        UsageChip(color: .primary, text: "Used, all sources", dashed: true)
+                        UsageChip(color: UsagePalette.you, text: "You")
+                    } else {
+                        UsageChip(color: .primary, text: "Used", dashed: true)
+                    }
                     UsageChip(color: .secondary, text: "Even pace", dashed: true)
                     if forecast != nil {
                         UsageChip(color: Color.primary.opacity(0.45), text: "Forecast and likely range", dashed: true)
@@ -152,6 +172,28 @@ public struct UsageLimitDetailPanelView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .frame(width: self.width, alignment: .leading)
+    }
+
+    /// With a single source, fewer than two readings in the window say more as a sentence than as a chart
+    /// of one dot. Claude keeps its chart.
+    private var sparseReadings: String? {
+        guard self.sources == .single else { return nil }
+        guard let range = self.range else {
+            return self.window.rolled == true
+                ? "No reading since this window reset."
+                : "No reset time for this window yet, so there is nothing to chart."
+        }
+        let readings = self.window.points.filter { range.contains(Date(timeIntervalSince1970: $0.time)) }
+        switch readings.count {
+        case 0:
+            return "No readings in this window yet."
+        case 1:
+            let only = readings[0]
+            return "One reading in this window so far (\(UsageFormat.percent(only.used)) at \(self.stamp(only.time))): "
+                + "the chart starts with the next one."
+        default:
+            return nil
+        }
     }
 
     private func stamp(_ time: Double) -> String {
@@ -287,6 +329,9 @@ public struct UsageLimitDetailPanelView: View {
     }
 
     private var facts: [String] {
+        if self.sources == .single {
+            return self.singleSourceFacts
+        }
         var facts: [String] = []
         if let usd = self.window.usd {
             let total = self.kind == .fable ? (usd.fable ?? 0) : usd.total
@@ -318,6 +363,24 @@ public struct UsageLimitDetailPanelView: View {
         if let measuredAt = self.window.measuredAt {
             facts.append("Reading from \(UsageFormat.stamp(measuredAt, now: self.now)) "
                 + "(\(UsageFormat.age(measuredAt, now: self.now))).")
+        }
+        return facts
+    }
+
+    /// Antigravity: dollars at Gemini API prices are an estimate of the use, not a bill.
+    private var singleSourceFacts: [String] {
+        var facts: [String] = []
+        // After a reset the last reading and its dollars belong to the previous window.
+        let rolled = self.window.rolled == true
+        if !rolled, let usd = self.window.usd, usd.total >= 0.005 {
+            facts.append("Your use in this window ≈ \(UsageFormat.usdFine(usd.total)) at API prices.")
+        }
+        if let capacity = self.account.rates?[self.kind.rawValue]?.usdPer100, capacity > 0 {
+            facts.append("100% of this limit ≈ \(UsageFormat.usd(capacity)) at API prices.")
+        }
+        if let measuredAt = self.window.measuredAt {
+            let when = "\(UsageFormat.stamp(measuredAt, now: self.now)) (\(UsageFormat.age(measuredAt, now: self.now)))"
+            facts.append(rolled ? "Last reading \(when), before this window began." : "Reading from \(when).")
         }
         return facts
     }

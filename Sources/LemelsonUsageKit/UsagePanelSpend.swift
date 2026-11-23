@@ -54,25 +54,31 @@ struct UsageSpendSummaryHeader: View {
                 .fixedSize()
             }
             HStack(alignment: .top, spacing: 8) {
-                self.tile("Today", self.spend.today.total)
-                self.tile("Last 7 days", self.spend.week.total)
-                self.tile(period.title, self.spend[period].whole.total)
+                UsageSpendTile(title: "Today", use: self.spend.today.total)
+                UsageSpendTile(title: "Last 7 days", use: self.spend.week.total)
+                UsageSpendTile(title: period.title, use: self.spend[period].whole.total)
             }
         }
     }
+}
 
-    private func tile(_ title: String, _ use: UsageModelUse) -> some View {
+/// One total over the chart: span, dollars, tokens.
+struct UsageSpendTile: View {
+    let title: String
+    let use: UsageModelUse
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(title)
+            Text(self.title)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text(UsageFormat.usd(use.usd))
+            Text(UsageFormat.usd(self.use.usd))
                 .font(.system(size: 16, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            Text("\(UsageFormat.tokens(use.tokens)) tokens")
+            Text("\(UsageFormat.tokens(self.use.tokens)) tokens")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
@@ -95,7 +101,7 @@ struct UsageSpendPeriodStack: View {
         ZStack(alignment: .topLeading) {
             ForEach(UsageSpendPeriod.allCases) { period in
                 let shown = period == chosen
-                UsageSpendPeriodLayer(data: self.spend[period], legend: self.spend.legend)
+                UsageSpendPeriodLayer(data: self.spend[period])
                     .equatable()
                     .opacity(shown ? 1 : 0)
                     .allowsHitTesting(shown)
@@ -108,12 +114,11 @@ struct UsageSpendPeriodStack: View {
 /// One period: caption, chart and models. Pure data in, so `.equatable()` skips it on a switch.
 struct UsageSpendPeriodLayer: View, Equatable {
     let data: UsageSpendDigest.Period
-    let legend: [UsageSpendDigest.Legend]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             // Hover state lives inside the chart view, so pointing at bars does not rebuild the models below.
-            UsageSpendDayChart(data: self.data, legend: self.legend)
+            UsageSpendDayChart(data: self.data.chart)
             UsageModelBlock(
                 title: "By model · \(self.data.period.short)",
                 split: self.data.whole,
@@ -122,17 +127,85 @@ struct UsageSpendPeriodLayer: View, Equatable {
     }
 }
 
+// MARK: - Per-day chart, shared by Claude Spend (one color per account) and Antigravity (one per model)
+
+/// The color of one series on a per-day chart. An index rather than a `Color`, so the chart data stays
+/// cheaply equatable (a dynamic `Color` compares by identity).
+enum UsageSeriesColor: Hashable, Sendable {
+    /// A Claude account, in Claude Switcher order.
+    case account(Int)
+    /// A Gemini model, in the order of `UsageAntigravitySpend`.
+    case model(Int)
+    /// Everything without a color of its own.
+    case other
+
+    var color: Color {
+        switch self {
+        case let .account(index): UsagePalette.account(index)
+        case let .model(index): UsagePalette.model(index)
+        case .other: UsagePalette.others
+        }
+    }
+}
+
+/// One period of a per-day spend chart, laid out once: bars (one per series and day), range, the hint
+/// above the chart, the legend, and the grey note after a pointed-at day's total.
+struct UsageDayChartData: Sendable, Equatable {
+    struct Bar: Identifiable, Sendable, Equatable {
+        let key: String
+        let date: Date
+        /// Account or model name: the chip of a pointed-at day.
+        let series: String
+        let color: UsageSeriesColor
+        let usd: Double
+
+        var id: String {
+            "\(self.key)-\(self.series)"
+        }
+    }
+
+    struct Legend: Identifiable, Sendable, Equatable {
+        let id: String
+        let name: String
+        let color: UsageSeriesColor
+    }
+
+    let period: UsageSpendPeriod
+    let domain: ClosedRange<Date>
+    let bars: [Bar]
+    let hint: String
+    let legend: [Legend]
+    /// By day key: "Opus $5 · Fable $2" (Claude) or "259M tokens" (Antigravity).
+    let dayNotes: [String: String]
+    /// Shown in place of the chart when the period has no bars.
+    let emptyText: String
+    /// The most chips a pointed-at day lists before "+N more"; nil for no limit.
+    let chipLimit: Int?
+    /// A pointed-at day shows cents below $10 ("$0.11"), so a small model does not read as "$0".
+    let centsInChips: Bool
+
+    func amount(_ usd: Double) -> String {
+        self.centsInChips ? UsageFormat.usdFine(usd) : UsageFormat.usd(usd)
+    }
+}
+
 /// Caption and per-day chart of one period; owns the hovered day.
 struct UsageSpendDayChart: View {
-    let data: UsageSpendDigest.Period
-    let legend: [UsageSpendDigest.Legend]
-    @State private var hoveredDay: String?
+    let data: UsageDayChartData
+    /// The periods the page offers; a layer tracks the mouse while its period is the one shown.
+    var offered: [UsageSpendPeriod] = UsageSpendPeriod.allCases
+    @State private var pointedDay: String?
+    @Environment(\.usagePreviewHoveredDay) private var previewDay
+
+    private var hoveredDay: String? {
+        self.pointedDay ?? self.previewDay
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             self.caption
             if self.data.bars.isEmpty {
-                UsageNote(text: "No Claude Code spend on this Mac in this period.")
+                UsageNote(text: self.data.emptyText)
                     .frame(height: 104, alignment: .topLeading)
             } else {
                 self.chart
@@ -146,20 +219,24 @@ struct UsageSpendDayChart: View {
         return VStack(alignment: .leading, spacing: 3) {
             if let first = hovered.first {
                 let total = hovered.reduce(0) { $0 + $1.usd }
-                let opus = hovered.reduce(0) { $0 + $1.opus }
-                let fable = hovered.reduce(0) { $0 + $1.fable }
+                let note = self.data.dayNotes[first.key].map { "  \($0)" } ?? ""
                 (Text(UsageFormat.format(first.date, "EEE, MMM d")).fontWeight(.semibold)
-                    + Text(" · \(UsageFormat.usd(total))").fontWeight(.semibold)
-                    + Text("  Opus \(UsageFormat.usd(opus)) · Fable \(UsageFormat.usd(fable))")
+                    + Text(" · \(self.data.amount(total))").fontWeight(.semibold)
+                    + Text(note)
                     .foregroundStyle(.secondary))
                     .font(.system(size: 10.5))
                     .monospacedDigit()
                     .lineLimit(1)
+                let limit = self.data.chipLimit ?? hovered.count
+                let shown = hovered.prefix(limit)
                 HStack(spacing: 10) {
-                    ForEach(hovered) { bar in
-                        UsageChip(
-                            color: UsagePalette.account(bar.colorIndex),
-                            text: "\(bar.account) \(UsageFormat.usd(bar.usd))")
+                    ForEach(shown) { bar in
+                        UsageChip(color: bar.color.color, text: "\(bar.series) \(self.data.amount(bar.usd))")
+                    }
+                    if hovered.count > shown.count {
+                        Text("+\(hovered.count - shown.count) more")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
                     }
                 }
             } else {
@@ -169,8 +246,8 @@ struct UsageSpendDayChart: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
                 HStack(spacing: 10) {
-                    ForEach(self.legend) { account in
-                        UsageChip(color: UsagePalette.account(account.colorIndex), text: account.name)
+                    ForEach(self.data.legend) { series in
+                        UsageChip(color: series.color.color, text: series.name)
                     }
                 }
             }
@@ -183,7 +260,7 @@ struct UsageSpendDayChart: View {
             BarMark(
                 x: .value("Day", bar.date, unit: .day),
                 y: .value("Dollars", bar.usd))
-                .foregroundStyle(UsagePalette.account(bar.colorIndex))
+                .foregroundStyle(bar.color.color)
                 .opacity(self.hoveredDay == nil || self.hoveredDay == bar.key ? 1 : 0.4)
         }
         .chartXScale(domain: self.data.domain)
@@ -211,7 +288,7 @@ struct UsageSpendDayChart: View {
             GeometryReader { geometry in
                 // The tracker leaf decides by itself whether this period is visible, so the chart
                 // does not depend on the selection and is not rebuilt when it changes.
-                UsageSpendActiveTracker(period: self.data.period) { location in
+                UsageSpendActiveTracker(period: self.data.period, offered: self.offered) { location in
                     self.updateHover(location: location, proxy: proxy, geometry: geometry)
                 }
             }
@@ -228,8 +305,8 @@ struct UsageSpendDayChart: View {
                 key = UsageDayKey.string(date)
             }
         }
-        if self.hoveredDay != key {
-            self.hoveredDay = key
+        if self.pointedDay != key {
+            self.pointedDay = key
         }
     }
 }
@@ -238,13 +315,16 @@ struct UsageSpendDayChart: View {
 /// and hit testing, so hidden layers must not have one at all: the tracker exists only while `period`
 /// is the chosen one. This leaf observes the selection itself, which keeps the view around it independent
 /// of the selection. When the layer gets hidden it reports the mouse as gone, so no hover state stays behind.
+/// A page that offers fewer periods (Antigravity with a short history) passes them as `offered`: the layer
+/// shown for a period it lacks is the longest one it has.
 struct UsageSpendActiveTracker: View {
     let period: UsageSpendPeriod
+    var offered: [UsageSpendPeriod] = UsageSpendPeriod.allCases
     let onMoved: (CGPoint?) -> Void
     @ObservedObject private var selection = UsagePanelSelection.shared
 
     var body: some View {
-        let active = self.selection.spendPeriod == self.period
+        let active = UsageSpendPeriod.effective(self.selection.spendPeriod, offered: self.offered) == self.period
         ZStack {
             if active {
                 UsageMouseTracker(onMoved: self.onMoved)

@@ -5,12 +5,19 @@ import SwiftUI
 // Renders the accounts panel to a PNG without launching CodexBar, so the layout can be checked by eye.
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
-//       [--only limits|spend|value|details] [--account 1] [--highlighted] [--hover-week 0]
+//       [--only limits|spend|value|details|antigravity|antigravity-details] [--account 1] [--highlighted]
+//       [--hover-week 0] [--hover-day 2026-11-21] [--fixture full] [--antigravity block.json]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
+// --hover-day draws the per-day spend charts as if that day were pointed at.
+// --period 30|60|90|180 picks the spend period (default 30, so renders do not depend on an earlier run).
 // --account picks whose detail panels are drawn: position in the Limits list, 0 is the active account.
 // --warm applies a warm tint, as on a Night Shift screen: shows whether colors blend together.
+//
+// Antigravity (only with --only antigravity or antigravity-details): the summary's own `antigravity` block
+// when it has one, else the built-in fixture "full". --fixture picks a fixture (full, run-out, no-quota,
+// no-spend, one-day, error); --antigravity reads the block from a file (a whole summary or the block alone).
 
 struct ModeChips: View {
     let selected: String
@@ -35,14 +42,23 @@ struct ModeChips: View {
     }
 }
 
+/// A menu separator: a hairline with the menu's insets.
+struct MenuSeparator: View {
+    var body: some View {
+        Divider().padding(.horizontal, 12).padding(.vertical, 4)
+    }
+}
+
 struct PreviewRoot: View {
-    let state: UsagePanelState
+    let state: UsagePanelState?
     let now: Date
     let only: String?
     let warm: Bool
     var detailAccount = 0
     var highlighted = false
     var hoverWeek: Int?
+    var hoverDay: String?
+    var antigravity: UsagePanelState?
 
     private let menuWidth: CGFloat = 310
     private let panelWidth: CGFloat = 340
@@ -53,19 +69,28 @@ struct PreviewRoot: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 18) {
-            if self.shows("limits") {
-                self.card(width: self.menuWidth) { self.limits }
+            if let state = self.state {
+                if self.shows("limits") {
+                    self.card(width: self.menuWidth) { self.limits(state) }
+                }
+                if self.shows("spend") {
+                    self.card(width: self.menuWidth) { self.spend(state) }
+                }
+                if self.shows("value") {
+                    self.card(width: self.menuWidth) { self.value(state) }
+                }
+                if self.shows("details") {
+                    self.details(state)
+                }
             }
-            if self.shows("spend") {
-                self.card(width: self.menuWidth) { self.spend }
+            if self.only == "antigravity" {
+                self.card(width: self.menuWidth) { self.antigravityPage }
             }
-            if self.shows("value") {
-                self.card(width: self.menuWidth) { self.value }
-            }
-            if self.shows("details") {
-                self.details
+            if self.only == "antigravity-details" {
+                self.antigravityDetails
             }
         }
+        .environment(\.usagePreviewHoveredDay, self.hoverDay)
         .padding(20)
         .background(Color(nsColor: .underPageBackgroundColor))
         .overlay {
@@ -79,6 +104,38 @@ struct PreviewRoot: View {
         self.only == nil || self.only == name
     }
 
+    /// The page as the menu would stack its rows, with a separator where a row asks for one.
+    @ViewBuilder private var antigravityPage: some View {
+        if let state = self.antigravity,
+           let page = UsageAntigravityPage(state: state, now: self.now, width: self.menuWidth)
+        {
+            ForEach(Array(page.rows.enumerated()), id: \.element.id) { index, row in
+                let lit = self.highlighted && row.detail != nil
+                row.view
+                    .environment(\.usageRowHighlighted, lit)
+                    .background(lit ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
+                if row.separatorAfter, index < page.rows.count - 1 {
+                    MenuSeparator()
+                }
+            }
+        }
+    }
+
+    /// Every hover detail of the page, side by side.
+    @ViewBuilder private var antigravityDetails: some View {
+        if let state = self.antigravity,
+           let page = UsageAntigravityPage(
+               state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
+               clock: { [now = self.now] in now })
+        {
+            ForEach(page.rows.filter { $0.detail != nil }) { row in
+                if let detail = row.detail {
+                    self.card(width: self.panelWidth) { detail() }
+                }
+            }
+        }
+    }
+
     private func card(width: CGFloat, @ViewBuilder content: () -> some View) -> some View {
         VStack(spacing: 0) { content() }
             .frame(width: width)
@@ -86,10 +143,10 @@ struct PreviewRoot: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    @ViewBuilder private var limits: some View {
+    @ViewBuilder private func limits(_ state: UsagePanelState) -> some View {
         ModeChips(selected: "Limits")
         Divider()
-        ForEach(self.state.orderedAccounts) { account in
+        ForEach(state.orderedAccounts) { account in
             UsageAccountHeaderView(account: account, now: self.now, width: self.menuWidth)
             ForEach(UsagePanelState.WindowKind.allCases, id: \.self) { kind in
                 if let window = account.window(kind), window.pct != nil, !(kind == .fiveHour && account.has5h == false) {
@@ -99,38 +156,38 @@ struct PreviewRoot: View {
                         now: self.now,
                         width: self.menuWidth,
                         sessionsLeft: UsageSessionsLeft.make(
-                            for: kind, account: account, in: self.state, now: self.now))
+                            for: kind, account: account, in: state, now: self.now))
                         .environment(\.usageRowHighlighted, self.highlighted)
                         .background(self.highlighted ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
                 }
             }
             Divider().padding(.horizontal, 12).padding(.top, 4)
         }
-        UsageFooterView(state: self.state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: true)
+        UsageFooterView(state: state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: true)
     }
 
-    @ViewBuilder private var spend: some View {
+    @ViewBuilder private func spend(_ state: UsagePanelState) -> some View {
         ModeChips(selected: "Spend")
         Divider()
-        UsageSpendSummaryView(state: self.state, now: self.now, width: self.menuWidth)
+        UsageSpendSummaryView(state: state, now: self.now, width: self.menuWidth)
         Divider().padding(.horizontal, 12)
-        ForEach(Array(self.state.accounts.enumerated()), id: \.offset) { index, account in
+        ForEach(Array(state.accounts.enumerated()), id: \.offset) { index, account in
             UsageSpendAccountRowView(account: account, colorIndex: index, width: self.menuWidth)
         }
         Divider().padding(.horizontal, 12)
-        UsageFooterView(state: self.state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: false)
+        UsageFooterView(state: state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: false)
     }
 
-    @ViewBuilder private var value: some View {
+    @ViewBuilder private func value(_ state: UsagePanelState) -> some View {
         ModeChips(selected: "Value")
         Divider()
-        UsageValueCardView(state: self.state, width: self.menuWidth, now: self.now)
+        UsageValueCardView(state: state, width: self.menuWidth, now: self.now)
         Divider().padding(.horizontal, 12)
-        UsageDriftCardView(state: self.state, width: self.menuWidth, initialHoverIndex: self.hoverWeek)
+        UsageDriftCardView(state: state, width: self.menuWidth, initialHoverIndex: self.hoverWeek)
     }
 
-    @ViewBuilder private var details: some View {
-        let accounts = self.state.orderedAccounts
+    @ViewBuilder private func details(_ state: UsagePanelState) -> some View {
+        let accounts = state.orderedAccounts
         let active = accounts.indices.contains(self.detailAccount) ? accounts[self.detailAccount] : accounts.first
         VStack(spacing: 18) {
             if let active, let window = active.window(.fiveHour), active.has5h != false {
@@ -141,7 +198,7 @@ struct PreviewRoot: View {
             }
             if let active {
                 self.card(width: self.panelWidth) {
-                    UsageSpendAccountPanelView(state: self.state, account: active, now: self.now, width: self.panelWidth)
+                    UsageSpendAccountPanelView(state: state, account: active, now: self.now, width: self.panelWidth)
                 }
             }
         }
@@ -153,7 +210,7 @@ struct PreviewRoot: View {
                     window: window,
                     now: self.now,
                     width: self.panelWidth,
-                    sessionsLeft: UsageSessionsLeft.make(for: .week, account: active, in: self.state, now: self.now))
+                    sessionsLeft: UsageSessionsLeft.make(for: .week, account: active, in: state, now: self.now))
             }
         }
     }
@@ -168,30 +225,67 @@ func argument(after flag: String) -> String? {
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
-        + "[--only part] [--account n] [--highlighted] [--hover-week n]\n"
+        + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
+        + "[--fixture name] [--antigravity file]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
 
 let outputURL = URL(fileURLWithPath: arguments[1])
 let stateURL = argument(after: "--state").map { URL(fileURLWithPath: $0) } ?? UsagePanelStore.defaultURL
-guard let state = UsagePanelStore.load(from: stateURL) else {
+let state = UsagePanelStore.load(from: stateURL)
+let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
+let only = argument(after: "--only")
+let wantsAntigravity = only?.hasPrefix("antigravity") == true
+
+if state == nil, !wantsAntigravity {
     FileHandle.standardError.write(Data("cannot read summary: \(stateURL.path)\n".utf8))
     exit(1)
 }
 
-let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
+var antigravity: UsagePanelState?
+if wantsAntigravity {
+    if let name = argument(after: "--fixture") {
+        guard AntigravityFixture.names.contains(name) else {
+            let list = AntigravityFixture.names.joined(separator: ", ")
+            FileHandle.standardError.write(Data("unknown fixture \(name): \(list)\n".utf8))
+            exit(2)
+        }
+        antigravity = AntigravityFixture.state(name, now: now)
+        FileHandle.standardError.write(Data("antigravity: fixture \(name)\n".utf8))
+    } else if let path = argument(after: "--antigravity") {
+        antigravity = AntigravityFixture.merging(blockAt: URL(fileURLWithPath: path), into: state, now: now)
+        FileHandle.standardError.write(Data("antigravity: block from \(path)\n".utf8))
+    } else if state?.antigravity != nil {
+        antigravity = state
+        FileHandle.standardError.write(Data("antigravity: block from \(stateURL.path)\n".utf8))
+    } else {
+        antigravity = AntigravityFixture.state("full", now: now)
+        FileHandle.standardError.write(Data("antigravity: no block in the summary, fixture full\n".utf8))
+    }
+    if antigravity?.antigravity == nil {
+        FileHandle.standardError.write(Data("antigravity: no block to draw\n".utf8))
+        exit(1)
+    }
+}
+
+// The period is a menu-wide choice kept in the defaults (of this tool, here): always set it.
+UsagePanelSelection.shared.spendPeriod = argument(after: "--period").flatMap(Int.init)
+    .flatMap(UsageSpendPeriod.init(rawValue:)) ?? .d30
+
 let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : .aqua)
 
 _ = NSApplication.shared
 let hosting = NSHostingView(rootView: PreviewRoot(
-    state: state,
+    state: wantsAntigravity ? nil : state,
     now: now,
-    only: argument(after: "--only"),
+    only: only,
     warm: arguments.contains("--warm"),
     detailAccount: argument(after: "--account").flatMap(Int.init) ?? 0,
     highlighted: arguments.contains("--highlighted"),
-    hoverWeek: argument(after: "--hover-week").flatMap(Int.init)))
+    hoverWeek: argument(after: "--hover-week").flatMap(Int.init),
+    hoverDay: argument(after: "--hover-day"),
+    antigravity: antigravity))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)
