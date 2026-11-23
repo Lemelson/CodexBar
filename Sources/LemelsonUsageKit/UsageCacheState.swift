@@ -146,8 +146,10 @@ public struct UsageCacheSummary: Sendable, Equatable {
     }
 
     /// Claude Code: the top-level `cache`, or the accounts' caches combined when it is missing; one part per
-    /// account that has data. Nil when no span has a percentage.
+    /// account that has data. Nil when no span has a percentage, and when the collector's cache step failed
+    /// (`cacheError`): the row is then simply absent.
     public static func claude(_ state: UsagePanelState) -> UsageCacheSummary? {
+        guard state.cacheError == nil else { return nil }
         let spans = self.spans(of: state.cache ?? self.combined(state.accounts.compactMap(\.cache)))
         guard let main = self.main(of: spans) else { return nil }
         let parts: [Part] = state.orderedAccounts.compactMap { account in

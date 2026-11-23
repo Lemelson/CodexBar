@@ -700,6 +700,10 @@ public struct UsageAccountHeaderView: View {
     /// which account is in Claude now. An account read only by hand says "reading from 3d ago" once the
     /// reading is old, in the color of its age.
     public static func status(for account: UsagePanelState.Account, now: Date) -> Text {
+        // An account the collector failed on has no reading to date: its second line says why.
+        if account.isUnavailable {
+            return Text(account.planName ?? "")
+        }
         let reading = UsageReadingAge.make(account: account, now: now)
         let read = if let reading, !reading.isFresh {
             Text(reading.ageText).foregroundStyle(reading.color)
@@ -752,7 +756,9 @@ public struct UsageAccountHeaderView: View {
                     .lineLimit(1)
                     .layoutPriority(1)
             }
-            if let note = Self.actionNote(for: self.account) {
+            if let unavailable = self.account.unavailableNote {
+                UsageUnavailableLine(text: unavailable)
+            } else if let note = Self.actionNote(for: self.account) {
                 Text(note)
                     .font(.system(size: 10.5))
                     .foregroundStyle(UsagePalette.warning)
@@ -768,6 +774,21 @@ public struct UsageAccountHeaderView: View {
         .padding(.top, 8)
         .padding(.bottom, 3)
         .frame(width: self.width, alignment: .leading)
+    }
+}
+
+/// "Collector error: ValueError: …": the one quiet line an account without numbers gets in place of them.
+struct UsageUnavailableLine: View {
+    let text: String
+    @Environment(\.usageRowHighlighted) private var highlighted
+
+    var body: some View {
+        Text(self.text)
+            .font(.system(size: 10.5))
+            .foregroundStyle(UsageInk.secondary(self.highlighted))
+            .lineLimit(2)
+            .truncationMode(.middle)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

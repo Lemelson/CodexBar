@@ -73,6 +73,37 @@ enum ClaudeFixture {
         return state
     }
 
+    /// The collector's failure isolation (`usage/STATE-ADDITIONS-24.md`), written into a copy of the summary's
+    /// JSON so it goes through the real decoding: the accounts at `broken` (positions in the summary) become
+    /// error stubs `{uuid, name, short, active, useHapp, error, refresh, refreshEverySec, cache}`, and with
+    /// `cacheError` every `cache` is null and a top-level `cacheError` is set. Returns the copy's URL.
+    static func writingFailures(from url: URL, broken: [Int], cacheError: Bool) -> URL? {
+        guard let data = try? Data(contentsOf: url),
+              var summary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var accounts = summary["accounts"] as? [[String: Any]]
+        else { return nil }
+        let kept = ["uuid", "name", "short", "active", "useHapp", "refresh", "refreshEverySec", "cache"]
+        for index in broken where accounts.indices.contains(index) {
+            var stub = accounts[index].filter { kept.contains($0.key) }
+            stub["error"] = "error: ValueError: made up for the preview"
+            accounts[index] = stub
+        }
+        if cacheError {
+            for index in accounts.indices {
+                accounts[index]["cache"] = NSNull()
+            }
+            summary["cache"] = NSNull()
+            summary["cacheError"] = "error: ZeroDivisionError: division by zero"
+        }
+        summary["accounts"] = accounts
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lemelson-preview-failures-\(ProcessInfo.processInfo.processIdentifier).json")
+        guard let merged = try? JSONSerialization.data(withJSONObject: summary),
+              (try? merged.write(to: copy)) != nil
+        else { return nil }
+        return copy
+    }
+
     /// Moves the last reading of every manually read account `hours` back, windows and all, as if it had
     /// not been read since: with enough hours its windows have reset by now.
     static func agingManualReadings(_ state: UsagePanelState, hours: Double) -> UsagePanelState {

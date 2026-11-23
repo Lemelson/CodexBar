@@ -123,16 +123,19 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         public var pairsUsed: Double?
         /// Pairs thrown out because the limit moved more than this Mac's spend explains.
         public var pairsDropped: Double?
+        /// Pairs set aside because the limit moved much less than the other pairs agree on.
+        public var pairsLow: Double?
 
         public init(from decoder: Decoder) throws {
             let keys = try? decoder.container(keyedBy: Key.self)
             self.method = keys?.lenient(String.self, .method)
             self.pairsUsed = keys?.lenient(Double.self, .pairsUsed)
             self.pairsDropped = keys?.lenient(Double.self, .pairsDropped)
+            self.pairsLow = keys?.lenient(Double.self, .pairsLow)
         }
 
         enum Key: String, CodingKey {
-            case method, pairsUsed, pairsDropped
+            case method, pairsUsed, pairsDropped, pairsLow
         }
     }
 
@@ -288,6 +291,10 @@ struct Lenient<T: Decodable>: Decodable {
         self.value = try? T(from: decoder)
     }
 }
+
+extension Lenient: Equatable where T: Equatable {}
+
+extension Lenient: Sendable where T: Sendable {}
 
 extension KeyedDecodingContainer {
     /// The value when present and well-formed, otherwise `nil`.

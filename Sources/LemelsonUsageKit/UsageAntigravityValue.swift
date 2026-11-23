@@ -97,9 +97,18 @@ struct UsageAntigravityWorth {
         } else {
             "Measured from pairs of quota readings and the dollars spent between them."
         }
-        if let dropped = block.weekRate?.pairsDropped, dropped >= 1 {
-            text += " \(Int(dropped)) left out: the limit moved more than this Mac's use explains "
+        // How many stretches the rate does not stand on, and why: "polluted" (moved too much) and "low" (moved
+        // much less than the others agree on).
+        let dropped = block.weekRate?.pairsDropped.map { Int($0.rounded()) } ?? 0
+        let low = block.weekRate?.pairsLow.map { Int($0.rounded()) } ?? 0
+        if dropped >= 1, low >= 1 {
+            text += " Left out: \(dropped) that moved the limit more than this Mac's use explains "
+                + "(a phone or the Gemini app), \(low) that moved it much less than the others."
+        } else if dropped >= 1 {
+            text += " \(dropped) left out: the limit moved more than this Mac's use explains "
                 + "(a phone or the Gemini app)."
+        } else if low >= 1 {
+            text += " \(low) left out: the limit moved much less than the others agree on."
         }
         return text
     }

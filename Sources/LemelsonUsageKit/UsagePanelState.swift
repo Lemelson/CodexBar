@@ -23,9 +23,17 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     public var antigravity: UsageAntigravityBlock?
     /// Prompt cache of all Claude accounts together; never fails the summary.
     public var cache: UsageCacheStats?
+    /// Set when the collector's cache step failed: then `cache` is null here and on every account.
+    public var cacheError: String? {
+        self.cacheErrorField?.value
+    }
+
+    /// A value of an unexpected shape reads as nil instead of costing the whole summary.
+    private var cacheErrorField: Lenient<String>?
 
     enum CodingKeys: String, CodingKey {
         case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity, cache
+        case cacheErrorField = "cacheError"
         case kFable = "k_fable"
         case kSource = "k_source"
         case kPairs = "k_pairs"
@@ -79,9 +87,26 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var refreshEverySec: Double?
         /// Prompt cache of this account by span ("today", "7d", "30d"); never fails the summary.
         public var cache: UsageCacheStats? = nil
+        /// Set when the collector failed on this account ("error: ValueError: …"): the entry then has only its
+        /// name, flags, refresh mode and cache, and the pages show one quiet line instead of numbers.
+        public var error: String? = nil
 
         public var id: String {
             self.uuid
+        }
+
+        /// The collector failed on this account this time.
+        public var isUnavailable: Bool {
+            self.error != nil
+        }
+
+        /// "Collector error: ValueError: made up": the one line the pages show for an account without numbers.
+        public var unavailableNote: String? {
+            guard var text = self.error?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+            if text.lowercased().hasPrefix("error:") {
+                text = String(text.dropFirst("error:".count)).trimmingCharacters(in: .whitespaces)
+            }
+            return text.isEmpty ? "Collector error" : "Collector error: \(text)"
         }
 
         public var isActive: Bool {
@@ -212,6 +237,10 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var minePctByModel: [String: Double]?
         /// `peakPct - minePct`, never below zero.
         public var othersPct: Double?
+        /// The weekly limit was reset inside this window, at this time (epoch seconds). The limit fields above
+        /// (`peakPct`, `peakAt`, `peakFinal`, `minePct`, `minePctByModel`, `othersPct`) then count from the reset;
+        /// `usd`, `m` and `tokens` stay the whole week.
+        public var resetAt: Double?
 
         public var id: Double {
             self.end
@@ -219,7 +248,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
 
         enum CodingKeys: String, CodingKey {
             case start, end, current, usd, tokens, peakPct, m
-            case peakAt, peakFinal, minePct, minePctByModel, othersPct
+            case peakAt, peakFinal, minePct, minePctByModel, othersPct, resetAt
         }
 
         public init(from decoder: Decoder) throws {
@@ -239,6 +268,8 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
             self.minePctByModel = (try? container.decodeIfPresent([String: Double?].self, forKey: .minePctByModel))?
                 .compactMapValues { $0 }
             self.othersPct = try? container.decodeIfPresent(Double.self, forKey: .othersPct)
+            self.resetAt = (try? container.decodeIfPresent(Double.self, forKey: .resetAt))
+                .flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         }
     }
 
@@ -323,9 +354,11 @@ extension UsagePanelState {
         account.kFable ?? self.kFable ?? 1
     }
 
-    /// The ratio as text: one number when all accounts agree, otherwise the range.
+    /// The ratio as text: one number when all accounts agree, otherwise the range. An account the collector
+    /// failed on has no ratio of its own and does not widen the range.
     public var fableWeightText: String {
-        let values = self.accounts.map { (self.fableWeight(for: $0) * 100).rounded() / 100 }
+        let counted = self.accounts.filter { !$0.isUnavailable }
+        let values = (counted.isEmpty ? self.accounts : counted).map { (self.fableWeight(for: $0) * 100).rounded() / 100 }
         guard let low = values.min(), let high = values.max() else { return "1.00" }
         let lowText = String(format: "%.2f", low)
         return low == high ? lowText : "\(lowText)–\(String(format: "%.2f", high))"

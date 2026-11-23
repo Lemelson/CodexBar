@@ -36,6 +36,8 @@ struct UsageWeekLimit: Equatable {
     let mine: Double?
     let mineByModel: [Part]
     let others: Double?
+    /// The limit was reset inside the window at this time: `used`, `mine` and `others` count from it.
+    let resetAt: Double?
 
     init(
         week: UsagePanelState.Week,
@@ -50,7 +52,8 @@ struct UsageWeekLimit: Equatable {
         }
         let weighted = UsageModelFamily.allCases.map { (family: $0, usd: split[$0].usd * weight($0)) }
         let weightedTotal = weighted.reduce(0) { $0 + $1.usd }
-        let estimate = capacity.flatMap { $0 > 0 ? weightedTotal / $0 * 100 : nil }
+        // The week's dollars cover the whole week: after a reset they would count the part before it too.
+        let estimate = week.resetAt == nil ? capacity.flatMap { $0 > 0 ? weightedTotal / $0 * 100 : nil } : nil
 
         var used = week.peakPct
         var mine = week.minePct ?? estimate
@@ -99,6 +102,7 @@ struct UsageWeekLimit: Equatable {
         self.mine = mine
         self.mineByModel = parts
         self.others = others
+        self.resetAt = week.resetAt
     }
 
     /// This Mac's share of the limit for one model, for the week's model table.
@@ -113,20 +117,28 @@ struct UsageWeekLimit: Equatable {
         return self.mineByModel.map { ($0.pct, $0.family.color) } + [(self.others ?? 0, UsagePalette.others)]
     }
 
-    /// "Used 51%", "At least 51% used", "Limit hit", "Now 71% used", "No limit reading".
+    /// "Used 51%", "At least 51% used", "Limit hit", "Now 71% used", "No limit reading"; after a reset inside
+    /// the week "After the Nov 14 reset: used 81%".
     var headline: String {
-        guard let used else { return "No limit reading" }
-        let percent = UsageFormat.percent(used)
-        switch self.reading {
-        case .live: return "Now \(percent) used"
-        case .final: return used >= 99.5 ? "Limit hit" : "Used \(percent)"
-        case .atLeast: return "At least \(percent) used"
-        case .none: return "No limit reading"
+        let text: String
+        if let used {
+            let percent = UsageFormat.percent(used)
+            text = switch self.reading {
+            case .live: "Now \(percent) used"
+            case .final: used >= 99.5 ? "Limit hit" : "Used \(percent)"
+            case .atLeast: "At least \(percent) used"
+            case .none: "No limit reading"
+            }
+        } else {
+            text = "No limit reading"
         }
+        guard let resetAt else { return text }
+        return "After the \(UsageFormat.shortDay(resetAt)) reset: " + text.prefix(1).lowercased() + text.dropFirst()
     }
 
     /// What follows the headline: whose it was and what was left.
-    /// ": you ≈34%, others ≈17% · 49% left", ", all yours", " · your part needs a rate".
+    /// ": you ≈34%, others ≈17% · 49% left", ", all yours", " · your part needs a rate". After a reset the
+    /// headline is longer and what was left goes: the empty part of the bar shows it.
     var tail: String {
         guard let mine else {
             return self.used == nil ? "" : " · your part needs a rate"
@@ -142,6 +154,7 @@ struct UsageWeekLimit: Equatable {
             text = ": \(you), others \(sign)\(UsageFormat.percent(others))"
         }
         let left = max(0, 100 - used)
+        guard self.resetAt == nil else { return text }
         switch self.reading {
         case .live:
             text += " · \(UsageFormat.percent(left)) left"
@@ -272,22 +285,25 @@ struct UsageSpendWeekList: View {
         .padding(.horizontal, -6)
     }
 
-    /// The selected week's models: tokens, dollars and the part of the weekly limit each took.
+    /// The selected week's models: tokens, dollars and the part of the weekly limit each took. The same rows
+    /// and the same note for every week of the account, so pointing at another week never changes the panel's
+    /// height (the panel is measured once): a model one week lacks shows zeros, and a reset is named in the
+    /// one-line title.
     private func weekDetail(_ week: UsagePanelState.Week) -> some View {
         let split = week.split
         let limit = self.limits[week.id]
+        let range = UsageFormat.dayRange(week.start, week.end)
         return VStack(alignment: .leading, spacing: 4) {
-            Text("\(UsageFormat.dayRange(week.start, week.end)) · your Claude Code by model")
+            Text(week.resetAt.map { "\(range) · by model · reset \(UsageFormat.shortDay($0))" }
+                ?? "\(range) · your Claude Code by model")
                 .font(.system(size: 10.5, weight: .semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
-            ForEach(split.shownFamilies) { family in
+            ForEach(self.families) { family in
                 self.detailRow(family, split[family], share: limit?.mine(family))
             }
-            if let capacity = self.capacity {
-                Text("“Of limit” is your part of this account's weekly limit: a full week holds "
-                    + "≈ \(UsageFormat.usd(capacity)) of Opus, and $1 of Fable counts as "
-                    + "$\(String(format: "%.2f", self.fableWeight)).")
+            if let note = self.detailNote {
+                Text(note)
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -296,6 +312,24 @@ struct UsageSpendWeekList: View {
         .padding(8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// Every model any week of this account shows.
+    private var families: [UsageModelFamily] {
+        let shown = Set(self.weeks.flatMap(\.split.shownFamilies))
+        return UsageModelFamily.allCases.filter { shown.contains($0) }
+    }
+
+    /// What "of limit" means, and, when a week of the account had a reset, what it counts after one.
+    private var detailNote: String? {
+        let reset = self.weeks.contains { $0.resetAt != nil }
+            ? "After a reset inside a week, “of limit” counts from the reset; tokens and dollars are the whole week."
+            : nil
+        guard let capacity = self.capacity else { return reset }
+        let meaning = "“Of limit” is your part of this account's weekly limit: a full week holds "
+            + "≈ \(UsageFormat.usd(capacity)) of Opus, and $1 of Fable counts as "
+            + "$\(String(format: "%.2f", self.fableWeight))."
+        return reset.map { meaning + " " + $0 } ?? meaning
     }
 
     private func detailRow(_ family: UsageModelFamily, _ use: UsageModelUse, share: Double?) -> some View {
