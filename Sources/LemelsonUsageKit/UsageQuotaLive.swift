@@ -140,9 +140,10 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
 }
 
 /// Appends readings to one provider's live file following the contract's rules. One writer per file: it
-/// remembers the last line it wrote.
-@MainActor
-public final class UsageQuotaLiveWriter {
+/// remembers the last line it wrote. An actor, so the file work (reading the tail, waiting for the shared
+/// lock the collector may hold while it compacts, the write) runs on its own serial executor, never on the
+/// main thread; calls to one writer run one at a time, and `decide` keeps the file in order and deduplicated.
+public actor UsageQuotaLiveWriter {
     /// `antigravity-quota.jsonl`.
     public static let antigravity = UsageQuotaLiveWriter(url: UsageQuotaLiveWriter.url(fileName: "antigravity-quota.jsonl"))
     /// `codex-quota.jsonl`.
@@ -167,8 +168,8 @@ public final class UsageQuotaLiveWriter {
         case failed(String)
     }
 
-    public let url: URL
-    public var lockURL: URL {
+    public nonisolated let url: URL
+    public nonisolated var lockURL: URL {
         self.url.appendingPathExtension("lock")
     }
 

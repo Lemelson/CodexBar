@@ -79,6 +79,8 @@ final class LemelsonProviderPageState {
     var renderedStateDate: Date?
     /// `updatedAt` of the last store snapshot handed to the live writer.
     var lastSnapshotAt: Date?
+    /// The last live write handed to the writer: the next one waits for it.
+    var liveWrite: Task<UsageQuotaLiveWriter.Outcome, Never>?
     /// Whether the store was fetching the provider at the last look.
     var wasRefreshing = false
     /// When the page last asked the store for a fresh reading.
@@ -427,12 +429,39 @@ extension StatusItemController {
             log.notice("\(name, privacy: .public) live: no 5-hour or weekly window in the snapshot")
             return
         }
-        let outcome = page.writer.record(reading)
-        log.notice("\(name, privacy: .public) live: \(String(describing: outcome), privacy: .public) \(reading.jsonLine.dropLast(), privacy: .public)")
+        // The file work runs on the writer's own executor (it may wait for the collector's lock); the result
+        // comes back here, on the main actor. Each write waits for the one before it, so lines keep their order.
+        let writer = page.writer
+        let previous = page.liveWrite
+        page.liveWrite = Task { [weak self] in
+            _ = await previous?.value
+            let outcome = await writer.record(reading)
+            self?.lemelsonLiveRecorded(page, reading: reading, outcome: outcome)
+            return outcome
+        }
+    }
+
+    /// After a live line was handled: logs the outcome (the values, never the account key), and when a line
+    /// went in while a menu is open, runs the collector so the page shows it.
+    private func lemelsonLiveRecorded(
+        _ page: LemelsonProviderPageState,
+        reading: UsageQuotaLiveReading,
+        outcome: UsageQuotaLiveWriter.Outcome)
+    {
+        let log = Self.lemelsonLog
+        let name = page.logName
+        if case let .failed(reason) = outcome {
+            log.error("\(name, privacy: .public) live: write failed: \(reason, privacy: .public)")
+            return
+        }
+        let values = [("5h", reading.fiveHour), ("7d", reading.week)].compactMap { key, window in
+            window.map { "\(key) \(UsageFormat.percent($0.pct))" }
+        }.joined(separator: ", ")
+        log.notice("\(name, privacy: .public) live: \(String(describing: outcome), privacy: .public) ts=\(reading.ts) \(values, privacy: .public) plan=\(reading.plan ?? "-", privacy: .private) account=\(reading.account ?? "-", privacy: .private)")
         // A new line only reaches the page through the collector; while the menu is open it runs now.
         guard outcome == .written, !self.openMenus.isEmpty else { return }
         self.lemelsonStartRefreshIfDue(force: true)
-        if pageShown {
+        if self.lemelsonCurrentPageKey() == page.provider.rawValue {
             self.lemelsonRebuildOpenMenus()
         }
     }
