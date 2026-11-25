@@ -145,11 +145,107 @@ struct LemelsonProviderSpendTests {
         #expect(parsed.quotaSource?.accountKey == "b77c53f4e468")
         #expect(!UsageProviderPage.limitsOfAnotherAccount(parsed, shown: real))
         #expect(UsageProviderPage.limitsOfAnotherAccount(parsed, shown: "codex:v1:provider-account:other"))
+        // Antigravity: its block filed under "antigravity", read by the Antigravity page. CodexBar's key there
+        // is a 64-hex digest; the collector names it by the first 12 hex of the digest's own SHA-256.
+        let digest = "4b32437a24c18ef0a8c42f256f2a7309e0bc788adea89b2efea7ccb1c9896dcf"
         let antigravity = try LemelsonProviderBlockTests.state(
-            key: "codex", block: Self.block(extra: ["quotaSource": ["account": "f69e38e798ab"]]))
-        #expect(try !UsageProviderPage.limitsOfAnotherAccount(
-            #require(antigravity.codex),
-            shown: "4b32437a24c18ef0a8c42f256f2a7309e0bc788adea89b2efea7ccb1c9896dcf"))
+            key: "antigravity", block: Self.block(extra: ["quotaSource": ["account": "f69e38e798ab"]]))
+        #expect(antigravity.codex == nil)
+        let gemini = try #require(antigravity.antigravity)
+        #expect(!UsageProviderPage.limitsOfAnotherAccount(gemini, shown: digest))
+        let page = try #require(UsageProviderPage(
+            spec: .antigravity, state: antigravity, now: Self.now, width: 310, accountKey: digest))
+        #expect(page.rows.contains { $0.part == .limit(.week) })
+        let stranger = try #require(UsageProviderPage(
+            spec: .antigravity, state: antigravity, now: Self.now, width: 310, accountKey: String(digest.reversed())))
+        #expect(stranger.rows.contains { $0.part == .notice })
+        // A name too short to be the hash is compared as a key only.
+        let short = try LemelsonProviderBlockTests.state(
+            key: "codex", block: Self.block(extra: ["quotaSource": ["account": "b77c"]]))
+        #expect(try UsageProviderPage.limitsOfAnotherAccount(#require(short.codex), shown: real))
+    }
+
+    @Test @MainActor
+    func `another account's numbers hide the plan, the reading age and plan worth, not the spend`() throws {
+        let block = Self.block(extra: [
+            "quotaSource": ["account": "b77c53f4e468"],
+            "value": ["confident": true, "planName": "Plus", "planPriceUsd": 20, "monthUsd": 289, "timesPrice": 14.5,
+                      "byModel": []],
+        ])
+        let state = try LemelsonProviderBlockTests.state(key: "codex", block: block)
+        let mine = try #require(UsageProviderPage(
+            spec: .codex, state: state, now: Self.now, width: 310,
+            accountKey: "codex:v1:provider-account:16f67a35-0ccf-4275-b37e-2a012624a6d6"))
+        #expect(mine.valueRow != nil)
+        let header = try #require(mine.rows.first { $0.part == .header })
+        #expect(!header.heightFingerprint.contains(":other"))
+
+        let other = try #require(UsageProviderPage(
+            spec: .codex, state: state, now: Self.now, width: 310, accountKey: "codex:v1:provider-account:B"))
+        #expect(other.valueRow == nil)
+        #expect(other.lineRows.allSatisfy { $0.part != .value })
+        #expect(other.rows.contains { $0.part == .spend })
+        let otherHeader = try #require(other.rows.first { $0.part == .header })
+        #expect(otherHeader.heightFingerprint.contains(":other"))
+    }
+
+    @Test
+    func `one freshness check for the row and the panel`() throws {
+        let stamp = Self.now.timeIntervalSince1970
+        let stale = UsageLimitReading.freshness + 60
+        // A forecast made 6 minutes ago from a reading that is now too old: neither the row nor the panel use it.
+        let oldReading = try LemelsonLimitCardTests.window(
+            pct: 40, resetIn: 86400, age: stale, forecast: ["at": stamp - 360, "endPct": 60])
+        #expect(oldReading.liveForecast(now: Self.now) == nil)
+        #expect(UsageLimitVerdict(window: oldReading, now: Self.now) == .unknown)
+        // A fresh reading with an old forecast: no forecast either.
+        let oldForecast = try LemelsonLimitCardTests.window(
+            pct: 40, resetIn: 86400, forecast: ["at": stamp - stale, "endPct": 60])
+        #expect(oldForecast.liveForecast(now: Self.now) == nil)
+        #expect(UsageLimitVerdict(window: oldForecast, now: Self.now) == .unknown)
+        // Both fresh: the panel and the row see the same forecast.
+        let fresh = try LemelsonLimitCardTests.window(
+            pct: 40, resetIn: 86400, forecast: ["at": stamp - 60, "endPct": 60, "endHi": 70])
+        #expect(fresh.liveForecast(now: Self.now) != nil)
+        #expect(UsageLimitVerdict(window: fresh, now: Self.now) == .enough)
+        // Out now by the forecast (its run-out time passed) and by the reading (100 %): the same verdict, the
+        // panel tells them apart by the reading.
+        let passed = try LemelsonLimitCardTests.window(
+            pct: 97, resetIn: 86400, forecast: ["at": stamp - 600, "endPct": 130, "hitAt": stamp - 60])
+        #expect(UsageLimitVerdict(window: passed, now: Self.now) == .outNow)
+        #expect((passed.pct ?? 0) < 100)
+        let full = try LemelsonLimitCardTests.window(pct: 100, resetIn: 86400)
+        #expect(UsageLimitVerdict(window: full, now: Self.now) == .outNow)
+    }
+
+    @Test
+    func `sessions that fit start after the current 5-hour window`() throws {
+        let state = try LemelsonProviderBlockTests.state(key: "codex", block: LemelsonProviderBlockTests.codexBlock())
+        let block = try #require(state.codex)
+        let left = try #require(block.sessionsLeft(for: .week, now: Self.now))
+        // The 5-hour window is 11 % used and resets in 3 h; the week resets in 48 h.
+        let current = try #require(left.current)
+        #expect(abs(current.left - 0.89) < 1e-9)
+        #expect(current.resetsAt == Self.now.timeIntervalSince1970 + 3 * 3600)
+        #expect(abs(left.spans - 9) < 1e-9) // (48 h − 3 h) / 5 h
+        #expect(left.fit == 9)
+        #expect(abs(left.available - 9.89) < 1e-9)
+        #expect(left.fitText == "9 more fit before reset")
+        #expect(left.explanation.contains("The current session has 89% left until "))
+        #expect(left.explanation.contains("9 full sessions fit after it before the reset"))
+
+        // No running 5-hour window: full sessions count from now.
+        var bare = LemelsonProviderBlockTests.codexBlock()
+        var windows = try #require(bare["windows"] as? [String: Any])
+        var five = try #require(windows["5h"] as? [String: Any])
+        five["rolled"] = true
+        windows["5h"] = five
+        bare["windows"] = windows
+        let rolled = try #require(try LemelsonProviderBlockTests.state(key: "codex", block: bare).codex)
+        let fresh = try #require(rolled.sessionsLeft(for: .week, now: Self.now))
+        #expect(fresh.current == nil)
+        #expect(abs(fresh.spans - 48.0 / 5) < 1e-9)
+        #expect(fresh.fitText == "9 fit before reset")
     }
 
     @Test

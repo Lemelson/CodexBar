@@ -100,14 +100,14 @@ struct LemelsonUsageQuotaLiveTests {
     }
 
     @Test
-    func `writer appends whole lines under the lock and resumes after a restart`() throws {
+    func `writer appends whole lines under the lock and resumes after a restart`() async throws {
         let url = try self.scratchFile()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let writer = UsageQuotaLiveWriter(url: url)
-        #expect(writer.record(self.reading(1000)) == .written)
-        #expect(writer.record(self.reading(1100)) == .unchanged)
-        #expect(writer.record(self.reading(1200, five: 3)) == .written)
-        #expect(writer.record(self.reading(1800, five: 3)) == .written)
+        #expect(await writer.record(self.reading(1000)) == .written)
+        #expect(await writer.record(self.reading(1100)) == .unchanged)
+        #expect(await writer.record(self.reading(1200, five: 3)) == .written)
+        #expect(await writer.record(self.reading(1800, five: 3)) == .written)
 
         let text = try String(contentsOf: url, encoding: .utf8)
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -120,8 +120,8 @@ struct LemelsonUsageQuotaLiveTests {
 
         // A new writer (the app restarted) continues from the last line of the file.
         let again = UsageQuotaLiveWriter(url: url)
-        #expect(again.record(self.reading(1900, five: 3)) == .unchanged)
-        #expect(again.last == self.reading(1800, five: 3))
+        #expect(await again.record(self.reading(1900, five: 3)) == .unchanged)
+        #expect(await again.last == self.reading(1800, five: 3))
 
         // An unfinished last line (no "\n") is not taken as the last reading.
         let handle = try FileHandle(forWritingTo: url)
@@ -129,5 +129,33 @@ struct LemelsonUsageQuotaLiveTests {
         try handle.write(contentsOf: Data("{\"ts\": 5000, \"source\"".utf8))
         try handle.close()
         #expect(UsageQuotaLiveWriter.lastLine(of: url) == self.reading(1800, five: 3))
+    }
+
+    @Test
+    func `concurrent writes reach the file one at a time, in order, without duplicates`() async throws {
+        let url = try self.scratchFile()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let writer = UsageQuotaLiveWriter(url: url)
+        // Readings handed over from many tasks at once, some of them the same values again.
+        let readings = (0..<40).map { self.reading(1000 + $0, five: Double($0 / 2)) }
+        let outcomes = await withTaskGroup(of: UsageQuotaLiveWriter.Outcome.self) { group in
+            for reading in readings {
+                group.addTask {
+                    await writer.record(reading)
+                }
+            }
+            var all: [UsageQuotaLiveWriter.Outcome] = []
+            for await outcome in group {
+                all.append(outcome)
+            }
+            return all
+        }
+        #expect(outcomes.count == 40)
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let lines = text.split(separator: "\n").compactMap { Reading(jsonLine: $0) }
+        #expect(!lines.isEmpty)
+        #expect(lines.count == outcomes.filter { $0 == .written }.count)
+        // Strictly newer each line, and never the same values twice in a row.
+        #expect(zip(lines, lines.dropFirst()).allSatisfy { $0.ts < $1.ts && !$1.hasSameValues(as: $0) })
     }
 }
