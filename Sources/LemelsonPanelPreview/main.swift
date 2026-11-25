@@ -255,9 +255,22 @@ struct PreviewRoot: View {
                     MenuSeparator()
                 }
             }
-            if let summary = UsageCacheSummary.provider(page.block, spec: spec) {
-                MockMenuFooter(summary: summary, width: self.menuWidth)
+            // The page's line rows ("Plan worth", "Prompt cache") between separators, then the menu's own rows,
+            // "Buy Credits…" first on Codex, as the app places them.
+            if !page.lineRows.isEmpty {
+                MenuSeparator()
+                ForEach(page.lineRows) { row in
+                    row.view.frame(height: UsageCacheRowView.rowHeight)
+                }
+                MenuSeparator()
             }
+            if spec.key == .codex {
+                MockMenuItem(title: "Buy Credits…", width: self.menuWidth)
+            }
+            MockMenuItem(title: "Add Account…", width: self.menuWidth)
+            MockMenuItem(title: "Usage Dashboard", width: self.menuWidth)
+            MockMenuItem(title: "Status Page", width: self.menuWidth)
+                .padding(.bottom, 5)
         }
     }
 
@@ -272,7 +285,7 @@ struct PreviewRoot: View {
                spec: spec, state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
                extras: extras, clock: { [now = self.now] in now })
         {
-            ForEach(page.rows.filter { $0.detail != nil } + [page.cacheRow].compactMap(\.self)) { row in
+            ForEach(page.rows.filter { $0.detail != nil } + page.lineRows) { row in
                 if let detail = row.detail {
                     self.card(width: self.panelWidth) { detail() }
                 }
