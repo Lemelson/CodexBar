@@ -457,9 +457,8 @@ extension StatusItemController {
                     onClick: {}))
             }
         }
-        if LemelsonPanelSession.shared.isRefreshing || state.isStale(now: now) {
-            self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
-        }
+        // Always the one quiet line, as on the provider pages: refreshing or not, the page keeps its height.
+        self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
     }
 
     private func addLemelsonSpend(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {
@@ -546,9 +545,13 @@ extension StatusItemController {
         now: Date,
         showsLegend: Bool)
     {
+        // One line on every mode, the provider pages' footer: "updated 19:14", "refreshing…", or how long the
+        // collector has not run, in the warning colour.
         let refreshing = LemelsonPanelSession.shared.isRefreshing
         menu.addItem(self.makeMenuCardItem(
-            UsageFooterView(state: state, now: now, width: width, refreshing: refreshing, showsLegend: showsLegend),
+            UsageFooterView(
+                state: state, now: now, width: width, refreshing: refreshing, showsLegend: showsLegend,
+                compact: !showsLegend),
             id: "lemelsonFooter",
             width: width,
             heightCacheScope: "lemelson-footer-\(showsLegend)",
@@ -589,7 +592,12 @@ extension StatusItemController {
     /// a row's detail in the panel, as a limit row does; the empty click handler keeps the row highlightable.
     func addLemelsonLineRows(_ rows: [LemelsonLineRow], to menu: NSMenu, width: CGFloat) {
         guard !rows.isEmpty else { return }
-        if let last = menu.items.last, !last.isSeparatorItem {
+        // The page's status line, when it comes right before them, heads the group: no separator between the
+        // two (on every Claude mode but Spend, whose stock rows come in between, and on the provider pages).
+        let count = menu.items.count
+        if count >= 2, menu.items[count - 1].isSeparatorItem, Self.lemelsonIsFooter(menu.items[count - 2]) {
+            menu.removeItem(at: count - 1)
+        } else if let last = menu.items.last, !last.isSeparatorItem {
             menu.addItem(.separator())
         }
         for row in rows {
@@ -604,6 +612,11 @@ extension StatusItemController {
                 onClick: {}))
         }
         menu.addItem(.separator())
+    }
+
+    /// The one-line status row of a Claude mode ("lemelsonFooter") or of a provider page ("…-footer").
+    static func lemelsonIsFooter(_ item: NSMenuItem) -> Bool {
+        (item.representedObject as? String)?.lowercased().hasSuffix("footer") == true
     }
 
     private func makeLemelsonSubpanel(_ panel: @escaping () -> AnyView) -> NSMenu {
