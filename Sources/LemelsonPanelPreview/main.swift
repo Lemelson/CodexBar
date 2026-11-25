@@ -255,10 +255,9 @@ struct PreviewRoot: View {
                     MenuSeparator()
                 }
             }
-            // The page's line rows ("Plan worth", "Prompt cache") between separators, then the menu's own rows,
-            // "Buy Credits…" first on Codex, as the app places them.
+            // The page's line rows ("Plan worth", "Prompt cache") right under the footer's status line, one group
+            // closed by a separator, then the menu's own rows, "Buy Credits…" first on Codex, as the app places them.
             if !page.lineRows.isEmpty {
-                MenuSeparator()
                 ForEach(page.lineRows) { row in
                     row.view.frame(height: UsageCacheRowView.rowHeight)
                 }
