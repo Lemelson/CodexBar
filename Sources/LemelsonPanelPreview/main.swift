@@ -5,10 +5,11 @@ import SwiftUI
 // Renders the accounts panel to a PNG without launching CodexBar, so the layout can be checked by eye.
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
-//       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache]
+//       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache
+//               |codex|codex-details|codex-cache|pages]
 //       (limits, spend, value and details also as a comma list: --only limits,spend,value)
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
-//       [--antigravity block.json] [--claude-cache real|full|plain|none]
+//       [--antigravity block.json] [--codex block.json] [--claude-cache real|full|plain|none]
 //       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
 //       [--drift month|week] [--hover-month 0] [--drift-fixture months] [--unit opus|mix|fable]
 //       [--value-period month|week] [--broken-account 1] [--cache-error]
@@ -41,6 +42,13 @@ import SwiftUI
 // Antigravity (only with --only antigravity or antigravity-details): the summary's own `antigravity` block
 // when it has one, else the built-in fixture "full". --fixture picks a fixture (full, run-out, no-quota,
 // no-spend, one-day, error, ...: see AntigravityFixture); --antigravity reads the block from a file (a whole summary or the block alone).
+//
+// Codex (--only codex, codex-details, codex-cache): the summary's own `codex` block when it has one, else the
+// Antigravity fixture of the same name renamed to Codex (CodexFixture). --codex reads the block from a file
+// (a whole summary: its `codex`, else its `antigravity` renamed; or the block alone). The Codex card shows two
+// made-up facts (credits, limit reset credits) where the app will put its own; --no-extras leaves them out.
+//
+// --only pages draws Claude Limits, the Antigravity page and the Codex page side by side.
 
 struct ModeChips: View {
     let selected: String
@@ -133,6 +141,8 @@ struct PreviewRoot: View {
     var hoverMonth: Int?
     var hoverDay: String?
     var antigravity: UsagePanelState?
+    var codex: UsagePanelState?
+    var codexExtras: [UsageProviderPage.Extra] = []
 
     private let menuWidth: CGFloat = 310
     private let panelWidth: CGFloat = 340
@@ -166,21 +176,25 @@ struct PreviewRoot: View {
                     }
                 }
             }
-            if self.only == "antigravity" {
-                self.card(width: self.menuWidth) { self.antigravityPage }
+            if self.only == "pages" || self.only == "antigravity" {
+                self.card(width: self.menuWidth) { self.providerPage(.antigravity, self.antigravity) }
+            }
+            if self.only == "pages" || self.only == "codex" {
+                self.card(width: self.menuWidth) {
+                    self.providerPage(.codex, self.codex, extras: self.codexExtras)
+                }
             }
             if self.only == "antigravity-details" {
-                self.antigravityDetails
+                self.providerDetails(.antigravity, self.antigravity)
             }
-            if self.only == "antigravity-cache", let block = self.antigravity?.antigravity {
-                if let summary = UsageCacheSummary.antigravity(block) {
-                    self.cachePair(summary)
-                } else {
-                    self.card(width: self.menuWidth) {
-                        Text("No Antigravity cache data: the page has no cache row.")
-                            .font(.system(size: 11)).padding(20)
-                    }
-                }
+            if self.only == "codex-details" {
+                self.providerDetails(.codex, self.codex, extras: self.codexExtras)
+            }
+            if self.only == "antigravity-cache" {
+                self.providerCache(.antigravity, self.antigravity)
+            }
+            if self.only == "codex-cache" {
+                self.providerCache(.codex, self.codex)
             }
         }
         .environment(\.usagePreviewHoveredDay, self.hoverDay)
@@ -193,9 +207,12 @@ struct PreviewRoot: View {
         }
     }
 
-    /// `--only limits,spend,value` draws several of the Claude pages side by side.
+    /// `--only limits,spend,value` draws several of the Claude pages side by side; `pages` includes Limits.
     private func shows(_ name: String) -> Bool {
         guard let only = self.only else { return true }
+        if only == "pages" {
+            return name == "limits"
+        }
         return only.split(separator: ",").contains { $0 == name }
     }
 
@@ -212,33 +229,46 @@ struct PreviewRoot: View {
         }
     }
 
-    /// The page as the menu would stack its rows, with a separator where a row asks for one.
-    @ViewBuilder private var antigravityPage: some View {
-        if let state = self.antigravity,
-           let page = UsageAntigravityPage(state: state, now: self.now, width: self.menuWidth)
+    /// A provider page as the menu would stack its rows, with a separator where a row asks for one.
+    /// Card rows are drawn joined, the others with the menu's row padding left to the view itself.
+    @ViewBuilder private func providerPage(
+        _ spec: UsageProviderSpec,
+        _ state: UsagePanelState?,
+        extras: [UsageProviderPage.Extra] = []) -> some View
+    {
+        if let state,
+           let page = UsageProviderPage(spec: spec, state: state, now: self.now, width: self.menuWidth, extras: extras)
         {
+            if !page.rows.isEmpty {
+                // The card's first row sits right under the tab row in the menu: the same gap as Claude Limits.
+                Color.clear.frame(height: 4)
+            }
             ForEach(Array(page.rows.enumerated()), id: \.element.id) { index, row in
                 let lit = self.highlighted && row.detail != nil
                 row.view
                     .environment(\.usageRowHighlighted, lit)
-                    .modifier(PreviewChevron(shown: row.detail != nil, lit: lit))
-                    .background(lit ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
+                    .modifier(PreviewChevron(shown: row.detail != nil && !row.inCard, lit: lit))
+                    .background(lit && !row.inCard ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
                 if row.separatorAfter, index < page.rows.count - 1 {
                     MenuSeparator()
                 }
             }
-            if let summary = UsageCacheSummary.antigravity(page.block) {
+            if let summary = UsageCacheSummary.provider(page.block, spec: spec) {
                 MockMenuFooter(summary: summary, width: self.menuWidth)
             }
         }
     }
 
-    /// Every hover detail of the page, side by side.
-    @ViewBuilder private var antigravityDetails: some View {
-        if let state = self.antigravity,
-           let page = UsageAntigravityPage(
-               state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
-               clock: { [now = self.now] in now })
+    /// Every hover detail of a provider page, side by side.
+    @ViewBuilder private func providerDetails(
+        _ spec: UsageProviderSpec,
+        _ state: UsagePanelState?,
+        extras: [UsageProviderPage.Extra] = []) -> some View
+    {
+        if let state,
+           let page = UsageProviderPage(
+               spec: spec, state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
+               extras: extras, clock: { [now = self.now] in now })
         {
             ForEach(page.rows.filter { $0.detail != nil } + [page.cacheRow].compactMap(\.self)) { row in
                 if let detail = row.detail {
@@ -248,8 +278,24 @@ struct PreviewRoot: View {
         }
     }
 
+    @ViewBuilder private func providerCache(_ spec: UsageProviderSpec, _ state: UsagePanelState?) -> some View {
+        if let block = state.flatMap(spec.block(in:)) {
+            if let summary = UsageCacheSummary.provider(block, spec: spec) {
+                self.cachePair(summary)
+            } else {
+                self.card(width: self.menuWidth) {
+                    Text("No \(spec.name) cache data: the page has no cache row.")
+                        .font(.system(size: 11)).padding(20)
+                }
+            }
+        }
+    }
+
     private func card(width: CGFloat, @ViewBuilder content: () -> some View) -> some View {
+        // Card slices fill the height they are given (a menu row's); side by side, a shorter column must not
+        // stretch them to the tallest one.
         VStack(spacing: 0) { content() }
+            .fixedSize(horizontal: false, vertical: true)
             .frame(width: width)
             .background(self.panelBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -259,12 +305,12 @@ struct PreviewRoot: View {
         ModeChips(selected: "Limits")
         Divider()
         ForEach(state.claudeLimitAccounts) { account in
-            let style = UsageClaudeLimitCardStyle(account: account, in: state)
+            let style = UsageLimitCardStyle(account: account, in: state)
             let windows = account.visibleWindows
-            UsageClaudeLimitHeader(
+            UsageLimitCardHeader(
                 account: account, style: style, now: self.now, width: self.menuWidth, hasLimits: !windows.isEmpty)
             ForEach(Array(windows.enumerated()), id: \.offset) { index, entry in
-                UsageClaudeLimitRow(
+                UsageLimitCardRow(
                     kind: entry.0,
                     window: entry.1,
                     style: style,
@@ -343,7 +389,7 @@ let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
         + "[--only part] [--account n] [--highlighted] [--hover-week n] [--hover-day yyyy-mm-dd] "
-        + "[--fixture name] [--antigravity file] [--claude-cache real|full|plain|none] [--period n] "
+        + "[--fixture name] [--antigravity file] [--codex file] [--no-extras] [--claude-cache real|full|plain|none] [--period n] "
         + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours] [--drift month|week] "
         + "[--hover-month n] [--drift-fixture months] [--unit opus|mix|fable] [--value-period month|week] "
         + "[--broken-account n] [--cache-error]\n"
@@ -390,9 +436,10 @@ if let name = argument(after: "--drift-fixture") {
     state = state.map(ClaudeFixture.driftMonths)
 }
 let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
-let wantsAntigravity = only?.hasPrefix("antigravity") == true
+let wantsAntigravity = only?.hasPrefix("antigravity") == true || only == "pages"
+let wantsCodex = only?.hasPrefix("codex") == true || only == "pages"
 
-if state == nil, !wantsAntigravity {
+if state == nil, !wantsAntigravity, !wantsCodex {
     FileHandle.standardError.write(Data("cannot read summary: \(stateURL.path)\n".utf8))
     exit(1)
 }
@@ -423,6 +470,31 @@ if wantsAntigravity {
     }
 }
 
+var codex: UsagePanelState?
+if wantsCodex {
+    if let name = argument(after: "--fixture") {
+        guard CodexFixture.names.contains(name) else {
+            FileHandle.standardError.write(Data("unknown fixture \(name): \(CodexFixture.names.joined(separator: ", "))\n".utf8))
+            exit(2)
+        }
+        codex = CodexFixture.state(name, now: now)
+        FileHandle.standardError.write(Data("codex: fixture \(name)\n".utf8))
+    } else if let path = argument(after: "--codex") {
+        codex = CodexFixture.merging(blockAt: URL(fileURLWithPath: path), into: state, now: now)
+        FileHandle.standardError.write(Data("codex: block from \(path)\n".utf8))
+    } else if state?.codex != nil {
+        codex = state
+        FileHandle.standardError.write(Data("codex: block from \(stateURL.path)\n".utf8))
+    } else {
+        codex = CodexFixture.state("full", now: now)
+        FileHandle.standardError.write(Data("codex: no block in the summary, fixture full\n".utf8))
+    }
+    if codex?.codex == nil {
+        FileHandle.standardError.write(Data("codex: no block to draw\n".utf8))
+        exit(1)
+    }
+}
+
 // The period is a menu-wide choice kept in the defaults (of this tool, here): always set it.
 UsagePanelSelection.shared.spendPeriod = argument(after: "--period").flatMap(Int.init)
     .flatMap(UsageSpendPeriod.init(rawValue:)) ?? .d30
@@ -438,7 +510,7 @@ let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : 
 
 _ = NSApplication.shared
 let hosting = NSHostingView(rootView: PreviewRoot(
-    state: wantsAntigravity ? nil : state,
+    state: (wantsAntigravity || wantsCodex) && only != "pages" ? nil : state,
     now: now,
     only: only,
     warm: arguments.contains("--warm"),
@@ -447,7 +519,9 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     hoverWeek: argument(after: "--hover-week").flatMap(Int.init),
     hoverMonth: argument(after: "--hover-month").flatMap(Int.init),
     hoverDay: argument(after: "--hover-day"),
-    antigravity: antigravity))
+    antigravity: antigravity,
+    codex: codex,
+    codexExtras: arguments.contains("--no-extras") ? [] : CodexFixture.extras))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)

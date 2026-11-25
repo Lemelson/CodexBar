@@ -66,7 +66,7 @@ enum AntigravityFixture {
     private static let hour = 3600.0
     private static let day = 86400.0
 
-    private static func block(_ name: String, now: Date) -> [String: Any] {
+    static func block(_ name: String, now: Date) -> [String: Any] {
         var block: [String: Any] = [
             "uuid": "antigravity", "name": "Antigravity", "short": "Antigravity", "beta": true,
             "active": false, "useHapp": false, "planName": NSNull(), "planPriceUsd": NSNull(),
