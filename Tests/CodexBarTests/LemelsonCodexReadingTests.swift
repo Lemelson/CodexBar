@@ -44,8 +44,12 @@ struct LemelsonCodexReadingTests {
         #expect(reading.fiveHour == .init(pct: 89, resetsAt: 1_795_603_600))
         #expect(reading.week == .init(pct: 27.2, resetsAt: 1_795_686_400))
         #expect(reading.plan == "Plus")
-        // The line never carries the account's e-mail.
+        // The line never carries the account's e-mail; the account is the history key the app passes.
         #expect(!reading.jsonLine.contains("@"))
+        #expect(reading.account == nil)
+        let keyed = try #require(StatusItemController.lemelsonCodexReading(snapshot, account: "codex:v1:provider-account:x"))
+        #expect(keyed.account == "codex:v1:provider-account:x")
+        #expect(keyed.jsonLine.contains("\"account\": \"codex:v1:provider-account:x\""))
     }
 
     @Test

@@ -1,5 +1,5 @@
 import Foundation
-import LemelsonUsageKit
+@testable import LemelsonUsageKit
 import Testing
 
 // lemelson: the shared limit card (verdict and time mark, `UsageLimitCard.swift`) and the provider pages
@@ -154,6 +154,7 @@ struct LemelsonProviderBlockTests {
         let openai = UsageModelNaming.openai.labels(for: ["gpt-6.1-sol", "gpt-6.1-sol-mini", "gpt-5", "codex-mini-latest"])
         #expect(openai == ["gpt-6.1-sol": "Sol", "gpt-6.1-sol-mini": "Sol Mini", "gpt-5": "GPT-5",
                            "codex-mini-latest": "Codex Mini"])
+        #expect(UsageModelNaming.openai.labels(for: ["codex-auto-review"]) == ["codex-auto-review": "Auto Review"])
         let clash = UsageModelNaming.openai.labels(for: ["gpt-6.1-sol", "gpt-6-sol"])
         #expect(clash == ["gpt-6.1-sol": "Sol 6.1", "gpt-6-sol": "Sol 6"])
         let gemini = UsageModelNaming.gemini.labels(for: ["gemini-4-neon", "gemini-3.7-flash", "gemini-3.6-flash"])
@@ -170,23 +171,27 @@ struct LemelsonProviderBlockTests {
     }
 
     @Test @MainActor
-    func `codex page is the shared card, spend, value and footer`() throws {
+    func `codex page is the shared card, spend and footer, with value and cache as line rows`() throws {
         let state = try Self.state(key: "codex", block: Self.codexBlock())
         let extras = [UsageProviderPage.Extra(fact: UsageLimitCardFact(
             id: "credits", symbol: "creditcard", title: "Credits", value: "58,169 left"))]
         let page = try #require(UsageProviderPage(spec: .codex, state: state, now: Self.now, width: 310, extras: extras))
         #expect(page.rows.map(\.part) == [
-            .header, .limit(.fiveHour), .limit(.week), .fact("credits"), .spend, .value, .footer,
+            .header, .limit(.fiveHour), .limit(.week), .fact("credits"), .spend, .footer,
         ])
         #expect(page.rows.map(\.id) == [
             "lemelsonCodex-header", "lemelsonLimit-codex-5h", "lemelsonLimit-codex-7d", "lemelsonCodex-fact-credits",
-            "lemelsonCodex-spend", "lemelsonCodex-value", "lemelsonCodex-footer",
+            "lemelsonCodex-spend", "lemelsonCodex-footer",
         ])
         #expect(page.rows.prefix(4).filter(\.inCard).count == 4)
         #expect(page.rows.filter { $0.detail != nil }.map(\.id) == ["lemelsonLimit-codex-5h", "lemelsonLimit-codex-7d"])
         // The card ends with one separator, after its last slice (the fact).
         #expect(page.rows.filter(\.separatorAfter).first?.id == "lemelsonCodex-fact-credits")
         #expect(page.cacheRow?.id == "lemelsonCodex-cache")
+        // "Plan worth" then "Prompt cache", one line each with a hover detail, placed by the menu.
+        #expect(page.lineRows.map(\.id) == ["lemelsonCodex-value", "lemelsonCodex-cache"])
+        #expect(page.lineRows.map(\.part) == [.value, .cache])
+        #expect(page.lineRows.allSatisfy { $0.detail != nil && !$0.inCard })
         // The same summary has no Antigravity block, so no Antigravity page.
         #expect(UsageProviderPage(spec: .antigravity, state: state, now: Self.now, width: 310) == nil)
     }
@@ -202,7 +207,10 @@ struct LemelsonProviderBlockTests {
         #expect(extras.map(\.fact.id) == ["credits", "reset-credits"])
         #expect(extras[0].fact.value == "58,169 left")
         #expect(extras[0].fact.caption == nil)
-        #expect(extras[0].detail == nil)
+        // The number is explained in its hover panel.
+        #expect(extras[0].detail != nil)
+        #expect(UsageCodexFacts.exact(58169.35) == "58,169.35")
+        #expect(UsageCodexFacts.exact(12.5) == "12.50")
         #expect(extras[1].fact.value == "3 available")
         // The soonest expiry, whatever the order.
         #expect(extras[1].fact.caption == "Next one expires in 1d")
@@ -212,7 +220,8 @@ struct LemelsonProviderBlockTests {
         #expect(UsageCodexFacts.extras(creditsLeft: nil, resetCredits: [], now: now).isEmpty)
         let small = UsageCodexFacts.extras(creditsLeft: 12.5, creditsNote: "Monthly cap", resetCredits: [nil], now: now)
         #expect(small.map(\.fact.value) == ["12.5 left", "1 available"])
-        #expect(small.map(\.fact.caption) == ["Monthly cap", "No expiry date"])
+        // CodexBar's own note goes into the credits panel, not under the row.
+        #expect(small.map(\.fact.caption) == [nil, "No expiry date"])
     }
 
     @Test @MainActor
@@ -232,5 +241,6 @@ struct LemelsonProviderBlockTests {
         let page = try #require(UsageProviderPage(spec: .antigravity, state: state, now: Self.now, width: 310))
         #expect(page.rows.map(\.part) == [.header, .notice, .footer])
         #expect(page.cacheRow == nil)
+        #expect(page.lineRows.isEmpty)
     }
 }

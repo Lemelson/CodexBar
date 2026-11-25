@@ -54,6 +54,22 @@ struct LemelsonUsageQuotaLiveTests {
     }
 
     @Test
+    func `account key goes last, is never an e-mail, and a new account writes a line at once`() {
+        let base = self.reading(7)
+        let key = "codex:v1:provider-account:16f67a35"
+        let owned = Reading(ts: 7, fiveHour: base.fiveHour, week: base.week, plan: "Plus", account: key)
+        #expect(owned.jsonLine.hasSuffix(", \"plan\": \"Plus\", \"account\": \"\(key)\"}\n"))
+        #expect(Reading(jsonLine: owned.jsonLine) == owned)
+        // Unknown: no key at all.
+        #expect(!Reading(ts: 7, fiveHour: base.fiveHour, week: base.week, account: " ").jsonLine.contains("account"))
+        // The same numbers from another account are a new line, not "unchanged".
+        let other = Reading(ts: 8, fiveHour: base.fiveHour, week: base.week, plan: "Plus", account: "codex:v1:other")
+        #expect(UsageQuotaLiveWriter.decide(other, after: owned) == .written)
+        let again = Reading(ts: 8, fiveHour: base.fiveHour, week: base.week, plan: "Plus", account: key)
+        #expect(UsageQuotaLiveWriter.decide(again, after: owned) == .unchanged)
+    }
+
+    @Test
     func `one file per provider next to the summary`() {
         let folder = UsagePanelStore.defaultURL.deletingLastPathComponent()
         #expect(UsageQuotaLiveWriter.antigravity.url == folder.appendingPathComponent("antigravity-quota.jsonl"))
