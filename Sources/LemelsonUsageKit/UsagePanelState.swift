@@ -246,6 +246,10 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         /// (`peakPct`, `peakAt`, `peakFinal`, `minePct`, `minePctByModel`, `othersPct`) then count from the reset;
         /// `usd`, `m` and `tokens` stay the whole week.
         public var resetAt: Double?
+        /// Provider pages: no readings that week, so its boundaries are a guess (`peakPct` is null).
+        public var approx: Bool?
+        /// Provider pages: the window was reset early; `end` is when the next one began, this is when it was due.
+        public var scheduledEnd: Double?
 
         public var id: Double {
             self.end
@@ -253,7 +257,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
 
         enum CodingKeys: String, CodingKey {
             case start, end, current, usd, tokens, peakPct, m
-            case peakAt, peakFinal, minePct, minePctByModel, othersPct, resetAt
+            case peakAt, peakFinal, minePct, minePctByModel, othersPct, resetAt, approx, scheduledEnd
         }
 
         public init(from decoder: Decoder) throws {
@@ -274,6 +278,9 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
                 .compactMapValues { $0 }
             self.othersPct = try? container.decodeIfPresent(Double.self, forKey: .othersPct)
             self.resetAt = (try? container.decodeIfPresent(Double.self, forKey: .resetAt))
+                .flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+            self.approx = try? container.decodeIfPresent(Bool.self, forKey: .approx)
+            self.scheduledEnd = (try? container.decodeIfPresent(Double.self, forKey: .scheduledEnd))
                 .flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         }
     }
@@ -325,9 +332,27 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var tokens: Double?
         /// By model family: [dollars, tokens].
         public var m: [String: [Double]]?
+        /// Provider pages: tokens of models without a price that day, by model id (only on such days).
+        public var unpriced: [String: Double]?
 
         public var total: Double {
             (self.opus ?? 0) + (self.fable ?? 0) + (self.other ?? 0)
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case day, opus, fable, other, tokens, m, unpriced
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.day = try container.decode(String.self, forKey: .day)
+            self.opus = try container.decodeIfPresent(Double.self, forKey: .opus)
+            self.fable = try container.decodeIfPresent(Double.self, forKey: .fable)
+            self.other = try container.decodeIfPresent(Double.self, forKey: .other)
+            self.tokens = try container.decodeIfPresent(Double.self, forKey: .tokens)
+            self.m = try container.decodeIfPresent([String: [Double]].self, forKey: .m)
+            // Newer than the rest of the day: a value of another shape is dropped, not the summary.
+            self.unpriced = try? container.decodeIfPresent([String: Double].self, forKey: .unpriced)
         }
     }
 

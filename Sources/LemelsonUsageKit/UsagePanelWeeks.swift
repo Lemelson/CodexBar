@@ -360,7 +360,8 @@ struct UsageWeekRow: View {
         let split = self.week.split
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(UsageFormat.dayRange(self.week.start, self.week.end))
+                // A window without readings has guessed boundaries: "≈".
+                Text((self.week.approx == true ? "≈ " : "") + UsageFormat.dayRange(self.week.start, self.week.end))
                     .font(.system(size: 11, weight: .medium))
                 if self.week.current == true {
                     Text("now")
@@ -376,7 +377,8 @@ struct UsageWeekRow: View {
             }
             if let limit {
                 UsageSplitBar(parts: limit.barParts, scale: 100)
-                (Text(limit.headline).foregroundStyle(.primary) + Text(limit.tail))
+                (Text(self.week.approx == true ? "No readings that week" : limit.headline).foregroundStyle(.primary)
+                    + Text(limit.tail + self.earlyReset))
                     .font(.system(size: 10.5))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -390,6 +392,12 @@ struct UsageWeekRow: View {
             Color.primary.opacity(self.selected ? 0.08 : 0),
             in: RoundedRectangle(cornerRadius: 5))
         .padding(.horizontal, -6)
+    }
+
+    /// " · reset early": the window ended (the next one began) well before the reset it was due at.
+    private var earlyReset: String {
+        guard let due = self.week.scheduledEnd, due - self.week.end > 3600 else { return "" }
+        return " · reset early"
     }
 }
 

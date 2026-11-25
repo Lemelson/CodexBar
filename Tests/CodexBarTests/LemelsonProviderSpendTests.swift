@@ -78,6 +78,42 @@ struct LemelsonProviderSpendTests {
     }
 
     @Test
+    func `an older model without a price says no price in the longer periods`() throws {
+        var block = Self.block()
+        var daily = try #require(block["daily"] as? [[String: Any]])
+        // 70 days back, outside the 30-day model list: a model without a price, named by the day itself.
+        var old = Self.day(70, ["gpt-legacy-review": (0, 4e6)])
+        old["unpriced"] = ["gpt-legacy-review": 4e6]
+        daily.append(old)
+        block["daily"] = daily
+        let (spend, _) = try Self.spend(block)
+        let quarter = spend[.d90]
+        #expect(quarter.otherMembers.contains { $0.hasSuffix(" no price") && !$0.hasPrefix("Auto Review") })
+        #expect(!quarter.otherMembers.contains { $0.contains("<$0.01") && $0.lowercased().contains("legacy") })
+        // A shape the app does not know drops the key, not the summary.
+        old["unpriced"] = "?"
+        daily[daily.count - 1] = old
+        block["daily"] = daily
+        #expect(throws: Never.self) { try Self.spend(block) }
+    }
+
+    @Test
+    func `weekly windows read the approximate and early-reset flags`() throws {
+        let stamp = Self.now.timeIntervalSince1970
+        let block = Self.block(extra: ["weeks": [
+            ["start": stamp - 14 * 86400, "end": stamp - 7 * 86400, "approx": true, "peakPct": NSNull(),
+             "usd": ["other": 4.2], "tokens": 1.8e7],
+            ["start": stamp - 7 * 86400, "end": stamp - 5 * 86400, "scheduledEnd": stamp, "peakPct": 58,
+             "usd": ["other": 8.6], "tokens": 3.6e7, "approx": false],
+        ]])
+        let state = try LemelsonProviderBlockTests.state(key: "codex", block: block)
+        let weeks = try #require(state.codex?.account.weeks)
+        #expect(weeks.count == 2)
+        #expect(weeks[0].approx == true && weeks[0].peakPct == nil)
+        #expect(weeks[1].approx == false && weeks[1].scheduledEnd == stamp && weeks[1].peakPct == 58)
+    }
+
+    @Test
     func `spend value and cache take one name per model`() throws {
         let (spend, block) = try Self.spend()
         let labels = block.modelLabels(spec: .codex)

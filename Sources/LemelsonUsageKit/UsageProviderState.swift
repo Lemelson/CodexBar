@@ -634,6 +634,11 @@ public struct UsageProviderSpend: Sendable, Equatable {
             var members: [String] = []
             var otherIsEmpty = false
             if !rest.isEmpty {
+                // No price: the 30-day model list, plus the days of this period that name such a model (the
+                // collector's daily "unpriced"), so an older model without a price is not taken for a cheap one.
+                let periodFrom = UsageDayKey.start(days: period.days, now: now)
+                let unpriced = days.filter { $0.day >= periodFrom }
+                    .reduce(into: unpriced) { set, day in set.formUnion(day.unpriced.map { Array($0.keys) } ?? []) }
                 let uses = rest.map { ($0, split[$0] ?? UsageModelUse()) }
                 rows.append(ModelRow(id: "other", label: "Other", color: .other, use: uses.reduce(UsageModelUse()) { $0 + $1.1 }))
                 let shown = uses.filter { $0.1.tokens > 0 || $0.1.usd > 0 }
