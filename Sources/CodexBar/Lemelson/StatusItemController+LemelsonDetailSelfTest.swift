@@ -410,14 +410,22 @@ extension StatusItemController {
         func at(_ time: TimeInterval, _ steps: [(TimeInterval, () -> Void)]) {
             plan += steps.map { (time + $0.0, $0.1) }
         }
+        // Every page's height against the room on the screen: the Claude modes here, the providers below.
+        let claudeHeight: (String) -> [(TimeInterval, () -> Void)] = { label in
+            [(0, { tools.describeRows(prefixes: ["lemelson"], label: label) })]
+        }
+        at(0.5, claudeHeight("claude:limits"))
         at(0.6, hover("cache", cacheRow))
         at(1.6, [(0, { tools.describeFooter() })])
         at(2.0, [(0, { tools.key(right: true, "right, to Spend") })])
         at(2.9, [(0, { tools.clickSegment("Models", inRow: "lemelsonSpendSummary") })])
         at(3.6, [(0, { tools.clickSegment("Accounts", inRow: "lemelsonSpendSummary") })])
         at(4.3, [(0, { tools.clickSegment("90d", inRow: "lemelsonSpendSummary") })])
+        at(4.9, claudeHeight("claude:spend"))
         at(5.0, [(0, { tools.key(right: true, "right, to Value") })])
+        at(5.6, claudeHeight("claude:value"))
         at(5.7, [(0, { tools.key(right: true, "right, to Classic") })])
+        at(6.4, claudeHeight("claude:classic"))
         at(6.5, hover("cache", cacheRow))
         at(7.4, [(0, { tools.key(right: true, "right, to Antigravity") })])
         let codex = UsageProviderSpec.codex
