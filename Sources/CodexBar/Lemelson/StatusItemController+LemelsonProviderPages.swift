@@ -9,8 +9,9 @@ import SwiftUI
 //   • Codex: the usage card (session, weekly, the inline cost dashboard), Limit Reset Credits, Credits,
 //     Extra usage (the same credits balance again, or the monthly cap that the credits line already names),
 //     Plan Usage and Cost. The credits balance and the limit reset credits come back as facts inside the page's
-//     card (`UsageCodexFacts`), "Buy Credits…" stays an action row, and the OpenAI web charts the page has no
-//     counterpart for (Usage breakdown, Credits history) stay as rows with their detail panel.
+//     card (`UsageCodexFacts`), "Buy Credits…" stays an action row (the stock item, first under the page's line
+//     rows), and the OpenAI web charts the page has no counterpart for (Usage breakdown, Credits history) stay
+//     as rows with their detail panel.
 //
 // Entry points:
 //   • `addLemelsonProviderPage`: from `addLemelsonUsagePanel` while the Antigravity or Codex tab is built;
@@ -117,6 +118,7 @@ extension StatusItemController {
         let started = CACurrentMediaTime()
         let warm = self.lemelsonTakeWarmProviderRows(page, width: context.menuWidth)
         guard let built = self.addLemelsonProviderRows(page, to: menu, width: context.menuWidth) else { return false }
+        page.width = context.menuWidth
         let session = LemelsonPanelSession.shared
         // The page replaces the stock card's rows below it (Cost, Usage history, Plan Usage).
         session.stockExtrasVisible = false
@@ -129,17 +131,15 @@ extension StatusItemController {
                 hasCostHistory: false,
                 canShowBuyCredits: false,
                 hasOpenAIWebMenuItems: web.hasUsageBreakdown || web.hasCreditsHistory)
-            if web.canShowBuyCredits {
-                menu.addItem(self.lemelsonBuyCreditsItem())
-                menu.addItem(.separator())
-            }
+            // "Buy Credits…" stays: the stock item, right under the page's line rows (`addLemelsonPendingRows`).
+            session.pendingBuyCredits = web.canShowBuyCredits
         }
-        // Its prompt cache row goes above the action rows, as on the Claude pages.
-        session.pendingCacheRow = Self.lemelsonCacheRow(of: built)
-        // Built for the tab cache's warm-up (another tab is shown): render the page's own rows now as well,
-        // while warming is allowed; the tab cache is often emptied before the page is reached.
+        // Its "Plan worth" and "Prompt cache" rows go above the action rows, as the cache row on the Claude pages.
+        session.pendingLineRows = Self.lemelsonLineRows(of: built)
+        // Built for the tab cache's warm-up (another tab is shown): the page's own rows are rendered by the
+        // debounced warm-up, not a second time inside this pass.
         if !page.isWarming, self.lemelsonCurrentPageKey() != page.provider.rawValue {
-            self.lemelsonWarmProviderRows(page)
+            self.lemelsonScheduleProviderWarmup()
         }
         if UserDefaults.standard.bool(forKey: "lemelsonSelfTest") {
             let ms = Int((CACurrentMediaTime() - started) * 1000)
@@ -148,22 +148,7 @@ extension StatusItemController {
         return true
     }
 
-    /// "Buy Credits…" as the stock Codex card has it (the same action).
-    private func lemelsonBuyCreditsItem() -> NSMenuItem {
-        let item = NSMenuItem(
-            title: L("Buy Credits..."),
-            action: #selector(self.openCreditsPurchase),
-            keyEquivalent: "")
-        item.target = self
-        if let image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil) {
-            image.isTemplate = true
-            image.size = NSSize(width: 16, height: 16)
-            item.image = image
-        }
-        return item
-    }
-
-    /// The page's rows, without its cache row (see `lemelsonCacheRow(of:)`). Nil without a page.
+    /// The page's rows, without its line rows (see `lemelsonLineRows(of:)`). Nil without a page.
     private func addLemelsonProviderRows(
         _ page: LemelsonProviderPageState,
         to menu: NSMenu,
@@ -173,6 +158,8 @@ extension StatusItemController {
         let refreshing = self.lemelsonProviderRefreshing(page)
         let now = Date()
         let codex = page.provider == .codex ? self.lemelsonCodexCard(now: now) : nil
+        // The account shown: when the collector's limits are of another one, the page says so instead.
+        let accountKey = self.lemelsonAccountKey(page)
         guard let built = UsageProviderPage(
             spec: page.spec,
             state: state,
@@ -181,14 +168,17 @@ extension StatusItemController {
             detailWidth: UsageHoverPanelController.panelWidth,
             refreshing: refreshing,
             account: codex?.account,
+            accountKey: accountKey,
             extras: codex?.extras ?? [])
         else { return nil }
         page.renderedStateDate = UsagePanelStore.modificationDate()
-        page.width = width
 
         for row in built.rows {
             // The footer's caption changes with the refreshing state.
             let fingerprint = row.part == .footer ? "\(row.heightFingerprint):\(refreshing)" : row.heightFingerprint
+            if row.part == .notice, UsageProviderPage.limitsOfAnotherAccount(built.block, shown: accountKey) {
+                Self.lemelsonLog.notice("\(page.logName, privacy: .public): limits in the summary are of another account, notice shown")
+            }
             if let detail = row.detail {
                 // As the Claude limit rows: the detail panel shows the window's chart at once and morphs
                 // between the two rows; the empty click handler keeps the row highlightable. A card row draws
@@ -231,15 +221,25 @@ extension StatusItemController {
         return built
     }
 
-    /// The page's "Prompt cache" row in the shape the menu footer takes; nil without cache data.
-    static func lemelsonCacheRow(of page: UsageProviderPage) -> LemelsonCacheRow? {
-        guard let row = page.cacheRow, let detail = row.detail else { return nil }
-        return LemelsonCacheRow(
-            id: row.id,
-            view: row.view,
-            detail: detail,
-            heightCacheScope: row.heightCacheScope,
-            heightFingerprint: row.heightFingerprint)
+    /// The page's "Plan worth" and "Prompt cache" rows in the shape the menu footer takes.
+    static func lemelsonLineRows(of page: UsageProviderPage) -> [LemelsonLineRow] {
+        page.lineRows.compactMap { row in
+            guard let detail = row.detail else { return nil }
+            return LemelsonLineRow(
+                id: row.id,
+                view: row.view,
+                detail: detail,
+                heightCacheScope: row.heightCacheScope,
+                heightFingerprint: row.heightFingerprint)
+        }
+    }
+
+    /// The key CodexBar files the shown account's history under (`preferredAccountKey` of
+    /// `history/<provider>.json`), resolved read-only by the store's own rules; nil until the history is loaded
+    /// or when CodexBar has no key for the account. The live readings carry it, and the page compares it with
+    /// the account of the collector's limits.
+    func lemelsonAccountKey(_ page: LemelsonProviderPageState) -> String? {
+        self.store.planUtilizationHistorySelection(for: page.provider, readOnly: true).accountKey
     }
 
     // MARK: - Codex facts from CodexBar's own Codex card
@@ -317,7 +317,8 @@ extension StatusItemController {
         guard !SettingsStore.isRunningTests else { return }
         let enabled = self.store.enabledFirstPartyProvidersForDisplay()
         for page in LemelsonProviderPageState.all {
-            guard !page.usesStockTab, page.warmRows.isEmpty, page.width > 0, page.warmTimer == nil,
+            // A page never shown yet is rendered at the width of the menu's last build.
+            guard !page.usesStockTab, page.warmRows.isEmpty, self.lemelsonWarmWidth(page) > 0, page.warmTimer == nil,
                   enabled.contains(page.provider)
             else { continue }
             let timer = Timer(timeInterval: 0.25, repeats: false) { [weak self] _ in
@@ -343,20 +344,22 @@ extension StatusItemController {
         }
     }
 
+    private func lemelsonWarmWidth(_ page: LemelsonProviderPageState) -> CGFloat {
+        page.width > 0 ? page.width : LemelsonPanelSession.shared.menuWidth
+    }
+
     private func lemelsonWarmProviderRows(_ page: LemelsonProviderPageState) {
-        guard page.warmRows.isEmpty, page.width > 0,
+        let width = self.lemelsonWarmWidth(page)
+        guard page.warmRows.isEmpty, width > 0,
               self.lemelsonCurrentPageKey() != page.provider.rawValue
         else { return }
         let started = CACurrentMediaTime()
-        let width = page.width
         let scratch = NSMenu()
         scratch.autoenablesItems = false
         page.isWarming = true
         defer { page.isWarming = false }
         guard let built = self.addLemelsonProviderRows(page, to: scratch, width: width) else { return }
-        if let row = Self.lemelsonCacheRow(of: built) {
-            self.addLemelsonCacheRow(row, to: scratch, width: width)
-        }
+        self.addLemelsonLineRows(Self.lemelsonLineRows(of: built), to: scratch, width: width)
         var rows: [String: NSView] = [:]
         for item in scratch.items {
             guard let id = item.representedObject as? String, page.owns(id), let view = item.view else { continue }
@@ -390,9 +393,8 @@ extension StatusItemController {
             _ = self.store.refreshingProviders.contains(page.provider.instanceID)
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.lemelsonObserve(page)
-                self.lemelsonProviderStoreDidChange(page)
+                // Re-arms the observation and handles the change (once).
+                self?.lemelsonObserve(page)
             }
         }
         self.lemelsonProviderStoreDidChange(page)
@@ -417,9 +419,10 @@ extension StatusItemController {
               snapshot.updatedAt != page.lastSnapshotAt
         else { return }
         page.lastSnapshotAt = snapshot.updatedAt
+        let account = self.lemelsonAccountKey(page)
         let reading = page.provider == .codex
-            ? Self.lemelsonCodexReading(snapshot)
-            : Self.lemelsonAntigravityReading(snapshot)
+            ? Self.lemelsonCodexReading(snapshot, account: account)
+            : Self.lemelsonAntigravityReading(snapshot, account: account)
         guard let reading else {
             log.notice("\(name, privacy: .public) live: no 5-hour or weekly window in the snapshot")
             return
@@ -436,7 +439,7 @@ extension StatusItemController {
 
     /// The Gemini 5-hour and weekly quota of a snapshot. Other model groups ("Claude/GPT", versioned
     /// Gemini groups) are separate quotas and are not part of the page.
-    static func lemelsonAntigravityReading(_ snapshot: UsageSnapshot) -> UsageQuotaLiveReading? {
+    static func lemelsonAntigravityReading(_ snapshot: UsageSnapshot, account: String? = nil) -> UsageQuotaLiveReading? {
         let windows = (snapshot.extraRateWindows ?? []).filter {
             $0.usageKnown && AntigravityStatusSnapshot.isQuotaSummaryWindowID($0.id)
         }
@@ -450,14 +453,15 @@ extension StatusItemController {
             at: snapshot.updatedAt,
             fiveHour: window("Gemini 5-hour"),
             week: window("Gemini weekly"),
-            plan: snapshot.loginMethod(for: .antigravity))
+            plan: snapshot.loginMethod(for: .antigravity),
+            account: account)
         return reading.isEmpty ? nil : reading
     }
 
     /// Codex's session (5-hour) and weekly window. Codex reports them as the primary and the secondary
     /// window; the window length decides when it is known (a plan with only a weekly window reports that as
     /// the primary one). Model-specific extra windows are separate pools and not part of the page.
-    static func lemelsonCodexReading(_ snapshot: UsageSnapshot) -> UsageQuotaLiveReading? {
+    static func lemelsonCodexReading(_ snapshot: UsageSnapshot, account: String? = nil) -> UsageQuotaLiveReading? {
         var fiveHour: UsageQuotaLiveReading.Window?
         var week: UsageQuotaLiveReading.Window?
         for (slot, window) in [snapshot.primary, snapshot.secondary].enumerated() {
@@ -478,7 +482,8 @@ extension StatusItemController {
         let plan = snapshot.loginMethod(for: .codex).map {
             CodexPlanFormatting.displayName($0) ?? UsageFormatter.cleanPlanName($0)
         }
-        let reading = UsageQuotaLiveReading(at: snapshot.updatedAt, fiveHour: fiveHour, week: week, plan: plan)
+        let reading = UsageQuotaLiveReading(
+            at: snapshot.updatedAt, fiveHour: fiveHour, week: week, plan: plan, account: account)
         return reading.isEmpty ? nil : reading
     }
 

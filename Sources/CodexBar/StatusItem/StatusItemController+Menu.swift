@@ -873,8 +873,11 @@ extension StatusItemController {
         }
         if switcherSelection != .overview {
             self.addUserPluginMenuCards(to: menu, width: context.menuWidth)
-            // lemelson: the prompt cache row of a Claude, Antigravity or Codex page, right above the action rows.
-            self.addLemelsonPendingCacheRow(to: menu, width: context.menuWidth)
+            // lemelson: the one-line rows of a Claude, Antigravity or Codex page (prompt cache, plan worth), right
+            // above the action rows; the Codex page's "Buy Credits…" first among those.
+            if self.addLemelsonPendingRows(to: menu, width: context.menuWidth) {
+                menu.addItem(self.makeBuyCreditsItem())
+            }
         }
     }
 
