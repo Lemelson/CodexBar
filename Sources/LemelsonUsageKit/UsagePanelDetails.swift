@@ -147,7 +147,7 @@ public struct UsageLimitDetailPanelView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let forecast, let resetsAt = self.window.resetsAt {
+            if let resetsAt = self.window.resetsAt, forecast != nil || verdict == .outNow {
                 Divider()
                 UsageSectionLabel(text: "Forecast")
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -158,7 +158,9 @@ public struct UsageLimitDetailPanelView: View {
                         .font(.system(size: 11))
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                UsageNote(text: self.forecastBasis(forecast))
+                if let forecast, !self.isUsedUp {
+                    UsageNote(text: self.forecastBasis(forecast))
+                }
             }
             if let sessionsLeft {
                 Divider()
@@ -221,11 +223,27 @@ public struct UsageLimitDetailPanelView: View {
 
     /// Key for planning: when the limit runs out and how long to wait for the reset after that. Worded after
     /// the row's verdict, so "May run out" on the row is never "Lasts until the reset" here.
+    /// The reading itself says 100 %: measured, not forecast.
+    private var isUsedUp: Bool {
+        (self.window.pct ?? 0) >= 100
+    }
+
     private func forecastText(
-        _ forecast: UsagePanelState.Forecast,
+        _ forecast: UsagePanelState.Forecast?,
         verdict: UsageLimitVerdict,
         resetsAt: Double) -> String
     {
+        let back = "It comes back at the reset, \(self.stamp(resetsAt))."
+        if verdict == .outNow {
+            if self.isUsedUp {
+                return "Used up: the last reading shows 100%. " + back
+            }
+            // Out by the forecast only: its run-out time has passed, the reading has not caught up yet.
+            let when = forecast?.hitAt.map { " around \(self.stamp($0))" } ?? ""
+            return "Likely used up: the forecast had it running out\(when), and that time has passed; "
+                + "the last reading shows \(UsageFormat.percent(self.used)). " + back
+        }
+        guard let forecast else { return back }
         if let hit = forecast.hitAt, hit < resetsAt {
             let gap = UsageFormat.duration(max(0, resetsAt - hit))
             var text = "Likely runs out around \(self.stamp(hit)), \(gap) before the reset: "

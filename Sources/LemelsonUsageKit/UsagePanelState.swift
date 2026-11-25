@@ -168,15 +168,18 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         /// Where the window will end up at the reset: computed by the collector from the window progress and past windows.
         public var forecast: Forecast?
 
-        /// The forecast is valid while the summary is fresh and the window has not been reset.
+        /// The forecast is valid while both the reading it starts from and the forecast itself are fresh, and the
+        /// window has not been reset. The one check for every consumer: the row's verdict, the panel's chart and
+        /// its Forecast section, so the row never says "No forecast" while the panel still shows one.
         public func liveForecast(now: Date) -> Forecast? {
             guard self.rolled != true,
                   let forecast = self.forecast,
-                  let at = forecast.at,
-                  let resetsAt = self.resetsAt
+                  UsageLimitReading.isFresh(forecast.at, now: now),
+                  UsageLimitReading.isFresh(self.measuredAt, now: now),
+                  let resetsAt = self.resetsAt,
+                  resetsAt > now.timeIntervalSince1970
             else { return nil }
-            let stamp = now.timeIntervalSince1970
-            return stamp - at < UsageLimitReading.freshness && resetsAt > stamp ? forecast : nil
+            return forecast
         }
 
         public struct Point: Sendable, Equatable, Identifiable {
