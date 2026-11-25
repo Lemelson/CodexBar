@@ -135,7 +135,7 @@ public struct UsageCachePanelView: View {
             text += " Saving text for reuse costs a little extra and counts as paid in full."
         }
         if self.summary.hasMoney {
-            text += self.summary.product == .claude ? " Dollars at API prices." : " Dollars at Gemini API prices."
+            text += " Dollars at \(self.summary.prices)."
         }
         return text
     }

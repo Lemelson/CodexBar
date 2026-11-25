@@ -288,9 +288,6 @@ public enum UsageLimitSources: Sendable, Equatable {
 
 /// Window spend pace, like the mark on the stock CodexBar bar: where spend would be at an even rate.
 public struct UsagePace: Equatable {
-    /// A reading older than this says nothing about the current rate.
-    private static let freshness: Double = 30 * 60
-
     /// How many percent would be spent by now at an even rate.
     public let expected: Double
     /// Spent (as of the last reading) minus expected: plus is overspend, minus is reserve.
@@ -314,15 +311,15 @@ public struct UsagePace: Equatable {
               let resetsAt = window.resetsAt
         else { return nil }
         let nowStamp = now.timeIntervalSince1970
-        guard resetsAt > nowStamp, used < 100 else { return nil }
+        guard used < 100 else { return nil }
         let start = resetsAt - kind.span
-        // The mark stands where even use would be at this minute, so it is right for an old reading too.
-        guard nowStamp > start else { return nil }
-        let expected = min(100, (nowStamp - start) / kind.span * 100)
+        // Even use by now, the same number the time mark on the bar stands at (`UsageLimitTimeMark`).
+        guard let even = UsageLimitTimeMark.evenUse(window: window, kind: kind, now: now) else { return nil }
+        let expected = min(100, even)
         guard expected >= 3 else { return nil }
         let delta = used - expected
         // When the limit runs out is estimated only from a fresh reading: an old rate would be wrong.
-        guard let measuredAt = window.measuredAt, nowStamp - measuredAt < Self.freshness else {
+        guard let measuredAt = window.measuredAt, UsageLimitReading.isFresh(measuredAt, now: now) else {
             return UsagePace(
                 expected: expected, delta: delta, isStale: true, lastsToReset: true, runsOutIn: nil, earlyBy: nil)
         }
@@ -395,24 +392,19 @@ public struct UsagePace: Equatable {
 // MARK: - Bar
 
 struct UsageSegmentBar: View {
-    struct TimeArrow {
-        let percent: Double
-        let color: Color
-    }
-
     let segments: [UsageSegment]
-    var pace: UsagePace?
-    var timeArrow: TimeArrow?
+    /// Where even use would be by now; nil draws the bar alone.
+    var mark: UsageLimitTimeMark?
     @Environment(\.usageRowHighlighted) private var highlighted
 
     private static let barHeight: CGFloat = 7
 
     var body: some View {
-        // A single Canvas: the pace mark "cuts through" the bar, as in stock CodexBar.
+        // A single Canvas: the mark "cuts through" the bar, as in stock CodexBar.
         Canvas { context, size in
             let barRect = CGRect(
                 x: 0,
-                y: (size.height - Self.barHeight) / 2 + (self.timeArrow == nil ? 0 : 2),
+                y: (size.height - Self.barHeight) / 2 + (self.mark == nil ? 0 : 2),
                 width: size.width,
                 height: Self.barHeight)
             let track = Path(roundedRect: barRect, cornerRadius: Self.barHeight / 2)
@@ -430,41 +422,45 @@ struct UsageSegmentBar: View {
                 x += segmentWidth
             }
 
-            if let arrow = self.timeArrow {
-                let center = min(size.width - 4, max(4, size.width * CGFloat(arrow.percent) / 100))
-                let capY = barRect.minY - 4
-                let tipY = barRect.minY
-                let tailY = barRect.maxY + 2
-                var mark = Path()
-                mark.move(to: CGPoint(x: center - 4, y: capY))
-                mark.addLine(to: CGPoint(x: center + 4, y: capY))
-                mark.addLine(to: CGPoint(x: center + 1, y: tipY))
-                mark.addLine(to: CGPoint(x: center + 1, y: tailY))
-                mark.addLine(to: CGPoint(x: center - 1, y: tailY))
-                mark.addLine(to: CGPoint(x: center - 1, y: tipY))
-                mark.closeSubpath()
-                context.blendMode = .destinationOut
-                context.stroke(mark, with: .color(.white), lineWidth: 2.5)
-                context.blendMode = .normal
-                context.fill(mark, with: .color(self.highlighted ? .white : arrow.color))
-            } else if let pace = self.pace {
-                let center = min(size.width - 1.5, max(1.5, size.width * CGFloat(pace.expected) / 100))
-                // An old reading says little about the pace now: its mark is drawn pale.
-                let ink = self.highlighted ? Color.white : pace.color
-                let opacity = pace.isStale ? 0.45 : 1
-                context.blendMode = .destinationOut
-                context.fill(
-                    Path(CGRect(x: center - 2.5, y: 0, width: 5, height: size.height)),
-                    with: .color(.white))
-                context.blendMode = .normal
-                context.fill(
-                    Path(
-                        roundedRect: CGRect(x: center - 1, y: 0, width: 2, height: size.height),
-                        cornerRadius: 1),
-                    with: .color(ink.opacity(opacity)))
+            if let mark = self.mark {
+                let center = min(size.width - 4, max(4, size.width * CGFloat(mark.percent) / 100))
+                UsageTimeMarkGlyph.draw(
+                    in: &context, center: center, barTop: barRect.minY, barBottom: barRect.maxY,
+                    color: self.highlighted ? .white : mark.color)
             }
         }
-        .frame(height: self.timeArrow == nil ? 13 : 17)
+        .frame(height: self.mark == nil ? 13 : 17)
+    }
+}
+
+/// The "T" of the time mark, drawn by the bar and by the legend from the same path.
+struct UsageTimeMarkGlyph: View {
+    let color: Color
+
+    /// A cap 4 pt above the bar, a 2 pt stem through it, and a cut-out halo so it reads on any part.
+    static func draw(in context: inout GraphicsContext, center: CGFloat, barTop: CGFloat, barBottom: CGFloat, color: Color) {
+        let capY = barTop - 4
+        let tailY = barBottom + 2
+        var mark = Path()
+        mark.move(to: CGPoint(x: center - 4, y: capY))
+        mark.addLine(to: CGPoint(x: center + 4, y: capY))
+        mark.addLine(to: CGPoint(x: center + 1, y: barTop))
+        mark.addLine(to: CGPoint(x: center + 1, y: tailY))
+        mark.addLine(to: CGPoint(x: center - 1, y: tailY))
+        mark.addLine(to: CGPoint(x: center - 1, y: barTop))
+        mark.closeSubpath()
+        context.blendMode = .destinationOut
+        context.stroke(mark, with: .color(.white), lineWidth: 2.5)
+        context.blendMode = .normal
+        context.fill(mark, with: .color(color))
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            UsageTimeMarkGlyph.draw(
+                in: &context, center: size.width / 2, barTop: 5, barBottom: size.height - 3, color: self.color)
+        }
+        .frame(width: 10, height: 13)
     }
 }
 
@@ -570,236 +566,6 @@ struct UsageRunOutLine: View {
     }
 }
 
-/// "≈4.7 full 5h sessions left · 21 fit before reset": under the weekly limit of an account with a 5-hour limit.
-struct UsageSessionsLeftLine: View {
-    let sessions: UsageSessionsLeft
-    @Environment(\.usageRowHighlighted) private var highlighted
-
-    var body: some View {
-        (Text(self.sessions.leftNumber)
-            .fontWeight(.semibold)
-            .foregroundStyle(UsageInk.primary(self.highlighted))
-            + Text("\(self.sessions.leftUnit) · \(self.sessions.fitText)"))
-            .font(.system(size: 10.5))
-            .monospacedDigit()
-            .foregroundStyle(UsageInk.secondary(self.highlighted))
-            .lineLimit(1)
-    }
-}
-
-// MARK: - Limit row
-
-/// One limit window of one account. On hover CodexBar opens a detail panel beside it.
-public struct UsageLimitRowView: View {
-    let kind: UsagePanelState.WindowKind
-    let window: UsagePanelState.Window
-    let now: Date
-    let width: CGFloat
-    /// Weekly row only: see `UsageSessionsLeft.make(for:account:in:now:)`.
-    let sessionsLeft: UsageSessionsLeft?
-    /// Replaces the short window title ("Session"), e.g. "5-hour" on the Antigravity page.
-    let title: String?
-    let sources: UsageLimitSources
-    /// An account read only by hand: see `UsageReadingAge.make(account:kind:window:now:)`.
-    let reading: UsageReadingAge?
-    /// Weekly row without `sessionsLeft` while the session size is still being measured (Antigravity):
-    /// "5h sessions: measuring, 1 of 3 windows seen".
-    let sessionsNote: String?
-    @Environment(\.usageRowHighlighted) private var highlighted
-
-    public init(
-        kind: UsagePanelState.WindowKind,
-        window: UsagePanelState.Window,
-        now: Date,
-        width: CGFloat,
-        sessionsLeft: UsageSessionsLeft? = nil,
-        title: String? = nil,
-        sources: UsageLimitSources = .split,
-        reading: UsageReadingAge? = nil,
-        sessionsNote: String? = nil)
-    {
-        self.kind = kind
-        self.window = window
-        self.now = now
-        self.width = width
-        self.sessionsLeft = sessionsLeft
-        self.title = title
-        self.sources = sources
-        self.reading = reading
-        self.sessionsNote = sessionsNote
-    }
-
-    private var percent: Double {
-        max(0, self.window.pct ?? 0)
-    }
-
-    private var percentColor: Color {
-        if self.highlighted {
-            return .white
-        }
-        switch self.percent {
-        case 95...: return UsagePalette.paceBad
-        case 80...: return UsagePalette.warning
-        default: return .primary
-        }
-    }
-
-    private var resetText: String {
-        if self.window.rolled == true {
-            return "new window, no reading yet"
-        }
-        guard let resetsAt = self.window.resetsAt else { return "" }
-        return UsageFormat.reset(resetsAt, now: self.now)
-    }
-
-    public var body: some View {
-        let segments = UsageSegment.build(for: self.window, kind: self.kind, sources: self.sources)
-        let pace = UsagePace.make(window: self.window, kind: self.kind, now: self.now)
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(self.title ?? self.kind.title)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(UsageInk.primary(self.highlighted))
-                Text("\(UsageFormat.percent(self.percent)) used")
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(self.percentColor)
-                Spacer(minLength: 4)
-                Text(self.resetText)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(UsageInk.secondary(self.highlighted))
-                    .lineLimit(1)
-            }
-            UsageSegmentBar(segments: segments, pace: pace)
-                .opacity(self.reading?.level == .stale ? 0.5 : 1)
-            // One source needs no legend: the bar is the percentage above it.
-            if !segments.isEmpty, self.sources == .split {
-                UsageFlowLayout {
-                    ForEach(segments) { segment in
-                        UsageChip(color: segment.color, text: segment.chipText)
-                    }
-                }
-            }
-            // The reading age is already shown once in the account header (colored red/orange when stale)
-            // and in full inside the detail popover, so repeating it on every limit row only adds noise.
-            // Reserve or deficit is read off the mark on the bar; the exact percent is in the detail panel.
-            if let warning = pace?.warning {
-                UsageRunOutLine(text: warning)
-            }
-            if let sessionsLeft {
-                UsageSessionsLeftLine(sessions: sessionsLeft)
-            } else if let sessionsNote {
-                Text(sessionsNote)
-                    .font(.system(size: 10.5))
-                    .monospacedDigit()
-                    .foregroundStyle(UsageInk.secondary(self.highlighted))
-                    .lineLimit(1)
-            }
-        }
-        .padding(.leading, 20)
-        .padding(.trailing, 30)
-        .padding(.vertical, 5)
-        .frame(width: self.width, alignment: .leading)
-    }
-}
-
-// MARK: - Account header
-
-public struct UsageAccountHeaderView: View {
-    let account: UsagePanelState.Account
-    let now: Date
-    let width: CGFloat
-    /// The dot says which Claude account is signed in; a page with a single account leaves it out.
-    let showsDot: Bool
-
-    public init(account: UsagePanelState.Account, now: Date, width: CGFloat, showsDot: Bool = true) {
-        self.account = account
-        self.now = now
-        self.width = width
-        self.showsDot = showsDot
-    }
-
-    /// "Max 5x · 52m ago": the plan and how long ago the limits were read. The green dot already says
-    /// which account is in Claude now. An account read only by hand says "reading from 3d ago" once the
-    /// reading is old, in the color of its age.
-    public static func status(for account: UsagePanelState.Account, now: Date) -> Text {
-        // An account the collector failed on has no reading to date: its second line says why.
-        if account.isUnavailable {
-            return Text(account.planName ?? "")
-        }
-        let reading = UsageReadingAge.make(account: account, now: now)
-        let read = if let reading, !reading.isFresh {
-            Text(reading.ageText).foregroundStyle(reading.color)
-        } else {
-            Text(account.measuredAt.map { UsageFormat.age($0, now: now) } ?? "not read yet")
-        }
-        guard let plan = account.planName else { return read }
-        return Text("\(plan) · ") + read
-    }
-
-    /// Under the name of an account the collector skips while the VPN is on, in the quiet color of the age:
-    /// it is waiting, not failing. (Next to the age it left no room for the name.)
-    public static func pauseNote(for account: UsagePanelState.Account) -> String? {
-        account.isPausedByVPN ? "Paused while VPN is on" : nil
-    }
-
-    /// A second line for what needs an action from me. Of the reasons an account is merely waiting only the
-    /// VPN pause is shown (`pauseNote`, quietly); for the rest the age of the reading says enough.
-    public static func actionNote(for account: UsagePanelState.Account) -> String? {
-        switch account.lastPoll?.status {
-        case "auth_rejected":
-            "Sign-in expired: open it once in Claude Switcher."
-        case "keychain_denied":
-            "No Keychain access to read limits."
-        case "no_session_cookie", "cookies_unreadable", "no_org":
-            "No saved sign-in for this account yet."
-        default:
-            nil
-        }
-    }
-
-    public var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if self.showsDot {
-                    Circle()
-                        .fill(self.account.isActive ? UsagePalette.paceGood : Color.secondary.opacity(0.35))
-                        .frame(width: 7, height: 7)
-                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
-                }
-                Text(self.account.displayName)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                Spacer(minLength: 6)
-                // A long name gives way: the plan and the age are never cut off.
-                Self.status(for: self.account, now: self.now)
-                    .font(.system(size: 11))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
-            }
-            if let unavailable = self.account.unavailableNote {
-                UsageUnavailableLine(text: unavailable)
-            } else if let note = Self.actionNote(for: self.account) {
-                Text(note)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(UsagePalette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let pause = Self.pauseNote(for: self.account) {
-                Text(pause)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 3)
-        .frame(width: self.width, alignment: .leading)
-    }
-}
-
 /// "Collector error: ValueError: …": the one quiet line an account without numbers gets in place of them.
 struct UsageUnavailableLine: View {
     let text: String
@@ -865,16 +631,12 @@ public struct UsageFooterView: View {
                         UsageChip(color: UsagePalette.you, text: "You = Claude Code on this Mac")
                     }
                     // The mark is the only place a row shows reserve or deficit, so the legend names both colors.
-                    HStack(spacing: 5) {
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(UsagePalette.paceGood)
-                            .frame(width: 2, height: 9)
+                    HStack(spacing: 4) {
+                        UsageTimeMarkGlyph(color: UsagePalette.paceGood)
                         Text("in reserve")
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(UsagePalette.paceBad)
-                            .frame(width: 2, height: 9)
+                        UsageTimeMarkGlyph(color: UsagePalette.paceBad)
                             .padding(.leading, 5)
                         Text("in deficit")
                             .font(.system(size: 10.5))

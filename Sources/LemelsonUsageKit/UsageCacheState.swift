@@ -78,12 +78,12 @@ public struct UsageCacheStats: Decodable, Sendable, Equatable {
 
 // MARK: - What the cache row and panel show
 
-/// The cache of Claude Code (all accounts, then each account) or of Antigravity (then each model), ready to
+/// The cache of Claude Code (all accounts, then each account) or of a provider page (then each model), ready to
 /// draw: the compact menu row (`UsageCacheRowView`) and its detail panel (`UsageCachePanelView`).
 public struct UsageCacheSummary: Sendable, Equatable {
     public enum Product: Sendable, Equatable {
         case claude
-        case antigravity
+        case provider(UsageProviderSpec.Key)
     }
 
     public struct Span: Sendable, Equatable, Identifiable {
@@ -95,7 +95,7 @@ public struct UsageCacheSummary: Sendable, Equatable {
         public let missUsd: Double?
     }
 
-    /// One account (Claude) or one model (Antigravity).
+    /// One account (Claude) or one model (a provider).
     public struct Part: Sendable, Equatable, Identifiable {
         public let id: String
         public let name: String
@@ -112,17 +112,28 @@ public struct UsageCacheSummary: Sendable, Equatable {
     /// "By account · 7 days", "By model · 30 days".
     public let partsTitle: String
 
-    /// Row id for the menu. Claude's is its own; Antigravity's carries the page prefix, so the page's
+    /// Row id for the menu. Claude's is its own; a provider's carries its page prefix, so the page's
     /// warm-row recycling picks it up.
     public var rowID: String {
         switch self.product {
         case .claude: "lemelsonCache-claude"
-        case .antigravity: UsageAntigravityPage.idPrefix + "cache"
+        case let .provider(key): UsageProviderSpec.spec(for: key).idPrefix + "cache"
         }
     }
 
     public var productName: String {
-        self.product == .claude ? "Claude Code" : "Antigravity"
+        switch self.product {
+        case .claude: "Claude Code"
+        case let .provider(key): UsageProviderSpec.spec(for: key).name
+        }
+    }
+
+    /// "API prices" (Claude), "Gemini API prices", "OpenAI API prices".
+    var prices: String {
+        switch self.product {
+        case .claude: "API prices"
+        case let .provider(key): UsageProviderSpec.spec(for: key).prices
+        }
     }
 
     static let spanTitles: [(key: String, title: String)] = [("today", "Today"), ("7d", "7 days"), ("30d", "30 days")]
@@ -165,8 +176,8 @@ public struct UsageCacheSummary: Sendable, Equatable {
             partsTitle: "By account · \(main.title.lowercased())")
     }
 
-    /// Antigravity: `antigravity.cache`; one part per model of the last 30 days, most spend first.
-    public static func antigravity(_ block: UsageAntigravityBlock) -> UsageCacheSummary? {
+    /// A provider page: its block's `cache`; one part per model of the last 30 days, most spend first.
+    public static func provider(_ block: UsageProviderBlock, spec: UsageProviderSpec) -> UsageCacheSummary? {
         guard block.error == nil else { return nil }
         let spans = self.spans(of: block.cache)
         guard let main = self.main(of: spans) else { return nil }
@@ -176,10 +187,10 @@ public struct UsageCacheSummary: Sendable, Equatable {
                 return (id, min(100, max(0, 100 - miss)), stats.usd ?? 0)
             }
             .sorted { $0.2 != $1.2 ? $0.2 > $1.2 : $0.0 < $1.0 }
-        let labels = UsageAntigravityModels.labels(for: models.map(\.0))
+        let labels = spec.models.labels(for: models.map(\.0))
         let parts = models.map { Part(id: $0.0, name: labels[$0.0] ?? $0.0, reusedPct: $0.1, savedUsd: nil) }
         return UsageCacheSummary(
-            product: .antigravity,
+            product: .provider(spec.key),
             spans: spans,
             main: main,
             parts: parts.count >= 2 ? parts : [],

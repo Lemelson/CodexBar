@@ -78,37 +78,32 @@ public struct UsageValueCardView: View {
         return text
     }
 
-    @ViewBuilder
     private func block(for account: UsagePanelState.Account, scale: Double) -> some View {
         let color = UsagePalette.account(self.state.colorIndex(of: account))
-        VStack(alignment: .leading, spacing: 5) {
-            UsageValueTitleLine(
-                color: color, name: account.displayName, plan: account.planName, times: account.value?.timesPrice)
-            if let unavailable = account.unavailableNote {
-                UsageUnavailableLine(text: unavailable)
-            } else if let got = self.got(account) {
-                if let paid = self.paid(account) {
-                    self.bar("You pay", value: paid, scale: scale, color: Color.secondary.opacity(0.7), strong: false)
-                }
-                self.bar("You get", value: got, scale: scale, color: color, strong: true)
-                if let value = account.value, let week = value.weekOpusUsd {
-                    self.models(value, account: account, week: week)
-                }
-            } else {
-                UsageNote(text: "No estimate yet: it needs a few limit readings of this account.")
-            }
+        let content: UsageValueBlock.Content = if let unavailable = account.unavailableNote {
+            .unavailable(unavailable)
+        } else if let got = self.got(account) {
+            .numbers(UsageValueBlock.Numbers(
+                paid: self.paid(account),
+                got: got,
+                scale: scale,
+                priceNote: nil,
+                models: account.value.flatMap { value in
+                    value.weekOpusUsd.map { self.models(value, account: account, week: $0) }
+                } ?? []))
+        } else {
+            .waiting("No estimate yet: it needs a few limit readings of this account.", reason: nil)
         }
-    }
-
-    private func bar(_ label: String, value: Double, scale: Double, color: Color, strong: Bool) -> some View {
-        UsageValueBar(label: label, value: value, scale: scale, color: color, strong: strong)
+        return UsageValueBlock(
+            color: color, name: account.displayName, plan: account.planName, times: account.value?.timesPrice,
+            content: content)
     }
 
     /// The same weekly limit spent on a single model, and what I actually used over 30 days.
     private func models(
         _ value: UsagePanelState.Value,
         account: UsagePanelState.Account,
-        week: Double) -> some View
+        week: Double) -> [UsageValueBlock.Model]
     {
         let scale = self.period == .month ? Self.weeksPerMonth : 1
         let weekPrice = (account.planPriceUsd ?? 0) / Self.weeksPerMonth
@@ -125,21 +120,101 @@ public struct UsageValueCardView: View {
             ("Fable only" + capNote, [(cap, fable), (allFable - cap, fable.opacity(0.35))], allFable),
             (usedLabel, [(usedWeek, UsagePalette.account(self.state.colorIndex(of: account)))], usedWeek),
         ]
-        return VStack(alignment: .leading, spacing: 3) {
-            UsageValueModelCaption()
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                UsageValueModelRow(
-                    label: row.0,
-                    parts: row.1,
-                    scale: max(1, week),
-                    times: weekPrice > 0 ? row.2 / weekPrice : nil,
-                    usd: row.2 * scale)
+        return rows.map { row in
+            UsageValueBlock.Model(
+                label: row.0,
+                parts: row.1,
+                scale: max(1, week),
+                times: weekPrice > 0 ? row.2 / weekPrice : nil,
+                usd: row.2 * scale)
+        }
+    }
+}
+
+/// One plan in a Value section: the title line, You pay / You get on the section's scale, and the same limit
+/// spent on one model next to the real use. Claude's Value card draws one per account, a provider page one
+/// for its plan: the same view, so a change here shows on every page.
+struct UsageValueBlock: View {
+    enum Content {
+        /// The collector failed on this account: its one quiet line.
+        case unavailable(String)
+        /// Too little data: a headline, and the collector's reason when it gave one.
+        case waiting(String, reason: String?)
+        case numbers(Numbers)
+    }
+
+    struct Numbers {
+        /// Nil without a plan price: no "You pay".
+        let paid: Double?
+        let got: Double
+        /// The section's common scale for You pay / You get.
+        let scale: Double
+        /// Under the bars, e.g. "Plan price not set, so there is no ×."
+        let priceNote: String?
+        /// Ceilings on one model, then the real use; empty leaves the part out.
+        let models: [Model]
+    }
+
+    struct Model: Identifiable {
+        let label: String
+        let parts: [(Double, Color)]
+        let scale: Double
+        /// Nil without a plan price: the column stays, empty.
+        let times: Double?
+        let usd: Double
+
+        var id: String {
+            self.label
+        }
+    }
+
+    let color: Color
+    let name: String
+    let plan: String?
+    let times: Double?
+    let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            UsageValueTitleLine(color: self.color, name: self.name, plan: self.plan, times: self.times)
+            switch self.content {
+            case let .unavailable(text):
+                UsageUnavailableLine(text: text)
+            case let .waiting(headline, reason):
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(headline)
+                        .font(.system(size: 11))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let reason {
+                        UsageNote(text: reason.hasSuffix(".") ? reason : reason + ".")
+                    }
+                }
+            case let .numbers(numbers):
+                if let paid = numbers.paid {
+                    UsageValueBar(label: "You pay", value: paid, scale: numbers.scale,
+                                  color: Color.secondary.opacity(0.7), strong: false)
+                }
+                UsageValueBar(label: "You get", value: numbers.got, scale: numbers.scale, color: self.color, strong: true)
+                if let note = numbers.priceNote {
+                    UsageNote(text: note)
+                }
+                if !numbers.models.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        UsageValueModelCaption()
+                        ForEach(numbers.models) { model in
+                            UsageValueModelRow(
+                                label: model.label, parts: model.parts, scale: model.scale, times: model.times,
+                                usd: model.usd)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
     }
 }
 
-/// An account (or Antigravity) line of the Value card: swatch, name, plan and the large multiple.
+/// The first line of a `UsageValueBlock`: swatch, name, plan and the large multiple.
 struct UsageValueTitleLine: View {
     let color: Color
     let name: String

@@ -21,9 +21,18 @@ public struct UsageSpendSummaryView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            UsageSpendSummaryHeader(spend: self.spend)
+            UsageSpendHeader(
+                labels: UsageSpendHeader.claudeLabels,
+                offered: UsageSpendPeriod.allCases,
+                today: self.spend.today.total,
+                week: self.spend.week.total,
+                periods: Dictionary(uniqueKeysWithValues: UsageSpendPeriod.allCases.map {
+                    ($0, self.spend[$0].whole.total)
+                }))
             UsageSpendBreakdownRow()
-            UsageSpendPeriodStack(spend: self.spend)
+            UsagePeriodStack(offered: UsageSpendPeriod.allCases) { period in
+                UsageSpendPeriodLayer(data: self.spend[period])
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
@@ -32,19 +41,33 @@ public struct UsageSpendSummaryView: View {
     }
 }
 
-/// Title, period picker and the three totals. Cheap to rebuild, so it may observe the selection directly.
-struct UsageSpendSummaryHeader: View {
-    let spend: UsageSpendDigest
+/// The top of every spend section (Claude Spend and the provider pages): what the dollars are, the period
+/// switch, and Today / Last 7 days / the period. Cheap to rebuild, so it may observe the selection directly.
+struct UsageSpendHeader: View {
+    /// Longest first: the period switch is wider in the menu than in a rendering, so the first label that
+    /// fits on one line is shown.
+    let labels: [String]
+    /// The periods worth a button; one period shows no switch.
+    let offered: [UsageSpendPeriod]
+    let today: UsageModelUse
+    let week: UsageModelUse
+    let periods: [UsageSpendPeriod: UsageModelUse]
     @ObservedObject private var selection = UsagePanelSelection.shared
 
+    static let claudeLabels = ["This Mac · API prices", "API prices"]
+
+    /// A provider's labels: short next to a switch, the full price name without one.
+    static func labels(prices: String, hasSwitch: Bool) -> [String] {
+        hasSwitch ? ["This Mac · API prices", "API prices"]
+            : ["This Mac · estimate at \(prices)", "Estimate at \(prices)"]
+    }
+
     var body: some View {
-        let period = self.selection.spendPeriod
+        let period = UsageSpendPeriod.effective(self.selection.spendPeriod, offered: self.offered)
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .center) {
-                // The period switch is wider in the menu than in a rendering: the short form when the long
-                // one would wrap.
                 ViewThatFits(in: .horizontal) {
-                    ForEach(["This Mac · API prices", "API prices"], id: \.self) { label in
+                    ForEach(self.labels, id: \.self) { label in
                         Text(label)
                             .font(.system(size: 10.5))
                             .foregroundStyle(.secondary)
@@ -53,16 +76,20 @@ struct UsageSpendSummaryHeader: View {
                     }
                 }
                 Spacer(minLength: 6)
-                UsageSegmentedControl(
-                    options: Array(UsageSpendPeriod.allCases),
-                    title: \.short,
-                    selection: self.$selection.spendPeriod)
-                    .fixedSize()
+                if self.offered.count > 1 {
+                    UsageSegmentedControl(
+                        options: self.offered,
+                        title: \.short,
+                        selection: Binding(
+                            get: { UsageSpendPeriod.effective(self.selection.spendPeriod, offered: self.offered) },
+                            set: { self.selection.spendPeriod = $0 }))
+                        .fixedSize()
+                }
             }
             HStack(alignment: .top, spacing: 8) {
-                UsageSpendTile(title: "Today", use: self.spend.today.total)
-                UsageSpendTile(title: "Last 7 days", use: self.spend.week.total)
-                UsageSpendTile(title: period.title, use: self.spend[period].whole.total)
+                UsageSpendTile(title: "Today", use: self.today)
+                UsageSpendTile(title: "Last 7 days", use: self.week)
+                UsageSpendTile(title: period.title, use: self.periods[period] ?? UsageModelUse())
             }
         }
     }
@@ -114,20 +141,26 @@ struct UsageSpendBreakdownRow: View {
     }
 }
 
-/// All four periods stacked, one visible. The layers are equatable and do not observe the selection,
-/// so a switch re-evaluates only this stack and the opacity of two layers, never a chart.
-/// Every layer has the same fixed-height parts, so the stack (and the cached menu row height) never
-/// depends on the period.
-struct UsageSpendPeriodStack: View {
-    let spend: UsageSpendDigest
+/// Every offered period stacked, one visible. The layers are equatable and do not observe the selection,
+/// so a switch re-evaluates only this stack and the opacity of two layers, never a chart. Every layer has the
+/// same fixed-height parts, so the stack (and the cached menu row height) never depends on the period.
+/// A period the page does not offer shows the longest one it has.
+struct UsagePeriodStack<Layer: View & Equatable>: View {
+    let offered: [UsageSpendPeriod]
+    let layer: (UsageSpendPeriod) -> Layer
     @ObservedObject private var selection = UsagePanelSelection.shared
 
+    init(offered: [UsageSpendPeriod], @ViewBuilder layer: @escaping (UsageSpendPeriod) -> Layer) {
+        self.offered = offered
+        self.layer = layer
+    }
+
     var body: some View {
-        let chosen = self.selection.spendPeriod
+        let chosen = UsageSpendPeriod.effective(self.selection.spendPeriod, offered: self.offered)
         ZStack(alignment: .topLeading) {
-            ForEach(UsageSpendPeriod.allCases) { period in
+            ForEach(self.offered) { period in
                 let shown = period == chosen
-                UsageSpendPeriodLayer(data: self.spend[period])
+                self.layer(period)
                     .equatable()
                     .opacity(shown ? 1 : 0)
                     .allowsHitTesting(shown)
@@ -180,14 +213,14 @@ struct UsageSpendChartLayer: View, Equatable {
     }
 }
 
-// MARK: - Per-day chart, shared by Claude Spend (one color per account) and Antigravity (one per model)
+// MARK: - Per-day chart, shared by Claude Spend (one color per account) and the provider pages (one per model)
 
 /// The color of one series on a per-day chart. An index rather than a `Color`, so the chart data stays
 /// cheaply equatable (a dynamic `Color` compares by identity).
 enum UsageSeriesColor: Hashable, Sendable {
     /// A Claude account, in Claude Switcher order.
     case account(Int)
-    /// A Gemini model, in the order of `UsageAntigravitySpend`.
+    /// A provider's model, in the order of `UsageProviderSpend`.
     case model(Int)
     /// A Claude model.
     case claude(UsageModelFamily)
@@ -231,7 +264,7 @@ struct UsageDayChartData: Sendable, Equatable {
     let bars: [Bar]
     let hint: String
     let legend: [Legend]
-    /// By day key: "Opus $5 · Fable $2" (Claude) or "259M tokens" (Antigravity).
+    /// By day key: "Opus $5 · Fable $2" (Claude) or "259M tokens" (a provider page).
     let dayNotes: [String: String]
     /// Shown in place of the chart when the period has no bars.
     let emptyText: String
@@ -373,7 +406,7 @@ struct UsageSpendDayChart: View {
 /// and hit testing, so hidden layers must not have one at all: the tracker exists only while `period`
 /// is the chosen one. This leaf observes the selection itself, which keeps the view around it independent
 /// of the selection. When the layer gets hidden it reports the mouse as gone, so no hover state stays behind.
-/// A page that offers fewer periods (Antigravity with a short history) passes them as `offered`: the layer
+/// A page that offers fewer periods (a provider with a short history) passes them as `offered`: the layer
 /// shown for a period it lacks is the longest one it has.
 struct UsageSpendActiveTracker: View {
     let period: UsageSpendPeriod

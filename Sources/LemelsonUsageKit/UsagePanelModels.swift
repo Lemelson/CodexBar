@@ -514,7 +514,7 @@ struct UsageModelRow: View {
     let use: UsageModelUse
     let total: Double
     let color: Color
-    /// Gemini names such as "Hydrogen" need more than the default.
+    /// Provider model names such as "Hydrogen" need more than the default.
     var nameWidth: CGFloat = 36
 
     /// Room for "Sonnet".
@@ -568,6 +568,46 @@ struct UsageModelHeader: View {
     }
 }
 
+/// One line of a "By model" block: a Claude family or a provider's model (or its "Other").
+struct UsageModelLine: Identifiable, Sendable, Equatable {
+    let id: String
+    let label: String
+    let color: UsageSeriesColor
+    let use: UsageModelUse
+}
+
+/// The "By model" block of every spend section: column labels, one row per model, and an optional quiet
+/// note under them (what "Other" consists of).
+struct UsageModelRows: View {
+    let title: String
+    let lines: [UsageModelLine]
+    let total: Double
+    var nameWidth: CGFloat = UsageModelRow.claudeNameWidth
+    var note: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            UsageModelHeader(title: self.title)
+            ForEach(self.lines) { line in
+                UsageModelRow(
+                    name: line.label,
+                    use: line.use,
+                    total: self.total,
+                    color: line.color.color,
+                    nameWidth: self.nameWidth)
+            }
+            if let note {
+                Text(note)
+                    .font(.system(size: 10))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
 /// One row per Claude model: Opus, Fable, Sonnet, Haiku, and "Other" when there is some.
 struct UsageModelBlock: View {
     let title: String
@@ -577,17 +617,11 @@ struct UsageModelBlock: View {
     var families: [UsageModelFamily]?
 
     var body: some View {
-        let total = self.split.total.usd
-        VStack(alignment: .leading, spacing: 5) {
-            UsageModelHeader(title: self.title)
-            ForEach(self.families ?? self.split.shownFamilies) { family in
-                UsageModelRow(
-                    name: family.title,
-                    use: self.split[family],
-                    total: total,
-                    color: family.color,
-                    nameWidth: UsageModelRow.claudeNameWidth)
-            }
-        }
+        UsageModelRows(
+            title: self.title,
+            lines: (self.families ?? self.split.shownFamilies).map { family in
+                UsageModelLine(id: family.rawValue, label: family.title, color: .claude(family), use: self.split[family])
+            },
+            total: self.split.total.usd)
     }
 }

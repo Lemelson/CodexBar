@@ -20,7 +20,9 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     public var accounts: [Account]
     /// Gemini use through Antigravity (`usage/ANTIGRAVITY-STATE.md`). Decoded leniently: a malformed
     /// block never breaks the Claude part of the summary.
-    public var antigravity: UsageAntigravityBlock?
+    public var antigravity: UsageProviderBlock?
+    /// Codex (`usage/CODEX-STATE.md`): the same shape as `antigravity`, decoded by the same type.
+    public var codex: UsageProviderBlock?
     /// Prompt cache of all Claude accounts together; never fails the summary.
     public var cache: UsageCacheStats?
     /// Set when the collector's cache step failed: then `cache` is null here and on every account.
@@ -32,7 +34,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     private var cacheErrorField: Lenient<String>?
 
     enum CodingKeys: String, CodingKey {
-        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity, cache
+        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity, codex, cache
         case cacheErrorField = "cacheError"
         case kFable = "k_fable"
         case kSource = "k_source"
@@ -174,7 +176,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
                   let resetsAt = self.resetsAt
             else { return nil }
             let stamp = now.timeIntervalSince1970
-            return stamp - at < 30 * 60 && resetsAt > stamp ? forecast : nil
+            return stamp - at < UsageLimitReading.freshness && resetsAt > stamp ? forecast : nil
         }
 
         public struct Point: Sendable, Equatable, Identifiable {

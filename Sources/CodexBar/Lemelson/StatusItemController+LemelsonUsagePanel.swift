@@ -403,10 +403,10 @@ extension StatusItemController {
         let ageBucket = Int(now.timeIntervalSince1970 / 600)
         let panelWidth = Self.lemelsonSubpanelWidth
         for (index, account) in state.claudeLimitAccounts.enumerated() {
-            let style = UsageClaudeLimitCardStyle(account: account, in: state)
+            let style = UsageLimitCardStyle(account: account, in: state)
             let windows = account.visibleWindows
             menu.addItem(self.makeMenuCardItem(
-                UsageClaudeLimitHeader(account: account, style: style, now: now, width: width, hasLimits: !windows.isEmpty),
+                UsageLimitCardHeader(account: account, style: style, now: now, width: width, hasLimits: !windows.isEmpty),
                 id: "lemelsonHeader-\(index)",
                 width: width,
                 heightCacheScope: "lemelson-claude-card-header-\(account.uuid)",
@@ -424,7 +424,7 @@ extension StatusItemController {
                         sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: Date())))
                 })
                 menu.addItem(self.makeMenuCardItem(
-                    LemelsonHighlightBridge(content: UsageClaudeLimitRow(
+                    LemelsonHighlightBridge(content: UsageLimitCardRow(
                         kind: kind,
                         window: window,
                         style: style,

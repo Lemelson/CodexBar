@@ -552,7 +552,7 @@ struct LemelsonSelfTestTools {
     /// The prompt cache row of a Claude or Antigravity page.
     static func isCacheRow(_ item: NSMenuItem) -> Bool {
         let id = item.representedObject as? String
-        return id == "lemelsonCache-claude" || id == UsageAntigravityPage.idPrefix + "cache"
+        return id == "lemelsonCache-claude" || id == UsageProviderSpec.antigravity.idPrefix + "cache"
     }
 
     func page() -> String {

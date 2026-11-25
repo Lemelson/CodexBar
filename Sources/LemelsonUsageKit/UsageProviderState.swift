@@ -1,18 +1,19 @@
 import Foundation
 
-// MARK: - The `antigravity` block of the summary
+// MARK: - A provider block of the summary (`antigravity`, `codex`)
 
-/// Gemini use through Antigravity: one account-like object next to the Claude accounts in `state.json`.
-/// Contract: `usage/ANTIGRAVITY-STATE.md`.
+/// One provider with a single account next to the Claude accounts in `state.json`: Gemini use through
+/// Antigravity (`state.antigravity`, contract `usage/ANTIGRAVITY-STATE.md`) and Codex (`state.codex`,
+/// `usage/CODEX-STATE.md`, the same shape). Both decode with this one type.
 ///
 /// The keys it shares with a Claude account (`windows`, `rates`, `daily`, `weeks`, `value`, ...) end up in
 /// `account`, so the Claude views for limits and spend take it as is. Decoding never throws and goes key by
 /// key: a missing or malformed key leaves out only its own part of the page, never the whole summary.
-public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
+public struct UsageProviderBlock: Decodable, Sendable, Equatable {
     public var account: UsagePanelState.Account
     /// Always true for now: the token reading is reverse-engineered and the dollars are an estimate.
     public var beta: Bool
-    /// Set when the collector's Antigravity step failed; the block then has no data keys.
+    /// Set when the collector's step for this provider failed; the block then has no data keys.
     public var error: String?
     /// Last 30 days, by priced model id.
     public var models: [String: ModelStats]
@@ -46,7 +47,7 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
         public var priceConfirmed: Bool?
     }
 
-    /// `antigravity.value`: what the plan buys at Gemini API prices.
+    /// `value`: what the plan buys at the provider's API prices.
     public struct Worth: Decodable, Sendable, Equatable {
         public var planName: String?
         /// Nil: the plan price is not known, so there is no "You pay" and no ×.
@@ -240,12 +241,16 @@ public struct UsageAntigravityBlock: Decodable, Sendable, Equatable {
             .compactMapValues(\.value)
         let rates = keys?.lenient([String: Lenient<UsagePanelState.Rate>].self, .rates)?
             .compactMapValues(\.value)
-        let name = keys?.lenient(String.self, .name) ?? "Antigravity"
+        // A missing name or id falls back to the provider the block is filed under ("antigravity", "codex").
+        let filedUnder = decoder.codingPath.last?.stringValue ?? UsageProviderSpec.antigravity.key.rawValue
+        let name = keys?.lenient(String.self, .name)
+            ?? UsageProviderSpec.Key(rawValue: filedUnder).map { UsageProviderSpec.spec(for: $0).name }
+            ?? filedUnder.capitalized
         let weekSessions = keys?.lenient([String: Lenient<WeekWindow>].self, .windows)?["7d"]?.value?.sessions?.value
         // The collector's measured count comes first; a share of the week it may also write comes next.
         let measuredShare = weekSessions?.perWeek.flatMap { $0 > 0 ? 100 / $0 : nil }
         self.account = UsagePanelState.Account(
-            uuid: keys?.lenient(String.self, .uuid) ?? "antigravity",
+            uuid: keys?.lenient(String.self, .uuid) ?? filedUnder,
             name: name,
             short: keys?.lenient(String.self, .short) ?? name,
             active: keys?.lenient(Bool.self, .active),
@@ -305,7 +310,7 @@ extension KeyedDecodingContainer {
 
 // MARK: - What the page shows
 
-extension UsageAntigravityBlock {
+extension UsageProviderBlock {
     /// Quota windows with a reading, 5-hour first. A rolled window stays: it reads "new window, no reading yet".
     public var limitWindows: [(UsagePanelState.WindowKind, UsagePanelState.Window)] {
         [UsagePanelState.WindowKind.fiveHour, .week].compactMap { kind in
@@ -317,8 +322,8 @@ extension UsageAntigravityBlock {
         }
     }
 
-    /// "≈N full 5h sessions left · M fit before reset" for the weekly row. Antigravity's own rates only:
-    /// a Claude plan says nothing about a Google quota.
+    /// "≈N full 5h sessions left · M fit before reset" for the weekly row. The provider's own rates only:
+    /// a Claude plan says nothing about a Google or OpenAI quota.
     public func sessionsLeft(for kind: UsagePanelState.WindowKind, now: Date) -> UsageSessionsLeft? {
         kind == .week ? UsageSessionsLeft.make(account: self.account, donors: [], now: now) : nil
     }
@@ -363,17 +368,7 @@ extension UsageAntigravityBlock {
         return (count(self.calibration?.sessionIntervals), needed)
     }
 
-    /// Short title of a limit row: "5-hour", "Weekly".
-    public static func rowTitle(_ kind: UsagePanelState.WindowKind) -> String {
-        kind == .fiveHour ? "5-hour" : kind.title
-    }
-
-    /// Title of a limit's detail panel: "5-hour limit", "Weekly limit".
-    public static func detailTitle(_ kind: UsagePanelState.WindowKind) -> String {
-        kind == .fiveHour ? "5-hour limit" : kind.longTitle
-    }
-
-    /// Dollars that fill 100% of a limit at Gemini API prices.
+    /// Dollars that fill 100% of a limit at the provider's API prices.
     public func capacity(_ kind: UsagePanelState.WindowKind) -> Double? {
         if kind == .week, let week = self.account.value?.weekOpusUsd, week > 0 {
             return week
@@ -387,15 +382,29 @@ extension UsageAntigravityBlock {
     }
 }
 
-// MARK: - Model names and colors
+// MARK: - Model names
 
-/// Gemini model ids as short labels and stable chart colors.
-public enum UsageAntigravityModels {
+/// How a provider's model ids become the short names its page shows. Colors are not here: a page gives its
+/// models the chart colors in order of use (`UsageProviderSpend`).
+public enum UsageModelNaming: Sendable, Equatable {
+    /// "gemini-4-neon" → "Neon"; when two models share a name the version stays: "Flash 3.7", "Flash 3.6".
+    case gemini
+    /// "gpt-6.1-sol" → "Sol", "gpt-6.1-sol-mini" → "Sol Mini"; "gpt-5" → "GPT-5"; when two models share a
+    /// name the version stays: "Sol 6.1", "Sol 6".
+    case openai
+
     /// Key for spend that the summary does not attribute to a model.
     static let unknown = "unknown"
 
-    /// "gemini-4-neon" → "Neon"; when two models share a name the version stays: "Flash 3.7", "Flash 3.6".
-    public static func labels(for ids: [String]) -> [String: String] {
+    /// What spend without a model is called.
+    var unknownLabel: String {
+        switch self {
+        case .gemini: "Gemini"
+        case .openai: "Codex"
+        }
+    }
+
+    public func labels(for ids: [String]) -> [String: String] {
         let parsed = ids.map { ($0, self.parse($0)) }
         var counts: [String: Int] = [:]
         for (_, part) in parsed {
@@ -403,8 +412,8 @@ public enum UsageAntigravityModels {
         }
         var labels: [String: String] = [:]
         for (id, part) in parsed {
-            if id == self.unknown {
-                labels[id] = "Gemini"
+            if id == Self.unknown {
+                labels[id] = self.unknownLabel
             } else if counts[part.name, default: 0] > 1, let version = part.version {
                 labels[id] = "\(part.name) \(version)"
             } else {
@@ -414,9 +423,10 @@ public enum UsageAntigravityModels {
         return labels
     }
 
-    private static func parse(_ id: String) -> (name: String, version: String?) {
+    private func parse(_ id: String) -> (name: String, version: String?) {
         var parts = id.lowercased().split(separator: "-").map(String.init)
-        if parts.first == "gemini" {
+        let family = self == .gemini ? "gemini" : "gpt"
+        if parts.first == family {
             parts.removeFirst()
         }
         var version: String?
@@ -424,24 +434,30 @@ public enum UsageAntigravityModels {
             version = first
             parts.removeFirst()
         }
-        guard let word = parts.first else { return (version.map { "Gemini \($0)" } ?? id, nil) }
-        return (word.prefix(1).uppercased() + word.dropFirst(), version)
+        func capitalized(_ word: String) -> String {
+            word.prefix(1).uppercased() + word.dropFirst()
+        }
+        switch self {
+        case .gemini:
+            guard let word = parts.first else { return (version.map { "Gemini \($0)" } ?? id, nil) }
+            return (capitalized(word), version)
+        case .openai:
+            // "latest" and dated snapshots say nothing a reader needs.
+            let words = parts.filter { $0 != "latest" && !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
+            guard !words.isEmpty else { return (version.map { "GPT-\($0)" } ?? id, nil) }
+            return (words.map(capitalized).joined(separator: " "), version)
+        }
     }
 }
 
 // MARK: - Spend, computed once
 
-/// Everything the Antigravity spend block draws, computed once per summary: a period switch or a hover then
-/// only reads ready values. Same rules as `UsageSpendDigest` (calendar days counting today), but split by
-/// Gemini model instead of by account.
-public struct UsageAntigravitySpend: Sendable, Equatable {
+/// Everything a provider page's spend section draws, computed once per summary: a period switch or a hover
+/// then only reads ready values. Same rules as `UsageSpendDigest` (calendar days counting today), but split by
+/// the provider's models instead of by account.
+public struct UsageProviderSpend: Sendable, Equatable {
     /// A model row: one named model, or everything after the first few as "Other".
-    public struct ModelRow: Identifiable, Sendable, Equatable {
-        public let id: String
-        let label: String
-        let color: UsageSeriesColor
-        let use: UsageModelUse
-    }
+    typealias ModelRow = UsageModelLine
 
     /// One selectable period: chart, model rows and the total.
     public struct Period: Sendable, Equatable {
@@ -465,11 +481,11 @@ public struct UsageAntigravitySpend: Sendable, Equatable {
     /// Named model rows; with more models than this plus one, the rest share an "Other" row.
     static let namedRows = 3
 
-    public init(block: UsageAntigravityBlock, now: Date) {
+    public init(block: UsageProviderBlock, spec: UsageProviderSpec, now: Date) {
         let days = (block.account.daily ?? []).sorted { $0.day < $1.day }
         func uses(_ day: UsagePanelState.Day) -> [String: UsageModelUse] {
             guard let models = day.m, !models.isEmpty else {
-                return [UsageAntigravityModels.unknown: UsageModelUse(usd: day.total, tokens: day.tokens ?? 0)]
+                return [UsageModelNaming.unknown: UsageModelUse(usd: day.total, tokens: day.tokens ?? 0)]
             }
             var result: [String: UsageModelUse] = [:]
             for (id, value) in models {
@@ -510,7 +526,7 @@ public struct UsageAntigravitySpend: Sendable, Equatable {
             if c != d { return c > d }
             return lhs < rhs
         }
-        let labels = UsageAntigravityModels.labels(for: order)
+        let labels = spec.models.labels(for: order)
         let named = order.count > Self.namedRows + 1 ? Array(order.prefix(Self.namedRows)) : order
         let rest = Set(order).subtracting(named)
         var colors: [String: UsageSeriesColor] = [:]
@@ -571,12 +587,13 @@ public struct UsageAntigravitySpend: Sendable, Equatable {
                     label: "Other",
                     color: .other,
                     use: members.reduce(UsageModelUse()) { $0 + $1.1 }))
-                let shown = members.filter { $0.1.tokens > 0 || $0.1.usd >= 0.005 }.sorted { $0.1.usd > $1.1.usd }
+                let shown = members.filter { $0.1.tokens > 0 || $0.1.usd >= 0.005 }.sorted { ($0.1.usd, $0.1.tokens) > ($1.1.usd, $1.1.tokens) }
                 otherNote = shown.isEmpty
                     ? "Other: \(rest.compactMap { labels[$0] }.sorted().joined(separator: ", ")) (none in this period)."
                     : "Other: " + shown.map {
-                        "\(labels[$0.0] ?? $0.0) \(UsageFormat.usdFine($0.1.usd)) · \(UsageFormat.tokens($0.1.tokens)) tok"
-                    }.joined(separator: "   ")
+                        let usd = $0.1.usd >= 0.005 ? UsageFormat.usdFine($0.1.usd) : "no price"
+                        return "\(labels[$0.0] ?? $0.0) \(usd) · \(UsageFormat.tokens($0.1.tokens)) tok"
+                    }.joined(separator: ", ") + "."
             }
             let chart = UsageDayChartData(
                 period: period,
@@ -585,7 +602,7 @@ public struct UsageAntigravitySpend: Sendable, Equatable {
                 hint: Self.hint(period: period, firstDay: firstDay, now: now),
                 legend: legend,
                 dayNotes: notes,
-                emptyText: "No Antigravity use on this Mac in this period.",
+                emptyText: "No \(spec.name) use on this Mac in this period.",
                 chipLimit: 3,
                 centsInChips: true)
             return Period(period: period, chart: chart, rows: rows, whole: whole(split), otherNote: otherNote)

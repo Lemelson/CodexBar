@@ -3,7 +3,7 @@ import CodexBarCore
 import LemelsonUsageKit
 import SwiftUI
 
-// The Antigravity tab as one page of the fork (`UsageAntigravityPage`), in place of the stock card and the
+// The Antigravity tab as one page of the fork (`UsageProviderPage` with `UsageProviderSpec.antigravity`), in place of the stock card and the
 // stock rows under it (Plan Usage, Cost: the stock Cost counts copied conversations twice).
 //
 // Entry points:
@@ -49,7 +49,7 @@ final class LemelsonAntigravityState {
 extension StatusItemController {
     /// Rows of the Antigravity page carry these ids (the warm rows of the Claude modes leave them alone).
     static func lemelsonIsAntigravityRow(_ id: String) -> Bool {
-        id.hasPrefix(UsageAntigravityPage.idPrefix) || id.hasPrefix(UsageAntigravityPage.limitRowPrefix)
+        id.hasPrefix(UsageProviderSpec.antigravity.idPrefix) || id.hasPrefix(UsageProviderSpec.antigravity.limitRowPrefix)
     }
 
     /// The store is fetching Antigravity now, or the collector is rewriting the summary.
@@ -87,10 +87,11 @@ extension StatusItemController {
     }
 
     /// The page's rows, without its cache row (see `lemelsonCacheRow(of:)`). Nil without a page.
-    private func addLemelsonAntigravityRows(to menu: NSMenu, width: CGFloat) -> UsageAntigravityPage? {
+    private func addLemelsonAntigravityRows(to menu: NSMenu, width: CGFloat) -> UsageProviderPage? {
         guard let state = UsagePanelStore.load() else { return nil }
         let refreshing = self.lemelsonAntigravityRefreshing
-        guard let page = UsageAntigravityPage(
+        guard let page = UsageProviderPage(
+            spec: .antigravity,
             state: state,
             now: Date(),
             width: width,
@@ -106,17 +107,28 @@ extension StatusItemController {
             let fingerprint = row.part == .footer ? "\(row.heightFingerprint):\(refreshing)" : row.heightFingerprint
             if let detail = row.detail {
                 // As the Claude limit rows: the detail panel shows the window's chart at once and morphs
-                // between the two rows; the empty click handler keeps the row highlightable.
+                // between the two rows; the empty click handler keeps the row highlightable. A card row draws
+                // its own chevron and highlight.
                 self.lemelsonRegisterDetail(.swiftUI(key: row.id, width: page.detailWidth) {
                     detail()
                 })
                 menu.addItem(self.makeMenuCardItem(
-                    LemelsonHighlightBridge(content: row.view, showsChevron: true),
+                    LemelsonHighlightBridge(content: row.view, showsChevron: !row.inCard),
                     id: row.id,
                     width: width,
                     heightCacheScope: row.heightCacheScope,
                     heightCacheFingerprint: fingerprint,
+                    layout: row.inCard ? .joined : .standalone,
                     onClick: {}))
+            } else if row.inCard {
+                // The card header and a notice: joined to the card's other slices, never highlighted.
+                menu.addItem(self.makeMenuCardItem(
+                    row.view,
+                    id: row.id,
+                    width: width,
+                    heightCacheScope: row.heightCacheScope,
+                    heightCacheFingerprint: fingerprint,
+                    layout: .joined))
             } else {
                 menu.addItem(self.makeMenuCardItem(
                     row.view,
@@ -135,7 +147,7 @@ extension StatusItemController {
     }
 
     /// The page's "Prompt cache" row in the shape the menu footer takes; nil without cache data.
-    static func lemelsonCacheRow(of page: UsageAntigravityPage) -> LemelsonCacheRow? {
+    static func lemelsonCacheRow(of page: UsageProviderPage) -> LemelsonCacheRow? {
         guard let row = page.cacheRow, let detail = row.detail else { return nil }
         return LemelsonCacheRow(
             id: row.id,

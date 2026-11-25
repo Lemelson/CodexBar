@@ -10,9 +10,9 @@ public struct UsageLimitDetailPanelView: View {
     let width: CGFloat
     /// Weekly limit only: see `UsageSessionsLeft.make(for:account:in:now:)`.
     let sessionsLeft: UsageSessionsLeft?
-    /// Replaces the long window title ("5-hour session limit"), e.g. "5-hour limit" for Antigravity.
+    /// Replaces the long window title ("5-hour session limit").
     let title: String?
-    /// `.single` (Antigravity): no "You" line or "Where it went", dollars read as "your use", and a plain
+    /// `.single` (provider pages): no "You" line or "Where it went", dollars read as "your use", and a plain
     /// sentence instead of a chart with fewer than two readings.
     let sources: UsageLimitSources
     /// One sentence in place of `sessionsLeft` while the session size is still being measured.
@@ -137,9 +137,10 @@ public struct UsageLimitDetailPanelView: View {
                 Divider()
                 UsageSectionLabel(text: "Pace")
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(pace.color)
-                        .frame(width: 2, height: 10)
+                    // The same "T" as on the row's bar, in the same colour.
+                    UsageTimeMarkGlyph(color: UsageLimitTimeMark.make(window: self.window, kind: self.kind, now: self.now)?
+                        .color ?? pace.color)
+                        .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
                     Text(self.paceExplanation(pace, hasForecast: forecast != nil))
                         .font(.system(size: 11))
                         .fixedSize(horizontal: false, vertical: true)
@@ -377,7 +378,7 @@ public struct UsageLimitDetailPanelView: View {
         return facts
     }
 
-    /// Antigravity: dollars at Gemini API prices are an estimate of the use, not a bill.
+    /// A provider page: dollars at API prices are an estimate of the use, not a bill.
     private var singleSourceFacts: [String] {
         var facts: [String] = []
         // After a reset the last reading and its dollars belong to the previous window.
