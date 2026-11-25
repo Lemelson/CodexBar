@@ -57,7 +57,7 @@ public enum UsagePalette {
         self.accounts[index % self.accounts.count]
     }
 
-    /// Gemini models on the Antigravity page, most used first: the account colors in another order,
+    /// A provider page's models (Antigravity, Codex), most used first: the account colors in another order,
     /// so the first three differ in hue and brightness on a warm screen too. Past four: grey.
     public static let models: [Color] = [
         UsagePalette.dynamic(light: 0x2563EB, dark: 0x5B9BFF),
@@ -70,7 +70,7 @@ public enum UsagePalette {
         self.models.indices.contains(index) ? self.models[index] : self.others
     }
 
-    /// A limit with no split by source (Antigravity): the whole bar is one color.
+    /// A limit with no split by source (Antigravity, Codex): the whole bar is one color.
     public static let single = UsagePalette.models[0]
 
     static func dynamic(light: UInt32, dark: UInt32) -> Color {
@@ -280,112 +280,55 @@ struct UsageSegment: Identifiable {
 public enum UsageLimitSources: Sendable, Equatable {
     /// Claude: this Mac, other Claude Code, chat, Cowork. The bar has a part per source and a legend line.
     case split
-    /// Antigravity: one quota and no split. One bar segment, no legend line, no "Where it went".
+    /// Antigravity and Codex: one quota and no split. One bar segment, no legend line, no "Where it went".
     case single
 }
 
 // MARK: - Pace
 
-/// Window spend pace, like the mark on the stock CodexBar bar: where spend would be at an even rate.
-public struct UsagePace: Equatable {
+/// The Pace section of a limit's detail panel: how far the use is from even use by now. Built on the time mark
+/// (`UsageLimitTimeMark`), so the panel's sentence and colour always match the "T" on the row's bar. When the
+/// limit runs out is not said here: that is the verdict's and the forecast's (`UsageLimitVerdict`), the one
+/// run-out logic of the row and the panel.
+public struct UsageLimitPace: Equatable {
     /// How many percent would be spent by now at an even rate.
     public let expected: Double
     /// Spent (as of the last reading) minus expected: plus is overspend, minus is reserve.
     public let delta: Double
-    /// The reading is old (an account that is not being polled): the mark still compares it with even use
-    /// by now, but there is no estimate of when the limit runs out.
-    public let isStale: Bool
-    public let lastsToReset: Bool
-    /// In how many seconds the limit runs out at the current rate.
-    public let runsOutIn: Double?
-    /// How many seconds before the reset the limit runs out according to the collector's forecast: that long without it.
-    public let earlyBy: Double?
+    /// The time mark this pace reads: its tone decides the wording and the colour.
+    public let mark: UsageLimitTimeMark
 
     public static func make(
         window: UsagePanelState.Window,
         kind: UsagePanelState.WindowKind,
-        now: Date) -> UsagePace?
+        now: Date) -> UsageLimitPace?
     {
-        guard window.rolled != true,
-              let used = window.pct,
-              let resetsAt = window.resetsAt
+        guard let used = window.pct, used < 100,
+              let mark = UsageLimitTimeMark.make(window: window, kind: kind, now: now)
         else { return nil }
-        let nowStamp = now.timeIntervalSince1970
-        guard used < 100 else { return nil }
-        let start = resetsAt - kind.span
-        // Even use by now, the same number the time mark on the bar stands at (`UsageLimitTimeMark`).
-        guard let even = UsageLimitTimeMark.evenUse(window: window, kind: kind, now: now) else { return nil }
-        let expected = min(100, even)
-        guard expected >= 3 else { return nil }
-        let delta = used - expected
-        // When the limit runs out is estimated only from a fresh reading: an old rate would be wrong.
-        guard let measuredAt = window.measuredAt, UsageLimitReading.isFresh(measuredAt, now: now) else {
-            return UsagePace(
-                expected: expected, delta: delta, isStale: true, lastsToReset: true, runsOutIn: nil, earlyBy: nil)
-        }
-        // The collector's forecast accounts for how I usually continue a window; the straight "at this pace" line is the fallback.
-        if let forecast = window.liveForecast(now: now) {
-            let hit = forecast.hitAt
-            return UsagePace(
-                expected: expected,
-                delta: delta,
-                isStale: false,
-                lastsToReset: hit == nil,
-                runsOutIn: hit.map { max(0, $0 - nowStamp) },
-                earlyBy: hit.map { max(0, resetsAt - $0) })
-        }
-        var lasts = true
-        var runsOutIn: Double?
-        let elapsed = measuredAt - start
-        if used > 0, elapsed > 0 {
-            let secondsToEmpty = (100 - used) / (used / elapsed)
-            lasts = measuredAt + secondsToEmpty >= resetsAt
-            if !lasts {
-                runsOutIn = max(0, measuredAt + secondsToEmpty - nowStamp)
-            }
-        }
-        return UsagePace(
-            expected: expected,
-            delta: delta,
-            isStale: false,
-            lastsToReset: lasts,
-            runsOutIn: runsOutIn,
-            earlyBy: nil)
+        let expected = min(100, mark.percent)
+        return UsageLimitPace(expected: expected, delta: used - expected, mark: mark)
     }
 
+    /// The reading is old: the mark still compares it with even use by now.
+    public var isStale: Bool {
+        self.mark.tone == .stale
+    }
+
+    /// The same side as the mark: above even use is a deficit, anything else a reserve.
     public var isDeficit: Bool {
         self.delta > 0
     }
 
+    /// "24% in deficit", "3% in reserve"; under half a point "<1% in deficit".
     public var headline: String {
         let value = Int(abs(self.delta).rounded())
-        if value == 0 {
-            return "On pace"
-        }
-        return self.isDeficit ? "\(value)% in deficit" : "\(value)% in reserve"
-    }
-
-    public var tail: String {
-        if self.lastsToReset {
-            return "lasts until reset"
-        }
-        guard let runsOutIn else { return "" }
-        if let earlyBy, earlyBy >= 60 {
-            let when = runsOutIn < 60 ? "out now" : "out in \(UsageFormat.duration(runsOutIn))"
-            return "\(when), \(UsageFormat.duration(earlyBy)) before reset"
-        }
-        return runsOutIn < 60 ? "runs out now" : "runs out in \(UsageFormat.duration(runsOutIn))"
-    }
-
-    /// The only pace text left in a limit row: the limit runs out before it resets.
-    /// "Out in 1h 2m, 1h 42m before reset". The reserve or deficit itself is shown by the mark alone.
-    public var warning: String? {
-        guard !self.lastsToReset, !self.tail.isEmpty else { return nil }
-        return self.tail.prefix(1).uppercased() + self.tail.dropFirst()
+        let amount = value == 0 ? "<1%" : "\(value)%"
+        return self.isDeficit ? "\(amount) in deficit" : "\(amount) in reserve"
     }
 
     public var color: Color {
-        self.isDeficit ? UsagePalette.paceBad : UsagePalette.paceGood
+        self.mark.color
     }
 }
 
@@ -525,12 +468,16 @@ struct UsageChip: View {
     let color: Color
     let text: String
     var dashed = false
+    /// The swatch of a solid chart line: one short stroke.
+    var line = false
     var fontSize: CGFloat = 10.5
     @Environment(\.usageRowHighlighted) private var highlighted
 
     var body: some View {
         HStack(spacing: 4) {
-            if self.dashed {
+            if self.line {
+                Rectangle().fill(self.color).frame(width: 10, height: 2)
+            } else if self.dashed {
                 // Two short strokes: the swatch of a dashed chart line.
                 HStack(spacing: 2) {
                     Rectangle().fill(self.color).frame(width: 4, height: 2)
@@ -593,6 +540,9 @@ public struct UsageFooterView: View {
     let showsYouChip: Bool
     /// A footnote above the status line: what is exact and what is estimated.
     let note: String?
+    /// One line: the note and a short status ("Beta · dollars at OpenAI API prices · updated 11:57"), as
+    /// much of it as fits. The provider pages, which show this footer always, use it.
+    let compact: Bool
 
     public init(
         state: UsagePanelState,
@@ -601,8 +551,10 @@ public struct UsageFooterView: View {
         refreshing: Bool,
         showsLegend: Bool,
         showsYouChip: Bool = true,
-        note: String? = nil)
+        note: String? = nil,
+        compact: Bool = false)
     {
+        self.compact = compact
         self.state = state
         self.now = now
         self.width = width
@@ -623,7 +575,47 @@ public struct UsageFooterView: View {
         return "Updated \(UsageFormat.clock(self.state.generatedDate)) · refreshes when you open this menu"
     }
 
+    /// "updated 11:57", "refreshing…", "not updated for 3h".
+    private var shortStatus: String {
+        if self.refreshing {
+            return "refreshing…"
+        }
+        if self.state.isStale(now: self.now) {
+            return "not updated for \(UsageFormat.duration(self.now.timeIntervalSince(self.state.generatedDate)))"
+        }
+        return "updated \(UsageFormat.clock(self.state.generatedDate))"
+    }
+
+    private var statusStyle: AnyShapeStyle {
+        self.state.isStale(now: self.now) && !self.refreshing
+            ? AnyShapeStyle(UsagePalette.warning)
+            : AnyShapeStyle(.tertiary)
+    }
+
     public var body: some View {
+        if self.compact {
+            self.compactLine
+        } else {
+            self.full
+        }
+    }
+
+    /// The note and the status on one line; without room for both, the status alone (never cut mid-word).
+    private var compactLine: some View {
+        let status = self.shortStatus
+        let line = self.note.map { "\($0) · \(status)" } ?? status
+        return ViewThatFits(in: .horizontal) {
+            Text(line).fixedSize()
+            Text(status.prefix(1).uppercased() + status.dropFirst()).lineLimit(1)
+        }
+        .font(.system(size: 10.5))
+        .foregroundStyle(self.statusStyle)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+        .frame(width: self.width, alignment: .leading)
+    }
+
+    private var full: some View {
         VStack(alignment: .leading, spacing: 4) {
             if self.showsLegend {
                 UsageFlowLayout(spacing: 12) {
@@ -652,9 +644,7 @@ public struct UsageFooterView: View {
             }
             Text(self.status)
                 .font(.system(size: 10.5))
-                .foregroundStyle(self.state.isStale(now: self.now) && !self.refreshing
-                    ? AnyShapeStyle(UsagePalette.warning)
-                    : AnyShapeStyle(.tertiary))
+                .foregroundStyle(self.statusStyle)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, 20)

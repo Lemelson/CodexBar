@@ -577,13 +577,15 @@ struct UsageModelLine: Identifiable, Sendable, Equatable {
 }
 
 /// The "By model" block of every spend section: column labels, one row per model, and an optional quiet
-/// note under them (what "Other" consists of).
+/// note under them (what "Other" consists of), on one line: the first of `notes` that fits is shown, so the
+/// text is never cut in the middle of a word and the block keeps one height.
 struct UsageModelRows: View {
     let title: String
     let lines: [UsageModelLine]
     let total: Double
     var nameWidth: CGFloat = UsageModelRow.claudeNameWidth
-    var note: String?
+    /// Longest first; the last one should be short enough to fit any width.
+    var notes: [String] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -596,13 +598,19 @@ struct UsageModelRows: View {
                     color: line.color.color,
                     nameWidth: self.nameWidth)
             }
-            if let note {
-                Text(note)
-                    .font(.system(size: 10))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+            if !self.notes.isEmpty {
+                ViewThatFits(in: .horizontal) {
+                    ForEach(Array(self.notes.enumerated()), id: \.offset) { _, note in
+                        Text(note)
+                            .fixedSize()
+                    }
+                    // Nothing fits: the shortest one, cut at its end.
+                    Text(self.notes.last ?? "")
+                        .lineLimit(1)
+                }
+                .font(.system(size: 10))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             }
         }
     }

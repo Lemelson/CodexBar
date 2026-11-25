@@ -53,7 +53,7 @@ public struct UsageSessionsLeft: Equatable, Sendable {
     }
 
     /// `donors`: accounts whose ratio may stand in when this one has no weekly rate yet (same plan only).
-    /// Antigravity passes none: a Claude plan says nothing about a Google quota.
+    /// The provider pages pass none: a Claude plan says nothing about a Google or OpenAI quota.
     public static func make(
         account: UsagePanelState.Account,
         donors: [UsagePanelState.Account],

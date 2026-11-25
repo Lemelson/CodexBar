@@ -9,9 +9,10 @@ import SwiftUI
 ///                  compact facts (`extras`, e.g. Codex credits), as on Claude Limits
 ///   spend          `UsageSpendHeader` + `UsagePeriodStack` + `UsageSpendDayChart` + `UsageModelRows`, as on
 ///                  Claude Spend, split by the provider's models
-///   value          `UsageValueBlock`, as on Claude Value
-///   footer         `UsageFooterView`, with the time-mark legend
-///   cache row      `UsageCacheRowView`, placed by the menu among its action rows (`cacheRow`)
+///   footer         `UsageFooterView`, one line, as on Claude
+///   line rows      "Plan worth" and "Prompt cache" (`UsagePageLineRow`): one line each with the whole story in
+///                  the hover panel; placed by the menu above its action rows (`lineRows`). The value panel is
+///                  Claude Value's card (`UsageValueBlock`) and its month chart.
 ///
 /// What differs between providers is a `UsageProviderSpec` (name, tint, model names, price words).
 ///
@@ -46,11 +47,12 @@ public struct UsageProviderPage {
         case fact(String)
         /// Totals, per-day chart and models; contains the period switch when the history is long enough.
         case spend
-        /// The prompt cache row: not in `rows`, see `cacheRow`.
+        /// The prompt cache row: not in `rows`, see `lineRows`.
         case cache
-        /// What a full limit is worth at API prices; absent without a rate or a reason.
+        /// What the plan is worth at API prices ("Plan worth"); not in `rows`, see `lineRows`. Absent without a
+        /// rate or a reason.
         case value
-        /// Time-mark legend, what is exact and what is estimated, when the summary was updated.
+        /// What is estimated, when the summary was updated: one line.
         case footer
     }
 
@@ -87,18 +89,29 @@ public struct UsageProviderPage {
     }
 
     public static let defaultDetailWidth: CGFloat = 340
+    /// The per-day chart is lower than on Claude Spend: here it shares the page with the limits.
+    static let chartHeight: CGFloat = 84
 
     public let spec: UsageProviderSpec
     public let block: UsageProviderBlock
     public let rows: [Row]
     public let detailWidth: CGFloat
-    /// The one-line "Prompt cache" row for the menu's footer area (next to Status Page), with its detail
-    /// panel; nil without cache data. Not part of `rows`: the menu places it among its own action rows.
+    /// The one-line "Plan worth" row, with the value card in its detail panel; nil without a value.
+    public let valueRow: Row?
+    /// The one-line "Prompt cache" row, with its detail panel; nil without cache data.
     public let cacheRow: Row?
+
+    /// The one-line rows for the menu's footer area (above Status Page), in order: "Plan worth", "Prompt cache".
+    /// Not part of `rows`: the menu places them among its own action rows, as on the Claude pages.
+    public var lineRows: [Row] {
+        [self.valueRow, self.cacheRow].compactMap(\.self)
+    }
 
     /// Nil when the summary has no block for this provider: then the stock card stays.
     /// `account` is a quiet line under the card name (Codex: the e-mail CodexBar's own Codex card shows); nil
-    /// leaves it out. `clock` gives the time a hover detail is built at (as for Claude, the moment it is first shown);
+    /// leaves it out. `accountKey` is the key CodexBar files the shown account's history under: when the
+    /// collector's limits are of another account (`quotaSource.accountKey`), one notice takes the place of the
+    /// limit rows instead of one account's numbers under another's name. `clock` gives the time a hover detail is built at (as for Claude, the moment it is first shown);
     /// the preview passes its fixed time.
     public init?(
         spec: UsageProviderSpec,
@@ -108,6 +121,7 @@ public struct UsageProviderPage {
         detailWidth: CGFloat = UsageProviderPage.defaultDetailWidth,
         refreshing: Bool = false,
         account: String? = nil,
+        accountKey: String? = nil,
         extras: [Extra] = [],
         clock: @escaping @MainActor () -> Date = { Date() })
     {
@@ -152,6 +166,8 @@ public struct UsageProviderPage {
         let windows = block.limitWindows
         let notice: (text: String, detail: String?)? = if let error = block.error {
             ("\(spec.name)'s data could not be read this time.", error)
+        } else if Self.limitsOfAnotherAccount(block, shown: accountKey) {
+            ("No limits collected yet for this \(spec.name) account.", nil)
         } else if windows.isEmpty {
             ("No quota readings yet: CodexBar has not recorded a 5-hour or weekly window.", nil)
         } else {
@@ -210,29 +226,43 @@ public struct UsageProviderPage {
                     fact: extra.fact, style: style, width: width, last: last, hasDetail: extra.detail != nil),
                 separatorAfter: last,
                 inCard: true,
-                fingerprint: extra.fact.caption == nil ? ":1" : ":2",
+                fingerprint: ":" + (extra.fact.caption ?? ""),
                 detail: extra.detail)
         }
 
-        if block.error == nil {
-            let spend = UsageProviderSpend(block: block, spec: spec, now: now)
+        // Spend and the value read the same numbers: built once per page.
+        let spend = block.error == nil ? UsageProviderSpend(block: block, spec: spec, now: now) : nil
+        if let spend {
             add(.spend, "spend", UsageProviderSpendView(spend: spend, spec: spec, width: width),
                 separatorAfter: true, hasControls: spend.offered.count > 1)
-            if UsageProviderValueView.hasContent(block, spec: spec, now: now) {
-                add(.value, "value", UsageProviderValueView(block: block, spec: spec, width: width, now: now),
-                    separatorAfter: true)
-            }
         }
-        let hasMark = windows.contains { UsageLimitTimeMark.make(window: $0.1, kind: $0.0, now: now) != nil }
         add(.footer, "footer", UsageFooterView(
             state: state,
             now: now,
             width: width,
             refreshing: refreshing,
-            showsLegend: hasMark,
+            showsLegend: false,
             showsYouChip: false,
-            note: Self.footnote(block, spec: spec)), separatorAfter: true)
+            note: Self.footnote(block, spec: spec),
+            compact: true), separatorAfter: true)
         self.rows = rows
+
+        let until = state.generatedDate
+        self.valueRow = spend.flatMap { UsageProviderWorth(block: block, spec: spec, spend: $0) }.map { worth in
+            Row(
+                id: spec.idPrefix + "value",
+                part: .value,
+                view: AnyView(UsagePageLineRow(title: "Plan worth", value: worth.headline, width: width)),
+                detail: {
+                    AnyView(UsageProviderValueView(
+                        worth: worth, block: block, spec: spec, width: detailWidth, until: until))
+                },
+                hasControls: false,
+                separatorAfter: false,
+                inCard: false,
+                heightCacheScope: scope + "value",
+                heightFingerprint: fingerprint)
+        }
         self.cacheRow = UsageCacheSummary.provider(block, spec: spec).map { summary in
             Row(
                 id: summary.rowID,
@@ -245,6 +275,13 @@ public struct UsageProviderPage {
                 heightCacheScope: scope + "cache",
                 heightFingerprint: fingerprint)
         }
+    }
+
+    /// The collector names the account its limits come from, the app names the account it shows, and the
+    /// two differ. Unknown on either side: no check (older summaries, a history not loaded yet).
+    public static func limitsOfAnotherAccount(_ block: UsageProviderBlock, shown: String?) -> Bool {
+        guard let shown, !shown.isEmpty, let collected = block.quotaSource?.accountKey else { return false }
+        return shown != collected
     }
 
     /// The hover detail of one limit row: the same panel as a Claude limit, single source.
@@ -266,10 +303,9 @@ public struct UsageProviderPage {
             sessionsNote: block.sessionsMeasuringSentence(for: kind, now: now))
     }
 
-    /// What is exact and what is estimated, in the style of the Claude footnotes.
+    /// What is estimated, short enough for the footer's one line: "Beta · dollars at OpenAI API prices".
     static func footnote(_ block: UsageProviderBlock, spec: UsageProviderSpec) -> String {
-        (block.beta ? "Beta. " : "")
-            + "Tokens: exact, from \(spec.source). Dollars: an estimate at \(spec.prices)."
+        (block.beta ? "Beta · " : "") + "dollars at \(spec.prices)"
     }
 }
 
@@ -315,24 +351,24 @@ public struct UsageProviderSpendView: View {
     }
 }
 
-/// One period: chart and model rows. Every period has the same rows (the models of the whole history), so
-/// all layers have one height and a switch never changes the menu.
+/// One period: chart and model rows. Every period has the same number of rows (its own leading models and
+/// "Other"), and the Other note is one line, so all layers have one height and a switch never changes the menu.
 struct UsageProviderPeriodLayer: View, Equatable {
     let data: UsageProviderSpend.Period
     let offered: [UsageSpendPeriod]
 
-    /// Provider model names ("Hydrogen", "Sol Mini") are longer than Claude's.
-    static let nameWidth: CGFloat = 58
+    /// Provider model names ("Hydrogen", "Auto Review") are longer than Claude's.
+    static let nameWidth: CGFloat = 66
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            UsageSpendDayChart(data: self.data.chart, offered: self.offered)
+            UsageSpendDayChart(data: self.data.chart, offered: self.offered, plotHeight: UsageProviderPage.chartHeight)
             UsageModelRows(
                 title: "By model · \(self.data.period.short)",
                 lines: self.data.rows,
                 total: self.data.whole.usd,
                 nameWidth: Self.nameWidth,
-                note: self.data.otherNote)
+                notes: (0...self.data.otherMembers.count).reversed().compactMap { self.data.otherNote(naming: $0) })
         }
     }
 }

@@ -21,7 +21,7 @@ public struct UsageCacheStats: Decodable, Sendable, Equatable {
         public var savedUsd: Double?
         /// What the misses cost above the cache-read price, API dollars.
         public var missUsd: Double?
-        /// Antigravity only: share of calls that read nothing from the cache.
+        /// Provider blocks only: share of calls that read nothing from the cache.
         public var coldCallsPct: Double?
 
         public init(from decoder: Decoder) throws {
@@ -187,7 +187,8 @@ public struct UsageCacheSummary: Sendable, Equatable {
                 return (id, min(100, max(0, 100 - miss)), stats.usd ?? 0)
             }
             .sorted { $0.2 != $1.2 ? $0.2 > $1.2 : $0.0 < $1.0 }
-        let labels = spec.models.labels(for: models.map(\.0))
+        // The page's one naming rule: the same name as in Spend and Value.
+        let labels = block.modelLabels(spec: spec)
         let parts = models.map { Part(id: $0.0, name: labels[$0.0] ?? $0.0, reusedPct: $0.1, savedUsd: nil) }
         return UsageCacheSummary(
             product: .provider(spec.key),

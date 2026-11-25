@@ -2,9 +2,9 @@ import SwiftUI
 
 // MARK: - What a provider's plan is worth, computed once
 
-/// The numbers of a provider page's Value section. Reads `value` in the shape of `usage/ANTIGRAVITY-STATE.md`
-/// (Codex's block has the same shape) when the collector writes it, and falls back to the older fields
-/// (`weekOpusUsd`, `monthOpusUsd`, the account's plan price) when it does not.
+/// The numbers of a provider page's value row and its detail panel. Reads `value` in the shape of
+/// `usage/ANTIGRAVITY-STATE.md` (Codex's block has the same shape) when the collector writes it, and falls back
+/// to the older fields (`weekOpusUsd`, `monthOpusUsd`, the account's plan price) when it does not.
 struct UsageProviderWorth {
     enum Content {
         /// Too little data: the collector's reason instead of numbers.
@@ -23,16 +23,23 @@ struct UsageProviderWorth {
 
     let content: Content
     let footnote: String
+    /// The short value of the page's "Plan worth" row: "≈$289/mo · ×15", or "measuring, 1 of 4".
+    let headline: String
+    /// The plan name for the card ("Plus", "Ultra 5x").
+    let planName: String?
 
     private static let weeksPerMonth = 30.44 / 7
 
-    /// Nil when there is nothing to say: no rate yet and no reason from the collector.
-    init?(block: UsageProviderBlock, spec: UsageProviderSpec, now: Date) {
+    /// Nil when there is nothing to say: no rate yet and no reason from the collector. `spend` is the page's
+    /// own spend (built once per page): model names and colors follow its 30-day layer.
+    init?(block: UsageProviderBlock, spec: UsageProviderSpec, spend: UsageProviderSpend) {
         guard block.error == nil else { return nil }
         let worth = block.worth
         self.footnote = Self.footnote(block, spec: spec)
+        self.planName = spec.shortPlan(block.account.planName ?? worth?.planName)
         if let worth, worth.confident == false {
             self.content = .reason(worth.reason ?? "The collector gave no reason.")
+            self.headline = Self.measuring(block)
             return
         }
         let week = worth?.weekUsd ?? block.capacity(.week)
@@ -47,26 +54,24 @@ struct UsageProviderWorth {
             return given ?? usd / price
         }
 
-        // Model colors follow the spend chart of the same page.
-        let spend = UsageProviderSpend(block: block, spec: spec, now: now)[.d30]
+        // Model names and colors follow the spend chart of the same page (its 30-day layer).
+        let spend30 = spend[.d30]
         var colors: [String: Color] = [:]
-        for row in spend.rows {
+        for row in spend30.rows {
             colors[row.id] = row.color.color
         }
-        let ids = (worth?.byModel ?? []).compactMap(\.model)
-        let labels = spec.models.labels(for: ids)
         var ceilings: [(label: String, color: Color, usd: Double, times: Double?)] = []
         for (index, model) in (worth?.byModel ?? []).enumerated() {
             guard let usd = model.monthUsd, usd > 0 else { continue }
             let id = model.model ?? "model-\(index)"
             ceilings.append((
-                model.label ?? labels[id] ?? id,
+                spend.labels[id] ?? id,
                 colors[id] ?? UsagePalette.others,
                 usd,
                 times(usd, given: model.timesPrice)))
         }
-        let realUse = spend.rows.map { ($0.use.usd, $0.color.color) }
-        let realUsd = spend.whole.usd
+        let realUse = spend30.rows.map { ($0.use.usd, $0.color.color) }
+        let realUsd = spend30.whole.usd
         // Real use is drawn against the same scale as the ceilings, so its bar shows how much of the limit
         // this Mac actually used.
         let scale = max(1, month, realUsd, ceilings.map(\.usd).max() ?? 0)
@@ -79,12 +84,27 @@ struct UsageProviderWorth {
                 label: "Real use, 30 days", parts: realUse, scale: scale, times: price.map { realUsd / $0 },
                 usd: realUsd))
         }
+        let multiple = times(month, given: worth?.timesPrice)
         self.content = .numbers(Numbers(
-            planName: worth?.planName ?? block.account.planName,
+            planName: self.planName,
             price: price,
             month: month,
-            times: times(month, given: worth?.timesPrice),
+            times: multiple,
             models: models))
+        self.headline = "≈\(UsageFormat.usd(month))/mo" + (multiple.map { " · \(UsageFormat.times($0))" } ?? "")
+    }
+
+    /// "measuring, 1 of 4": how many measurements the estimate stands on and how many it needs.
+    static func measuring(_ block: UsageProviderBlock) -> String {
+        func count(_ value: Double?) -> Int? {
+            value.flatMap { $0.isFinite && $0 >= 0 ? Int($0.rounded()) : nil }
+        }
+        let seen = count(block.worth?.pairs ?? block.valuePairs)
+        let needed = count(block.calibration?.valuePairsNeeded).flatMap { $0 > 0 ? $0 : nil }
+        if let seen, let needed, seen < needed {
+            return "measuring, \(seen) of \(needed)"
+        }
+        return "measuring"
     }
 
     /// How the dollars of a full limit were measured, in one or two sentences.
@@ -114,60 +134,72 @@ struct UsageProviderWorth {
     }
 }
 
-// MARK: - The section
+// MARK: - The detail panel
 
-/// "What the plan is worth" on a provider page: one `UsageValueBlock`, the same view Claude's Value card
-/// draws per account. Monthly only: one figure is enough on a page that is not about value.
-public struct UsageProviderValueView: View {
+/// The hover panel of a provider page's "Plan worth" row: one `UsageValueBlock`, the same view Claude's Value
+/// card draws per account, then the plan's worth by month with Claude Value's month chart
+/// (`UsageDriftMonthChartView`), one bar per calendar month in the provider's API dollars.
+struct UsageProviderValueView: View {
+    let worth: UsageProviderWorth
     let block: UsageProviderBlock
     let spec: UsageProviderSpec
     let width: CGFloat
-    let now: Date
+    /// The summary's time: the current month counts its days up to here.
+    let until: Date
 
-    public init(block: UsageProviderBlock, spec: UsageProviderSpec, width: CGFloat, now: Date = Date()) {
-        self.block = block
-        self.spec = spec
-        self.width = width
-        self.now = now
-    }
-
-    static func hasContent(_ block: UsageProviderBlock, spec: UsageProviderSpec, now: Date) -> Bool {
-        UsageProviderWorth(block: block, spec: spec, now: now) != nil
-    }
-
-    public var body: some View {
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("What the plan is worth")
-                .font(.system(size: 13, weight: .semibold))
-            if let worth = UsageProviderWorth(block: self.block, spec: self.spec, now: self.now) {
-                switch worth.content {
-                case let .reason(reason):
-                    UsageValueBlock(
-                        color: UsagePalette.single,
-                        name: self.spec.name,
-                        plan: self.spec.shortPlan(self.block.account.planName),
-                        times: nil,
-                        content: .waiting("No estimate yet: too few readings of the weekly limit.", reason: reason))
-                case let .numbers(numbers):
-                    UsageNote(text: "A month of full weekly limits, bought through the API at list prices.")
-                    UsageValueBlock(
-                        color: UsagePalette.single,
-                        name: self.spec.name,
-                        plan: self.spec.shortPlan(numbers.planName),
-                        times: numbers.times,
-                        content: .numbers(UsageValueBlock.Numbers(
-                            paid: numbers.price,
-                            got: numbers.month,
-                            scale: max(1, numbers.month, numbers.price ?? 0),
-                            priceNote: numbers.price == nil ? "Plan price not set, so there is no ×." : nil,
-                            models: numbers.models)))
-                    UsageNote(text: worth.footnote)
-                }
+            UsagePanelTitle(
+                title: "\(self.spec.name) · What the plan is worth",
+                subtitle: "A month of full weekly limits, bought through the API at list prices.")
+            switch self.worth.content {
+            case let .reason(reason):
+                UsageValueBlock(
+                    color: self.spec.tint,
+                    name: self.spec.name,
+                    plan: self.worth.planName,
+                    times: nil,
+                    content: .waiting("No estimate yet: too few readings of the weekly limit.", reason: reason))
+            case let .numbers(numbers):
+                UsageValueBlock(
+                    color: self.spec.tint,
+                    name: self.spec.name,
+                    plan: numbers.planName,
+                    times: numbers.times,
+                    content: .numbers(UsageValueBlock.Numbers(
+                        paid: numbers.price,
+                        got: numbers.month,
+                        scale: max(1, numbers.month, numbers.price ?? 0),
+                        priceNote: numbers.price == nil ? "Plan price not set, so there is no ×." : nil,
+                        models: numbers.models)))
+            }
+            UsageNote(text: self.worth.footnote)
+            if let series = self.monthSeries {
+                Divider()
+                UsageSectionLabel(text: "Is the limit changing? · by month")
+                UsageNote(text: "A bar is a month of full weekly limits at \(self.spec.prices): its average week "
+                    + "× 4.35. Faded: under 2 weeks of it measured.")
+                UsageDriftMonthChartView(series: [series])
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .frame(width: self.width, alignment: .leading)
+    }
+
+    /// The weekly limit's measured worth, week by week (`drift`), spread over calendar months; nil when no
+    /// month has enough measured days.
+    private var monthSeries: UsageDriftMonthSeries? {
+        let points = (self.block.account.drift ?? []).compactMap { item -> UsageDriftPoint? in
+            guard item.usdPer100 > 0 else { return nil }
+            return UsageDriftPoint(
+                account: self.spec.name,
+                color: self.spec.tint,
+                date: Date(timeIntervalSince1970: item.weekEnd),
+                usd: item.usdPer100)
+        }
+        let months = UsageDriftMonths.months(of: points, until: self.until)
+        guard !months.isEmpty else { return nil }
+        return UsageDriftMonthSeries(id: self.spec.key.rawValue, name: self.spec.name, color: self.spec.tint, months: months)
     }
 }

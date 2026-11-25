@@ -285,7 +285,11 @@ struct UsageSpendDayChart: View {
     var offered: [UsageSpendPeriod] = UsageSpendPeriod.allCases
     /// Claude Spend lays out one chart per breakdown: only the shown one may track the mouse.
     var breakdown: UsageSpendBreakdown?
+    /// The plot's height: Claude Spend has a page of its own, a provider page shares one with its limits.
+    var plotHeight: CGFloat = Self.defaultPlotHeight
     @State private var pointedDay: String?
+
+    static let defaultPlotHeight: CGFloat = 104
     @Environment(\.usagePreviewHoveredDay) private var previewDay
 
     private var hoveredDay: String? {
@@ -297,7 +301,7 @@ struct UsageSpendDayChart: View {
             self.caption
             if self.data.bars.isEmpty {
                 UsageNote(text: self.data.emptyText)
-                    .frame(height: 104, alignment: .topLeading)
+                    .frame(height: self.plotHeight, alignment: .topLeading)
             } else {
                 self.chart
             }
@@ -384,7 +388,7 @@ struct UsageSpendDayChart: View {
                 }
             }
         }
-        .frame(height: 104)
+        .frame(height: self.plotHeight)
         .padding(.trailing, 22)
     }
 

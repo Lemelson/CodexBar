@@ -509,7 +509,8 @@ public struct UsageLimitCardFactRow: View {
                 Text(caption)
                     .font(.system(size: 9.5))
                     .foregroundStyle(UsageInk.secondary(self.highlighted))
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 18)
             }
         }

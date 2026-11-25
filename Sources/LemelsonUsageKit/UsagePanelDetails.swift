@@ -85,8 +85,10 @@ public struct UsageLimitDetailPanelView: View {
 
     public var body: some View {
         let segments = self.sources == .split ? UsageSegment.build(for: self.window, kind: self.kind) : []
-        let pace = UsagePace.make(window: self.window, kind: self.kind, now: self.now)
+        let pace = UsageLimitPace.make(window: self.window, kind: self.kind, now: self.now)
         let forecast = self.window.liveForecast(now: self.now)
+        // The row's verdict: the panel's forecast says the same thing in more words, in the same colour.
+        let verdict = UsageLimitVerdict(window: self.window, now: self.now)
         let title = self.title ?? self.kind.longTitle
         VStack(alignment: .leading, spacing: 10) {
             UsagePanelTitle(title: "\(self.account.displayName) · \(title)", subtitle: self.subtitle)
@@ -106,10 +108,10 @@ public struct UsageLimitDetailPanelView: View {
                 }
                 UsageFlowLayout(spacing: 12) {
                     if self.sources == .split {
-                        UsageChip(color: .primary, text: "Used, all sources", dashed: true)
+                        UsageChip(color: .primary, text: "Used, all sources", line: true)
                         UsageChip(color: UsagePalette.you, text: "You")
                     } else {
-                        UsageChip(color: .primary, text: "Used", dashed: true)
+                        UsageChip(color: .primary, text: "Used", line: true)
                     }
                     UsageChip(color: .secondary, text: "Even pace", dashed: true)
                     if forecast != nil {
@@ -138,10 +140,9 @@ public struct UsageLimitDetailPanelView: View {
                 UsageSectionLabel(text: "Pace")
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     // The same "T" as on the row's bar, in the same colour.
-                    UsageTimeMarkGlyph(color: UsageLimitTimeMark.make(window: self.window, kind: self.kind, now: self.now)?
-                        .color ?? pace.color)
+                    UsageTimeMarkGlyph(color: pace.color)
                         .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
-                    Text(self.paceExplanation(pace, hasForecast: forecast != nil))
+                    Text(self.paceExplanation(pace))
                         .font(.system(size: 11))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -151,9 +152,9 @@ public struct UsageLimitDetailPanelView: View {
                 UsageSectionLabel(text: "Forecast")
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(forecast.hitAt == nil ? UsagePalette.paceGood : UsagePalette.paceBad)
+                        .fill(verdict.color)
                         .frame(width: 2, height: 10)
-                    Text(self.forecastText(forecast, resetsAt: resetsAt))
+                    Text(self.forecastText(forecast, verdict: verdict, resetsAt: resetsAt))
                         .font(.system(size: 11))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -172,6 +173,11 @@ public struct UsageLimitDetailPanelView: View {
                 Text(sessionsNote)
                     .font(.system(size: 11))
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if self.sources == .single, self.kind == .week, !(self.account.weeks ?? []).isEmpty {
+                // Claude shows the weeks in Spend's account panel; a provider page has no such panel.
+                Divider()
+                UsageWeekWindows(account: self.account, now: self.now)
             }
             Divider()
             VStack(alignment: .leading, spacing: 3) {
@@ -213,9 +219,14 @@ public struct UsageLimitDetailPanelView: View {
             : UsageFormat.weekdayTime(time)
     }
 
-    /// Key for planning: when the limit runs out and how long to wait for the reset after that.
-    private func forecastText(_ forecast: UsagePanelState.Forecast, resetsAt: Double) -> String {
-        if let hit = forecast.hitAt {
+    /// Key for planning: when the limit runs out and how long to wait for the reset after that. Worded after
+    /// the row's verdict, so "May run out" on the row is never "Lasts until the reset" here.
+    private func forecastText(
+        _ forecast: UsagePanelState.Forecast,
+        verdict: UsageLimitVerdict,
+        resetsAt: Double) -> String
+    {
+        if let hit = forecast.hitAt, hit < resetsAt {
             let gap = UsageFormat.duration(max(0, resetsAt - hit))
             var text = "Likely runs out around \(self.stamp(hit)), \(gap) before the reset: "
                 + "about \(gap) without this limit."
@@ -229,12 +240,17 @@ public struct UsageLimitDetailPanelView: View {
             return text
         }
         let end = UsageFormat.percent(forecast.endPct ?? self.used)
-        if let early = forecast.hitEarly {
-            return "Likely lasts until the reset, ending near \(end). If you push harder than usual it could "
-                + "run out around \(self.stamp(early)), \(UsageFormat.duration(max(0, resetsAt - early))) early."
-        }
         let low = UsageFormat.percent(forecast.endLo ?? self.used)
         let high = UsageFormat.percent(forecast.endHi ?? self.used)
+        if let early = forecast.hitEarly, early < resetsAt {
+            return "May run out: likely lasts until the reset, ending near \(end), but if you push harder than "
+                + "usual it could run out around \(self.stamp(early)), "
+                + "\(UsageFormat.duration(max(0, resetsAt - early))) early."
+        }
+        if verdict == .mayRunOut {
+            return "May run out: likely ends near \(end), but the likely range (\(low)–\(high)) reaches the limit "
+                + "before the reset."
+        }
         return "Lasts until the reset. Expected to end near \(end) (likely \(low)–\(high))."
     }
 
@@ -321,22 +337,17 @@ public struct UsageLimitDetailPanelView: View {
         }
     }
 
-    private func paceExplanation(_ pace: UsagePace, hasForecast: Bool) -> String {
+    /// The reserve or deficit only: when the limit runs out is the Forecast section's (or, without a
+    /// forecast, nobody's: the row then says "No forecast" too).
+    private func paceExplanation(_ pace: UsageLimitPace) -> String {
         if pace.isStale {
             // An account that is not being polled: the mark is drawn from its last reading.
             let age = self.window.measuredAt.map { " (\(UsageFormat.age($0, now: self.now)))" } ?? ""
             return "\(pace.headline). Even use would be at \(UsageFormat.percent(pace.expected)) by now; "
                 + "the last reading\(age) was \(UsageFormat.percent(self.used))."
         }
-        let even = "Even use would be at \(UsageFormat.percent(pace.expected)) by now; you are at "
+        return "\(pace.headline). Even use would be at \(UsageFormat.percent(pace.expected)) by now; you are at "
             + "\(UsageFormat.percent(self.used))."
-        if hasForecast {
-            return "\(pace.headline). \(even)"
-        }
-        if pace.lastsToReset {
-            return "\(pace.headline). \(even) At this rate the limit lasts until it resets."
-        }
-        return "\(pace.headline). \(even) At this rate it \(pace.tail)."
     }
 
     private var facts: [String] {
@@ -383,11 +394,20 @@ public struct UsageLimitDetailPanelView: View {
         var facts: [String] = []
         // After a reset the last reading and its dollars belong to the previous window.
         let rolled = self.window.rolled == true
-        if !rolled, let usd = self.window.usd, usd.total >= 0.005 {
-            facts.append("Your use in this window ≈ \(UsageFormat.usdFine(usd.total)) at API prices.")
+        let spent = rolled ? nil : self.window.usd.map(\.total).flatMap { $0 >= 0.005 ? $0 : nil }
+        if let spent {
+            facts.append("Your use in this window ≈ \(UsageFormat.usdFine(spent)) at API prices.")
         }
         if let capacity = self.account.rates?[self.kind.rawValue]?.usdPer100, capacity > 0 {
-            facts.append("100% of this limit ≈ \(UsageFormat.usd(capacity)) at API prices.")
+            // The rate comes from past windows. When this window's own dollars per percent differ a lot, both
+            // are named, so "$12 at 89%" next to "100% ≈ $9.3" is not left unexplained.
+            let own = spent.flatMap { self.used >= 10 ? $0 / self.used * 100 : nil }
+            if let own, abs(own - capacity) / capacity > 0.3 {
+                facts.append("100% of this limit ≈ \(UsageFormat.usd(capacity)) at API prices, measured on past "
+                    + "windows; this window works out to ≈ \(UsageFormat.usd(own)).")
+            } else {
+                facts.append("100% of this limit ≈ \(UsageFormat.usd(capacity)) at API prices.")
+            }
         }
         if let measuredAt = self.window.measuredAt {
             let when = "\(UsageFormat.stamp(measuredAt, now: self.now)) (\(UsageFormat.age(measuredAt, now: self.now)))"

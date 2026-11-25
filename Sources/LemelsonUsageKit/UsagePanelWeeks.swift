@@ -38,14 +38,18 @@ struct UsageWeekLimit: Equatable {
     let others: Double?
     /// The limit was reset inside the window at this time: `used`, `mine` and `others` count from it.
     let resetAt: Double?
+    /// `.single` (provider pages): one quota with no split by source, so no "you" and "others".
+    let sources: UsageLimitSources
 
     init(
         week: UsagePanelState.Week,
         window: UsagePanelState.Window?,
         capacity: Double?,
         fableWeight: Double,
-        now: Date)
+        now: Date,
+        sources: UsageLimitSources = .split)
     {
+        self.sources = sources
         let split = week.split
         func weight(_ family: UsageModelFamily) -> Double {
             family == .fable ? fableWeight : 1
@@ -70,6 +74,10 @@ struct UsageWeekLimit: Equatable {
             reading = week.peakFinal == true || peak >= 99.5 ? .final : .atLeast
         } else {
             reading = .none
+        }
+        if sources == .single {
+            mine = nil
+            others = nil
         }
         // This Mac's part is an estimate through the dollar rate; it can come out above the reading.
         // An early peak is then the weaker number, a live or late one the stronger.
@@ -113,6 +121,9 @@ struct UsageWeekLimit: Equatable {
 
     /// The bar: this Mac by model, then everyone else in gray; the rest of the track is what was left.
     var barParts: [(Double, Color)] {
+        if self.sources == .single {
+            return [(self.used ?? 0, UsagePalette.single)]
+        }
         guard self.mine != nil else { return [(self.used ?? 0, UsagePalette.others)] }
         return self.mineByModel.map { ($0.pct, $0.family.color) } + [(self.others ?? 0, UsagePalette.others)]
     }
@@ -140,6 +151,14 @@ struct UsageWeekLimit: Equatable {
     /// ": you ≈34%, others ≈17% · 49% left", ", all yours", " · your part needs a rate". After a reset the
     /// headline is longer and what was left goes: the empty part of the bar shows it.
     var tail: String {
+        if self.sources == .single {
+            guard let used = self.used, self.resetAt == nil else { return "" }
+            switch self.reading {
+            case .live: return " · \(UsageFormat.percent(max(0, 100 - used))) left"
+            case .final where used < 99.5: return " · \(UsageFormat.percent(max(0, 100 - used))) unused"
+            default: return ""
+            }
+        }
         guard let mine else {
             return self.used == nil ? "" : " · your part needs a rate"
         }
@@ -249,40 +268,7 @@ struct UsageSpendWeekList: View {
     }
 
     private func weekRow(_ week: UsagePanelState.Week, selected: Bool) -> some View {
-        let split = week.split
-        let limit = self.limits[week.id]
-        return VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(UsageFormat.dayRange(week.start, week.end))
-                    .font(.system(size: 11, weight: .medium))
-                if week.current == true {
-                    Text("now")
-                        .font(.system(size: 9.5, weight: .semibold))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(UsagePalette.you.opacity(0.22), in: Capsule())
-                }
-                Spacer(minLength: 6)
-                Text("\(UsageFormat.usd(split.total.usd)) · \(UsageFormat.tokens(split.total.tokens))")
-                    .font(.system(size: 11, weight: .semibold))
-                    .monospacedDigit()
-            }
-            if let limit {
-                UsageSplitBar(parts: limit.barParts, scale: 100)
-                (Text(limit.headline).foregroundStyle(.primary) + Text(limit.tail))
-                    .font(.system(size: 10.5))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-            }
-        }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 4)
-        .background(
-            Color.primary.opacity(selected ? 0.08 : 0),
-            in: RoundedRectangle(cornerRadius: 5))
-        .padding(.horizontal, -6)
+        UsageWeekRow(week: week, limit: self.limits[week.id], selected: selected)
     }
 
     /// The selected week's models: tokens, dollars and the part of the weekly limit each took. The same rows
@@ -358,5 +344,82 @@ struct UsageSpendWeekList: View {
             }
         }
         .lineLimit(1)
+    }
+}
+
+// MARK: - One week as a row
+
+/// "Nov 18 – Nov 25  now   $24 · 129M", the week's bar against its limit and "Now 27% used · 73% left": a
+/// row of Claude Spend's account panel and of a provider's weekly limit panel.
+struct UsageWeekRow: View {
+    let week: UsagePanelState.Week
+    let limit: UsageWeekLimit?
+    var selected = false
+
+    var body: some View {
+        let split = self.week.split
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(UsageFormat.dayRange(self.week.start, self.week.end))
+                    .font(.system(size: 11, weight: .medium))
+                if self.week.current == true {
+                    Text("now")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(UsagePalette.you.opacity(0.22), in: Capsule())
+                }
+                Spacer(minLength: 6)
+                Text("\(UsageFormat.usd(split.total.usd)) · \(UsageFormat.tokens(split.total.tokens))")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+            }
+            if let limit {
+                UsageSplitBar(parts: limit.barParts, scale: 100)
+                (Text(limit.headline).foregroundStyle(.primary) + Text(limit.tail))
+                    .font(.system(size: 10.5))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            Color.primary.opacity(self.selected ? 0.08 : 0),
+            in: RoundedRectangle(cornerRadius: 5))
+        .padding(.horizontal, -6)
+    }
+}
+
+// MARK: - A provider's weekly windows
+
+/// The last few weekly windows of a single-quota account (Antigravity, Codex), newest first, drawn with the
+/// rows of Claude Spend's account panel: how far each week went and what it cost on this Mac.
+struct UsageWeekWindows: View {
+    let account: UsagePanelState.Account
+    let now: Date
+    /// Rows at most: the panel sits beside the menu and must not outgrow the screen.
+    var limit = 4
+
+    var body: some View {
+        let weeks = Array((self.account.weeks ?? []).sorted { $0.end > $1.end }.prefix(self.limit))
+        if !weeks.isEmpty {
+            let window = self.account.window(.week)
+            VStack(alignment: .leading, spacing: 4) {
+                UsageSectionLabel(text: "Weekly windows")
+                VStack(spacing: 1) {
+                    ForEach(weeks) { week in
+                        UsageWeekRow(
+                            week: week,
+                            limit: UsageWeekLimit(
+                                week: week, window: window, capacity: nil, fableWeight: 1, now: self.now,
+                                sources: .single))
+                    }
+                }
+                UsageNote(text: "Dollars are this Mac's use at API prices; the bar is the week's highest reading.")
+            }
+        }
     }
 }

@@ -15,7 +15,7 @@ import SwiftUI
 ///   under two weeks it is preliminary and drawn faded with a solid top edge.
 struct UsageDriftMonth: Identifiable, Equatable {
     let account: String
-    let colorIndex: Int
+    let color: Color
     /// "2026-09": the x value of the chart.
     let key: String
     /// The first moment of the month.
@@ -77,7 +77,7 @@ enum UsageDriftMonths {
             let ofDays = (current ? until.timeIntervalSince(month.start) : month.duration) / day
             return UsageDriftMonth(
                 account: first.account,
-                colorIndex: first.colorIndex,
+                color: first.color,
                 key: UsageFormat.format(start, "yyyy-MM"),
                 start: start,
                 usd: sum.usd / sum.seconds * Self.weeksPerMonth,
@@ -91,7 +91,7 @@ enum UsageDriftMonths {
 struct UsageDriftMonthSeries: Identifiable {
     let id: String
     let name: String
-    let colorIndex: Int
+    let color: Color
     let months: [UsageDriftMonth]
     /// The account has weeks in the chosen unit (it may still have no month with enough of them).
     var hasWeeks = true
@@ -129,7 +129,7 @@ struct UsageDriftMonthChartView: View {
             self.readout(hovered)
             VStack(spacing: 4) {
                 ForEach(self.series) { series in
-                    UsageDriftLegendRow(name: series.name, colorIndex: series.colorIndex) {
+                    UsageDriftLegendRow(name: series.name, color: series.color) {
                         self.legendValue(series, hovered: hovered)
                     }
                 }
@@ -201,7 +201,7 @@ struct UsageDriftMonthChartView: View {
         let edge = (bars.map(\.usd).max() ?? 0) * 0.02
         return Chart {
             ForEach(bars) { month in
-                let color = UsagePalette.account(month.colorIndex)
+                let color = month.color
                 BarMark(
                     x: .value("Month", month.key),
                     y: .value("Dollars", month.usd),
@@ -288,13 +288,13 @@ struct UsageDriftMonthChartView: View {
 /// An account row under a limit chart: swatch, name, and a value that the chart fills in.
 struct UsageDriftLegendRow<Value: View>: View {
     let name: String
-    let colorIndex: Int
+    let color: Color
     @ViewBuilder let value: () -> Value
 
     var body: some View {
         HStack(spacing: 6) {
             RoundedRectangle(cornerRadius: 2)
-                .fill(UsagePalette.account(self.colorIndex))
+                .fill(self.color)
                 .frame(width: 8, height: 8)
             Text(self.name)
                 .font(.system(size: 11, weight: .medium))

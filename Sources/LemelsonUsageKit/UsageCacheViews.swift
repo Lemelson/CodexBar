@@ -5,7 +5,7 @@ import SwiftUI
 // and the detail panel it opens, with one picture (a bar split into "reused" and "paid in full").
 
 enum UsageCacheColors {
-    /// Text the model had already seen: billed at about a tenth.
+    /// Text the model had already seen: billed at a small fraction (a tenth for Claude, less for some models).
     static let reused = UsagePalette.paceGood
     /// Text sent as new: billed at the full input price. Red-orange next to the green: the two differ in hue
     /// and in brightness, so they stay apart on a warm screen.
@@ -15,11 +15,14 @@ enum UsageCacheColors {
 // MARK: - Menu row
 
 /// A plain menu item in size and type, for the menu's footer area next to "Status Page": title on the left,
-/// the share reused on the right, a submenu chevron. Measured against the native rows on a 2x screenshot:
-/// the rows of this menu have no icons, their text starts 16.5 pt from the menu's edge, and the submenu
-/// chevron is a label-coloured 13 pt glyph whose right edge sits 21 pt from the edge.
-public struct UsageCacheRowView: View {
-    let summary: UsageCacheSummary
+/// a short value on the right, a submenu chevron; hovering opens its detail panel. The page rows that keep
+/// their details one hover away all use it: "Prompt cache   94% reused", "Plan worth   ≈$289/mo · ×15".
+/// Measured against the native rows on a 2x screenshot: the rows of this menu have no icons, their text
+/// starts 16.5 pt from the menu's edge, and the submenu chevron is a label-coloured 13 pt glyph whose right
+/// edge sits 21 pt from the edge.
+public struct UsagePageLineRow: View {
+    let title: String
+    let value: String
     let width: CGFloat
     @Environment(\.usageRowHighlighted) private var highlighted
 
@@ -31,20 +34,22 @@ public struct UsageCacheRowView: View {
     /// From the right edge to the chevron's right edge.
     static let chevronInset: CGFloat = 21
 
-    public init(summary: UsageCacheSummary, width: CGFloat) {
-        self.summary = summary
+    public init(title: String, value: String, width: CGFloat) {
+        self.title = title
+        self.value = value
         self.width = width
     }
 
     public var body: some View {
         let font = Font.system(size: NSFont.menuFont(ofSize: 0).pointSize)
         HStack(spacing: 0) {
-            Text("Prompt cache")
+            Text(self.title)
                 .font(font)
                 .foregroundStyle(UsageInk.primary(self.highlighted))
                 .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: 8)
-            Text("\(UsageFormat.percent(self.summary.main.reusedPct)) reused")
+            Text(self.value)
                 .font(font)
                 .monospacedDigit()
                 .foregroundStyle(UsageInk.secondary(self.highlighted))
@@ -70,6 +75,28 @@ public struct UsageCacheRowView: View {
     }
 }
 
+/// "Prompt cache   94% reused".
+public struct UsageCacheRowView: View {
+    let summary: UsageCacheSummary
+    let width: CGFloat
+
+    public static let rowHeight = UsagePageLineRow.rowHeight
+    public static let height = UsagePageLineRow.height
+    public static let textInset = UsagePageLineRow.textInset
+
+    public init(summary: UsageCacheSummary, width: CGFloat) {
+        self.summary = summary
+        self.width = width
+    }
+
+    public var body: some View {
+        UsagePageLineRow(
+            title: "Prompt cache",
+            value: "\(UsageFormat.split(self.summary.main.reusedPct).part) reused",
+            width: self.width)
+    }
+}
+
 // MARK: - Detail panel
 
 /// What the cache is, in one picture and two sentences, then the same over time and per account or model.
@@ -91,7 +118,7 @@ public struct UsageCachePanelView: View {
                 title: "\(self.summary.productName) · Prompt cache",
                 subtitle: main.id == "today" ? "Today" : "Last \(main.title)")
             Text("Every message sends the whole chat again. Text the model saw a moment ago is reused "
-                + "at about a tenth of the price; the rest is paid in full.")
+                + "at a small fraction of the price; the rest is paid in full.")
                 .font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
             UsageCachePicture(span: main)
@@ -148,21 +175,22 @@ struct UsageCachePicture: View {
 
     var body: some View {
         let reused = self.span.reusedPct
-        let paid = max(0, 100 - reused)
+        // The two shares are rounded together, so they always add up to 100.
+        let shown = UsageFormat.split(reused)
         VStack(alignment: .leading, spacing: 6) {
             UsageCacheBar(reusedPct: reused, height: 12)
             HStack(alignment: .top) {
                 self.legend(
                     color: UsageCacheColors.reused,
                     title: "Reused",
-                    percent: reused,
+                    percent: shown.part,
                     money: self.span.savedUsd.map { "saved ≈ \(UsageFormat.usd($0))" },
                     alignment: .leading)
                 Spacer(minLength: 8)
                 self.legend(
                     color: UsageCacheColors.paidInFull,
                     title: "Paid in full",
-                    percent: paid,
+                    percent: shown.rest,
                     money: self.span.missUsd.map { "cost ≈ \(UsageFormat.usd($0)) extra" },
                     alignment: .trailing)
             }
@@ -172,7 +200,7 @@ struct UsageCachePicture: View {
     private func legend(
         color: Color,
         title: String,
-        percent: Double,
+        percent: String,
         money: String?,
         alignment: HorizontalAlignment) -> some View
     {
@@ -183,7 +211,7 @@ struct UsageCachePicture: View {
                     .frame(width: 8, height: 8)
                 Text(title)
                     .font(.system(size: 11))
-                Text(UsageFormat.percent(percent))
+                Text(percent)
                     .font(.system(size: 11, weight: .semibold))
                     .monospacedDigit()
             }
@@ -250,10 +278,9 @@ struct UsageCacheLine: View {
             Text(self.label)
                 .font(.system(size: 11))
                 .lineLimit(1)
-                .minimumScaleFactor(0.85)
-                .frame(width: 76, alignment: .leading)
+                .frame(width: 80, alignment: .leading)
             UsageCacheBar(reusedPct: self.reusedPct, height: 6)
-            Text(UsageFormat.percent(self.reusedPct))
+            Text(UsageFormat.split(self.reusedPct).part)
                 .font(.system(size: 11, weight: .semibold))
                 .monospacedDigit()
                 .frame(width: 32, alignment: .trailing)

@@ -36,6 +36,20 @@ public enum UsageFormat {
         return "\(Int(value.rounded()))%"
     }
 
+    /// A share and the rest of 100, rounded together so the two always add up to 100: 93.5 → "94%" and "6%"
+    /// (each rounded alone they read 94% + 7%). A side under half a percent reads "<1%" and the other ">99%".
+    public static func split(_ part: Double) -> (part: String, rest: String) {
+        let value = min(100, max(0, part.isFinite ? part : 0))
+        if value > 0, value < 0.5 {
+            return ("<1%", ">99%")
+        }
+        if value < 100, value > 99.5 {
+            return (">99%", "<1%")
+        }
+        let rounded = Int(value.rounded())
+        return ("\(rounded)%", "\(100 - rounded)%")
+    }
+
     public static func times(_ value: Double) -> String {
         "×\(Int(value.rounded()))"
     }

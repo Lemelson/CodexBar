@@ -22,12 +22,23 @@ public enum UsageCodexFacts {
         var extras: [UsageProviderPage.Extra] = []
         if let creditsLeft, creditsLeft.isFinite {
             let note = creditsNote?.trimmingCharacters(in: .whitespacesAndNewlines)
-            extras.append(.init(fact: UsageLimitCardFact(
-                id: "credits",
-                symbol: "creditcard",
-                title: "Credits",
-                value: "\(self.credits(creditsLeft)) left",
-                caption: note?.isEmpty == false ? note : nil)))
+            var lines = [UsageLimitCardFactDetail.Line(label: "Balance", value: self.exact(creditsLeft) + " credits")]
+            if let note, !note.isEmpty {
+                lines.append(.init(label: "Note", value: note))
+            }
+            extras.append(.init(
+                fact: UsageLimitCardFact(
+                    id: "credits",
+                    symbol: "creditcard",
+                    title: "Credits",
+                    value: "\(self.credits(creditsLeft)) left"),
+                detail: { [lines] in
+                    AnyView(UsageLimitCardFactDetail(
+                        title: "Credits",
+                        text: "Credits pay for Codex use past your plan's limits; OpenAI takes them only then.",
+                        lines: lines,
+                        width: detailWidth))
+                }))
         }
         if let resetCredits, !resetCredits.isEmpty {
             let next = resetCredits.compactMap(\.self).min()
@@ -57,6 +68,14 @@ public enum UsageCodexFacts {
                 }))
         }
         return extras
+    }
+
+    /// "58,169.35": the balance with its cents, for the detail.
+    static func exact(_ value: Double) -> String {
+        let cents = Int((max(0, value) * 100).rounded())
+        let whole = cents / 100
+        let wholeText = whole >= 100 ? self.credits(Double(whole)) : String(whole)
+        return wholeText + String(format: ".%02d", cents % 100)
     }
 
     /// "58,169": whole credits with thousands separators; below 100 one decimal ("12.5").
@@ -111,9 +130,10 @@ public struct UsageLimitCardFactDetail: View {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(line.label)
                             .foregroundStyle(.secondary)
-                            .frame(width: 16, alignment: .trailing)
+                            .frame(minWidth: 16, alignment: .trailing)
                         Text(line.value)
                             .monospacedDigit()
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .font(.system(size: 11))
                 }

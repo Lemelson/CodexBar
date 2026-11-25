@@ -7,10 +7,13 @@ import Foundation
 // reading the app gets is appended here, and the collector imports it.
 //
 //   {"ts": 1795424947, "source": "codexbar-live", "windows": {"5h": {"pct": 1.0, "resetsAt": 1795439520}, …},
-//    "plan": "…"}
+//    "plan": "…", "account": "codex:v1:provider-account:…"}
 //
 // "plan" is the plan or tier name exactly as the app fetched it with that reading; the key is left out when
-// the fetch did not name one.
+// the fetch did not name one. "account" is the account the reading belongs to: the key CodexBar files that
+// account's history under (`preferredAccountKey` in `history/<provider>.json`; for Codex
+// `CodexHistoryOwnership.canonicalKey`), never an e-mail; left out while CodexBar has no key for it. A line
+// of another account than the last one is written at once, so the collector can keep the accounts apart.
 //
 // A line goes in only when a value changed or ten minutes passed since the last line. Each line is
 // written under the shared lock file (open, lock, append in one write, close, unlock), so the collector's
@@ -41,17 +44,21 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
     /// The plan or tier name the fetch gave, as is; nil when it named none. Not a value of the reading: a line
     /// is not written only because it changed.
     public var plan: String?
+    /// The account the reading belongs to (see the file comment); nil when unknown.
+    public var account: String?
 
-    public init(ts: Int, fiveHour: Window?, week: Window?, plan: String? = nil) {
+    public init(ts: Int, fiveHour: Window?, week: Window?, plan: String? = nil, account: String? = nil) {
         self.ts = ts
         self.fiveHour = fiveHour.map(Self.normalized)
         self.week = week.map(Self.normalized)
         let trimmed = plan?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.plan = trimmed?.isEmpty == false ? trimmed : nil
+        let key = account?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.account = key?.isEmpty == false ? key : nil
     }
 
-    public init(at date: Date, fiveHour: Window?, week: Window?, plan: String? = nil) {
-        self.init(ts: Int(date.timeIntervalSince1970), fiveHour: fiveHour, week: week, plan: plan)
+    public init(at date: Date, fiveHour: Window?, week: Window?, plan: String? = nil, account: String? = nil) {
+        self.init(ts: Int(date.timeIntervalSince1970), fiveHour: fiveHour, week: week, plan: plan, account: account)
     }
 
     /// Clamped to 0–100 and rounded to hundredths: the fetch gives values like 59.199999999999996.
@@ -68,7 +75,7 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
     /// from one reading to the next).
     public static let resetTolerance = 60
 
-    /// Same windows, same percentages and the same reset times (within `resetTolerance`).
+    /// Same account, same windows, same percentages and the same reset times (within `resetTolerance`).
     public func hasSameValues(as other: UsageQuotaLiveReading) -> Bool {
         func same(_ lhs: Window?, _ rhs: Window?) -> Bool {
             switch (lhs, rhs) {
@@ -85,7 +92,7 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
                 return false
             }
         }
-        return same(self.fiveHour, other.fiveHour) && same(self.week, other.week)
+        return self.account == other.account && same(self.fiveHour, other.fiveHour) && same(self.week, other.week)
     }
 
     /// The line as written, `\n` included.
@@ -100,8 +107,9 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
         }
         let windows = [window("5h", self.fiveHour), window("7d", self.week)].compactMap(\.self)
         let plan = self.plan.map { ", \"plan\": \(Self.jsonString($0))" } ?? ""
+        let account = self.account.map { ", \"account\": \(Self.jsonString($0))" } ?? ""
         let body = "\"ts\": \(self.ts), \"source\": \"codexbar-live\", \"windows\": {\(windows.joined(separator: ", "))}"
-        return "{\(body)\(plan)}\n"
+        return "{\(body)\(plan)\(account)}\n"
     }
 
     /// A JSON string literal, quotes included (one line: control characters are escaped).
@@ -125,7 +133,9 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
             else { return nil }
             return Window(pct: pct, resetsAt: (raw["resetsAt"] as? NSNumber)?.intValue)
         }
-        self.init(ts: ts, fiveHour: window("5h"), week: window("7d"), plan: object["plan"] as? String)
+        self.init(
+            ts: ts, fiveHour: window("5h"), week: window("7d"), plan: object["plan"] as? String,
+            account: object["account"] as? String)
     }
 }
 

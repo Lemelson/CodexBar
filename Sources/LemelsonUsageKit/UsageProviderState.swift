@@ -145,23 +145,29 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
     public struct Calibration: Decodable, Sendable, Equatable {
         public var sessionIntervals: Double?
         public var sessionPairsNeeded: Double?
+        /// How many measured stretches the value needs before the collector calls it confident.
+        public var valuePairsNeeded: Double?
 
         public init(from decoder: Decoder) throws {
             let keys = try? decoder.container(keyedBy: Key.self)
             self.sessionIntervals = keys?.lenient(Double.self, .sessionIntervals)
-            self.sessionPairsNeeded = keys?.lenient(Thresholds.self, .thresholds)?.sessionPairs
+            let thresholds = keys?.lenient(Thresholds.self, .thresholds)
+            self.sessionPairsNeeded = thresholds?.sessionPairs
+            self.valuePairsNeeded = thresholds?.confidentStretches
         }
 
         private struct Thresholds: Decodable {
             var sessionPairs: Double?
+            var confidentStretches: Double?
 
             init(from decoder: Decoder) throws {
                 let keys = try? decoder.container(keyedBy: Key.self)
                 self.sessionPairs = keys?.lenient(Double.self, .sessionPairs)
+                self.confidentStretches = keys?.lenient(Double.self, .confidentStretches)
             }
 
             enum Key: String, CodingKey {
-                case sessionPairs
+                case sessionPairs, confidentStretches
             }
         }
 
@@ -206,6 +212,9 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
         public var lastSampleAt: Double?
         public var ageSec: Double?
         public var cadence: String?
+        /// The CodexBar account whose quota readings the block holds (the key CodexBar files that account's
+        /// history under, and the `account` of the live lines); nil in older summaries.
+        public var accountKey: String?
 
         public init(from decoder: Decoder) throws {
             let keys = try? decoder.container(keyedBy: Key.self)
@@ -213,10 +222,12 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
             self.lastSampleAt = keys?.lenient(Double.self, .lastSampleAt)
             self.ageSec = keys?.lenient(Double.self, .ageSec)
             self.cadence = keys?.lenient(String.self, .cadence)
+            let key = keys?.lenient(String.self, .accountKey) ?? keys?.lenient(String.self, .account)
+            self.accountKey = key?.isEmpty == false ? key : nil
         }
 
         enum Key: String, CodingKey {
-            case app, lastSampleAt, ageSec, cadence
+            case app, lastSampleAt, ageSec, cadence, accountKey, account
         }
     }
 
@@ -376,6 +387,21 @@ extension UsageProviderBlock {
         return self.account.rates?[kind.rawValue]?.usdPer100.flatMap { $0 > 0 ? $0 : nil }
     }
 
+    /// The display name of every model id the block names anywhere (daily spend, weeks, the 30-day models,
+    /// the value per model). Spend, Value and Prompt cache all read names from here, so one model has one
+    /// name on the whole page: the version stays only where two models of the history share a name.
+    public func modelLabels(spec: UsageProviderSpec) -> [String: String] {
+        var ids = Set(self.models.keys)
+        for day in self.account.daily ?? [] {
+            ids.formUnion((day.m ?? [:]).keys)
+        }
+        for week in self.account.weeks ?? [] {
+            ids.formUnion((week.m ?? [:]).keys)
+        }
+        ids.formUnion((self.worth?.byModel ?? []).compactMap(\.model))
+        return spec.models.labels(for: ids.sorted())
+    }
+
     /// Whether anything at all was recorded: quota readings or spend.
     public var hasData: Bool {
         !self.limitWindows.isEmpty || (self.account.daily ?? []).contains { $0.total > 0 || ($0.tokens ?? 0) > 0 }
@@ -423,7 +449,16 @@ public enum UsageModelNaming: Sendable, Equatable {
         return labels
     }
 
+    /// Ids whose generic reading would be long or misleading.
+    private static let aliases: [String: String] = [
+        // Codex's own reviewer: "Codex Auto Review" did not fit a model column.
+        "codex-auto-review": "Auto Review",
+    ]
+
     private func parse(_ id: String) -> (name: String, version: String?) {
+        if let alias = Self.aliases[id.lowercased()] {
+            return (alias, nil)
+        }
         var parts = id.lowercased().split(separator: "-").map(String.init)
         let family = self == .gemini ? "gemini" : "gpt"
         if parts.first == family {
@@ -465,8 +500,24 @@ public struct UsageProviderSpend: Sendable, Equatable {
         let chart: UsageDayChartData
         let rows: [ModelRow]
         let whole: UsageModelUse
-        /// What "Other" consists of in this period, or nil when every model has its own row.
-        let otherNote: String?
+        /// What "Other" consists of in this period, biggest first ("Astra $4,738", "Auto Review no price");
+        /// empty when every model has its own row. The view shows as many as fit on one line.
+        let otherMembers: [String]
+        /// No model inside "Other" had use in this period: the members are only named.
+        let otherIsEmpty: Bool
+
+        /// The note under the rows with the first `count` members named and the rest counted:
+        /// "Other: Astra $4,738, Sol 5.6 $1,942 and 4 more." Nil without an "Other" row.
+        func otherNote(naming count: Int) -> String? {
+            guard !self.otherMembers.isEmpty else { return nil }
+            let named = self.otherMembers.prefix(max(0, count))
+            let rest = self.otherMembers.count - named.count
+            var text = "Other: " + named.joined(separator: ", ")
+            if rest > 0 {
+                text += named.isEmpty ? "\(rest) models" : " and \(rest) more"
+            }
+            return text + (self.otherIsEmpty ? " (none in this period)." : ".")
+        }
     }
 
     public let today: UsageModelUse
@@ -476,6 +527,8 @@ public struct UsageProviderSpend: Sendable, Equatable {
     public let offered: [UsageSpendPeriod]
     /// Some day of the history has spend or tokens.
     public let hasSpend: Bool
+    /// Display name of every model id the block names, by `UsageProviderBlock.modelLabels(spec:)`.
+    public let labels: [String: String]
     private let periods: [Period]
 
     /// Named model rows; with more models than this plus one, the rest share an "Other" row.
@@ -512,27 +565,16 @@ public struct UsageProviderSpend: Sendable, Equatable {
         self.week = whole(sum(lastDays: 7))
         self.hasSpend = perDay.contains { $0.uses.values.contains { $0.usd > 0 || $0.tokens > 0 } }
 
-        // Colors follow the shortest period first, so the models of the default view get the distinct ones,
-        // and stay the same in every period.
+        // Every model of the history, most spend first; a period's own leaders are picked from these.
         let splits = Dictionary(uniqueKeysWithValues: UsageSpendPeriod.allCases.map { ($0, sum(lastDays: $0.days)) })
         let longest = splits[.d180] ?? [:]
-        let first = splits[.d30] ?? [:]
-        let order = longest.keys.sorted { lhs, rhs in
-            let a = first[lhs]?.usd ?? 0
-            let b = first[rhs]?.usd ?? 0
-            if a != b { return a > b }
-            let c = longest[lhs]?.usd ?? 0
-            let d = longest[rhs]?.usd ?? 0
-            if c != d { return c > d }
-            return lhs < rhs
-        }
-        let labels = spec.models.labels(for: order)
-        let named = order.count > Self.namedRows + 1 ? Array(order.prefix(Self.namedRows)) : order
-        let rest = Set(order).subtracting(named)
-        var colors: [String: UsageSeriesColor] = [:]
-        for (index, id) in named.enumerated() {
-            colors[id] = .model(index)
-        }
+        let order = Self.ranked(Array(longest.keys), by: longest)
+        let labels = block.modelLabels(spec: spec).merging(spec.models.labels(for: order)) { known, _ in known }
+        self.labels = labels
+        // The same number of rows in every period (so a switch never changes the menu's height): three named
+        // models and "Other" when the history has more than four, otherwise one row per model.
+        let hasOther = order.count > Self.namedRows + 1
+        let unpriced = Set(block.models.compactMap { $0.value.priced == false ? $0.key : nil })
 
         // The history starts at the first call on record (or the first day with spend).
         let calendar = Calendar.current
@@ -551,10 +593,20 @@ public struct UsageProviderSpend: Sendable, Equatable {
         }
         self.offered = offered
 
-        let legend = named.map { UsageDayChartData.Legend(id: $0, name: labels[$0] ?? $0, color: colors[$0] ?? .other) }
-            + (rest.isEmpty ? [] : [UsageDayChartData.Legend(id: "other", name: "Other", color: .other)])
         self.periods = UsageSpendPeriod.allCases.map { period in
             let split = splits[period] ?? [:]
+            // This period's leaders get the named rows and the distinct colors, by rank; models without use in
+            // the period fill the rows that are left, in the order of the whole history.
+            let used = Self.ranked(order.filter { (split[$0]?.usd ?? 0) > 0 || (split[$0]?.tokens ?? 0) > 0 }, by: split)
+            let ranked = used + order.filter { !used.contains($0) }
+            let named = hasOther ? Array(ranked.prefix(Self.namedRows)) : ranked
+            let rest = ranked.filter { !named.contains($0) }
+            var colors: [String: UsageSeriesColor] = [:]
+            for (index, id) in named.enumerated() {
+                colors[id] = .model(index)
+            }
+            let legend = named.map { UsageDayChartData.Legend(id: $0, name: labels[$0] ?? $0, color: colors[$0] ?? .other) }
+                + (rest.isEmpty ? [] : [UsageDayChartData.Legend(id: "other", name: "Other", color: .other)])
             let domain = Self.domain(period: period, firstDay: firstDay, now: now)
             let from = UsageDayKey.string(domain.lowerBound)
             var bars: [UsageDayChartData.Bar] = []
@@ -579,21 +631,20 @@ public struct UsageProviderSpend: Sendable, Equatable {
             var rows = named.map { id in
                 ModelRow(id: id, label: labels[id] ?? id, color: colors[id] ?? .other, use: split[id] ?? UsageModelUse())
             }
-            var otherNote: String?
+            var members: [String] = []
+            var otherIsEmpty = false
             if !rest.isEmpty {
-                let members = rest.map { ($0, split[$0] ?? UsageModelUse()) }
-                rows.append(ModelRow(
-                    id: "other",
-                    label: "Other",
-                    color: .other,
-                    use: members.reduce(UsageModelUse()) { $0 + $1.1 }))
-                let shown = members.filter { $0.1.tokens > 0 || $0.1.usd >= 0.005 }.sorted { ($0.1.usd, $0.1.tokens) > ($1.1.usd, $1.1.tokens) }
-                otherNote = shown.isEmpty
-                    ? "Other: \(rest.compactMap { labels[$0] }.sorted().joined(separator: ", ")) (none in this period)."
-                    : "Other: " + shown.map {
-                        let usd = $0.1.usd >= 0.005 ? UsageFormat.usdFine($0.1.usd) : "no price"
-                        return "\(labels[$0.0] ?? $0.0) \(usd) · \(UsageFormat.tokens($0.1.tokens)) tok"
-                    }.joined(separator: ", ") + "."
+                let uses = rest.map { ($0, split[$0] ?? UsageModelUse()) }
+                rows.append(ModelRow(id: "other", label: "Other", color: .other, use: uses.reduce(UsageModelUse()) { $0 + $1.1 }))
+                let shown = uses.filter { $0.1.tokens > 0 || $0.1.usd > 0 }
+                if shown.isEmpty {
+                    otherIsEmpty = true
+                    members = rest.map { labels[$0] ?? $0 }.sorted()
+                } else {
+                    members = shown.map { id, use in
+                        "\(labels[id] ?? id) \(Self.cost(use.usd, unpriced: unpriced.contains(id)))"
+                    }
+                }
             }
             let chart = UsageDayChartData(
                 period: period,
@@ -605,8 +656,30 @@ public struct UsageProviderSpend: Sendable, Equatable {
                 emptyText: "No \(spec.name) use on this Mac in this period.",
                 chipLimit: 3,
                 centsInChips: true)
-            return Period(period: period, chart: chart, rows: rows, whole: whole(split), otherNote: otherNote)
+            return Period(
+                period: period, chart: chart, rows: rows, whole: whole(split), otherMembers: members,
+                otherIsEmpty: otherIsEmpty)
         }
+    }
+
+    /// Most dollars first, then most tokens, then by id: the same order on every build.
+    private static func ranked(_ ids: [String], by split: [String: UsageModelUse]) -> [String] {
+        ids.sorted { lhs, rhs in
+            let a = split[lhs] ?? UsageModelUse()
+            let b = split[rhs] ?? UsageModelUse()
+            if a.usd != b.usd { return a.usd > b.usd }
+            if a.tokens != b.tokens { return a.tokens > b.tokens }
+            return lhs < rhs
+        }
+    }
+
+    /// A member's dollars in the Other note: "no price" only for a model the collector has no price for;
+    /// a priced model under half a cent is "<$0.01".
+    static func cost(_ usd: Double, unpriced: Bool) -> String {
+        if unpriced, usd < 0.005 {
+            return "no price"
+        }
+        return usd < 0.005 ? "<$0.01" : UsageFormat.usdFine(usd)
     }
 
     public subscript(period: UsageSpendPeriod) -> Period {

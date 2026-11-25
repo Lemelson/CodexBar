@@ -37,7 +37,7 @@ public struct UsageValueCardView: View {
     public var body: some View {
         let scale = max(1, self.state.accounts.compactMap { self.got($0) }.max() ?? 1)
         VStack(alignment: .leading, spacing: 10) {
-            // Centered like the Spend and Antigravity headers: the segmented control has no text baseline of
+            // Centered like the Spend and provider page headers: the segmented control has no text baseline of
             // its own. The title and the control fill the line to within 2 pt, and the control is a little
             // wider before it is in a window: on the first build after launch the title wrapped, the card
             // was measured 8 pt taller, and the next data refresh replaced the row with the menu open.
@@ -362,7 +362,7 @@ public struct UsageDriftCardView: View {
             guard let usd = self.capacity(item, ratio: self.state.fableWeight(for: account)) else { return nil }
             return Point(
                 account: account.displayName,
-                colorIndex: self.state.colorIndex(of: account),
+                color: UsagePalette.account(self.state.colorIndex(of: account)),
                 date: Date(timeIntervalSince1970: item.weekEnd),
                 usd: usd)
         }
@@ -470,7 +470,7 @@ public struct UsageDriftCardView: View {
             return UsageDriftSeries(
                 id: account.id,
                 name: account.displayName,
-                colorIndex: self.state.colorIndex(of: account),
+                color: UsagePalette.account(self.state.colorIndex(of: account)),
                 points: self.points(for: account))
         }
     }
@@ -483,7 +483,7 @@ public struct UsageDriftCardView: View {
             UsageDriftMonthSeries(
                 id: series.id,
                 name: series.name,
-                colorIndex: series.colorIndex,
+                color: series.color,
                 months: UsageDriftMonths.months(of: series.points, until: until),
                 hasWeeks: !series.points.isEmpty)
         }
@@ -494,7 +494,7 @@ public struct UsageDriftCardView: View {
 
 struct UsageDriftPoint: Identifiable {
     let account: String
-    let colorIndex: Int
+    let color: Color
     let date: Date
     let usd: Double
 
@@ -506,7 +506,7 @@ struct UsageDriftPoint: Identifiable {
 struct UsageDriftSeries: Identifiable {
     let id: String
     let name: String
-    let colorIndex: Int
+    let color: Color
     /// Empty when the account has weeks but none in the chosen unit.
     let points: [UsageDriftPoint]
 
@@ -592,7 +592,7 @@ struct UsageDriftChartView: View {
     }
 
     private func legendRow(_ series: UsageDriftSeries, hovered: UsageDriftWeek?) -> some View {
-        UsageDriftLegendRow(name: series.name, colorIndex: series.colorIndex) {
+        UsageDriftLegendRow(name: series.name, color: series.color) {
             self.legendValue(series, hovered: hovered)
         }
     }
@@ -632,12 +632,12 @@ struct UsageDriftChartView: View {
                     x: .value("Week", point.date),
                     y: .value("Dollars", point.usd),
                     series: .value("Account", point.account))
-                    .foregroundStyle(UsagePalette.account(point.colorIndex))
+                    .foregroundStyle(point.color)
                     .lineStyle(StrokeStyle(lineWidth: 2))
                 PointMark(
                     x: .value("Week", point.date),
                     y: .value("Dollars", point.usd))
-                    .foregroundStyle(UsagePalette.account(point.colorIndex))
+                    .foregroundStyle(point.color)
                     .symbolSize(hot ? 80 : 24)
             }
         }
