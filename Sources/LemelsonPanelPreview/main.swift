@@ -258,25 +258,26 @@ struct PreviewRoot: View {
     @ViewBuilder private func limits(_ state: UsagePanelState) -> some View {
         ModeChips(selected: "Limits")
         Divider()
-        ForEach(state.orderedAccounts) { account in
-            UsageAccountHeaderView(account: account, now: self.now, width: self.menuWidth)
-            ForEach(UsagePanelState.WindowKind.allCases, id: \.self) { kind in
-                if let window = account.window(kind), window.pct != nil, !(kind == .fiveHour && account.has5h == false) {
-                    UsageLimitRowView(
-                        kind: kind,
-                        window: window,
-                        now: self.now,
-                        width: self.menuWidth,
-                        sessionsLeft: UsageSessionsLeft.make(
-                            for: kind, account: account, in: state, now: self.now),
-                        reading: UsageReadingAge.make(account: account, kind: kind, window: window, now: self.now))
-                        .environment(\.usageRowHighlighted, self.highlighted)
-                        .background(self.highlighted ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
-                }
+        ForEach(state.claudeLimitAccounts) { account in
+            let style = UsageClaudeLimitCardStyle(account: account, in: state)
+            let windows = account.visibleWindows
+            UsageClaudeLimitHeader(
+                account: account, style: style, now: self.now, width: self.menuWidth, hasLimits: !windows.isEmpty)
+            ForEach(Array(windows.enumerated()), id: \.offset) { index, entry in
+                UsageClaudeLimitRow(
+                    kind: entry.0,
+                    window: entry.1,
+                    style: style,
+                    now: self.now,
+                    width: self.menuWidth,
+                    sessionsLeft: UsageSessionsLeft.make(for: entry.0, account: account, in: state, now: self.now),
+                    last: index == windows.count - 1)
+                    .environment(\.usageRowHighlighted, self.highlighted)
             }
-            Divider().padding(.horizontal, 12).padding(.top, 4)
         }
-        UsageFooterView(state: state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: true)
+        if state.isStale(now: self.now) {
+            UsageFooterView(state: state, now: self.now, width: self.menuWidth, refreshing: false, showsLegend: false)
+        }
     }
 
     @ViewBuilder private func spend(_ state: UsagePanelState) -> some View {

@@ -395,8 +395,14 @@ public struct UsagePace: Equatable {
 // MARK: - Bar
 
 struct UsageSegmentBar: View {
+    struct TimeArrow {
+        let percent: Double
+        let color: Color
+    }
+
     let segments: [UsageSegment]
     var pace: UsagePace?
+    var timeArrow: TimeArrow?
     @Environment(\.usageRowHighlighted) private var highlighted
 
     private static let barHeight: CGFloat = 7
@@ -406,7 +412,7 @@ struct UsageSegmentBar: View {
         Canvas { context, size in
             let barRect = CGRect(
                 x: 0,
-                y: (size.height - Self.barHeight) / 2,
+                y: (size.height - Self.barHeight) / 2 + (self.timeArrow == nil ? 0 : 2),
                 width: size.width,
                 height: Self.barHeight)
             let track = Path(roundedRect: barRect, cornerRadius: Self.barHeight / 2)
@@ -424,7 +430,24 @@ struct UsageSegmentBar: View {
                 x += segmentWidth
             }
 
-            if let pace = self.pace {
+            if let arrow = self.timeArrow {
+                let center = min(size.width - 4, max(4, size.width * CGFloat(arrow.percent) / 100))
+                let capY = barRect.minY - 4
+                let tipY = barRect.minY
+                let tailY = barRect.maxY + 2
+                var mark = Path()
+                mark.move(to: CGPoint(x: center - 4, y: capY))
+                mark.addLine(to: CGPoint(x: center + 4, y: capY))
+                mark.addLine(to: CGPoint(x: center + 1, y: tipY))
+                mark.addLine(to: CGPoint(x: center + 1, y: tailY))
+                mark.addLine(to: CGPoint(x: center - 1, y: tailY))
+                mark.addLine(to: CGPoint(x: center - 1, y: tipY))
+                mark.closeSubpath()
+                context.blendMode = .destinationOut
+                context.stroke(mark, with: .color(.white), lineWidth: 2.5)
+                context.blendMode = .normal
+                context.fill(mark, with: .color(self.highlighted ? .white : arrow.color))
+            } else if let pace = self.pace {
                 let center = min(size.width - 1.5, max(1.5, size.width * CGFloat(pace.expected) / 100))
                 // An old reading says little about the pace now: its mark is drawn pale.
                 let ink = self.highlighted ? Color.white : pace.color
@@ -441,7 +464,7 @@ struct UsageSegmentBar: View {
                     with: .color(ink.opacity(opacity)))
             }
         }
-        .frame(height: 13)
+        .frame(height: self.timeArrow == nil ? 13 : 17)
     }
 }
 
@@ -506,6 +529,7 @@ struct UsageChip: View {
     let color: Color
     let text: String
     var dashed = false
+    var fontSize: CGFloat = 10.5
     @Environment(\.usageRowHighlighted) private var highlighted
 
     var body: some View {
@@ -522,7 +546,7 @@ struct UsageChip: View {
                     .frame(width: 7, height: 7)
             }
             Text(self.text)
-                .font(.system(size: 10.5))
+                .font(.system(size: self.fontSize))
                 .foregroundStyle(UsageInk.secondary(self.highlighted))
                 .lineLimit(1)
         }
@@ -656,9 +680,8 @@ public struct UsageLimitRowView: View {
                     }
                 }
             }
-            if let reading, !reading.isFresh {
-                UsageReadingAgeLine(reading: reading)
-            }
+            // The reading age is already shown once in the account header (colored red/orange when stale)
+            // and in full inside the detail popover, so repeating it on every limit row only adds noise.
             // Reserve or deficit is read off the mark on the bar; the exact percent is in the detail panel.
             if let warning = pace?.warning {
                 UsageRunOutLine(text: warning)

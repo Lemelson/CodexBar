@@ -402,16 +402,17 @@ extension StatusItemController {
         // Captions with the age of a reading change length, so heights are re-measured every ten minutes.
         let ageBucket = Int(now.timeIntervalSince1970 / 600)
         let panelWidth = Self.lemelsonSubpanelWidth
-        for (index, account) in state.orderedAccounts.enumerated() {
+        for (index, account) in state.claudeLimitAccounts.enumerated() {
+            let style = UsageClaudeLimitCardStyle(account: account, in: state)
+            let windows = account.visibleWindows
             menu.addItem(self.makeMenuCardItem(
-                UsageAccountHeaderView(account: account, now: now, width: width),
+                UsageClaudeLimitHeader(account: account, style: style, now: now, width: width, hasLimits: !windows.isEmpty),
                 id: "lemelsonHeader-\(index)",
                 width: width,
-                heightCacheScope: "lemelson-header-\(account.uuid)",
-                heightCacheFingerprint: "\(stamp):\(ageBucket)"))
-            for (kind, window) in account.visibleWindows {
-                // The detail view is shown by the hover panel, not by a native submenu: it appears at
-                // once and morphs between rows. The empty click handler keeps the row highlightable.
+                heightCacheScope: "lemelson-claude-card-header-\(account.uuid)",
+                heightCacheFingerprint: "\(stamp):\(ageBucket)",
+                layout: .joined))
+            for (windowIndex, (kind, window)) in windows.enumerated() {
                 let id = "\(Self.lemelsonLimitRowPrefix)\(index)-\(kind.rawValue)"
                 self.lemelsonRegisterDetail(.swiftUI(key: id, width: panelWidth) {
                     AnyView(UsageLimitDetailPanelView(
@@ -423,25 +424,25 @@ extension StatusItemController {
                         sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: Date())))
                 })
                 menu.addItem(self.makeMenuCardItem(
-                    LemelsonHighlightBridge(
-                        content: UsageLimitRowView(
+                    LemelsonHighlightBridge(content: UsageClaudeLimitRow(
                         kind: kind,
                         window: window,
+                        style: style,
                         now: now,
                         width: width,
                         sessionsLeft: UsageSessionsLeft.make(for: kind, account: account, in: state, now: now),
-                        // An account read only by hand marks an old reading under its bar.
-                        reading: UsageReadingAge.make(account: account, kind: kind, window: window, now: now)),
-                        showsChevron: true),
+                        last: windowIndex == windows.count - 1)),
                     id: id,
                     width: width,
-                    heightCacheScope: "lemelson-limit-\(account.uuid)-\(kind.rawValue)",
+                    heightCacheScope: "lemelson-claude-card-limit-\(account.uuid)-\(kind.rawValue)",
                     heightCacheFingerprint: "\(stamp):\(ageBucket)",
+                    layout: .joined,
                     onClick: {}))
             }
-            menu.addItem(.separator())
         }
-        self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: true)
+        if LemelsonPanelSession.shared.isRefreshing || state.isStale(now: now) {
+            self.addLemelsonFooter(state, to: menu, width: width, now: now, showsLegend: false)
+        }
     }
 
     private func addLemelsonSpend(_ state: UsagePanelState, to menu: NSMenu, width: CGFloat, now: Date) {

@@ -40,6 +40,7 @@ extension StatusItemController {
         submenuIndicatorTopPadding: CGFloat = 8,
         containsInteractiveControls: Bool = false,
         usesGPUSelection: Bool = false,
+        layout: MenuCardRowLayout = .standalone,
         onClick: (() -> Void)? = nil) -> NSMenuItem
     {
         let allowsMenuHighlight = submenu != nil || onClick != nil
@@ -78,7 +79,8 @@ extension StatusItemController {
             allowsMenuHighlight: allowsMenuHighlight,
             containsInteractiveControls: containsInteractiveControls,
             usesGPUSelection: usesGPUSelection,
-            onClick: onClick)
+            onClick: onClick,
+            layout: layout)
         let hosting: ErasedMenuCardHostingView
         if let recycled = self.takeRecyclableMenuCardView(
             for: id,
@@ -133,16 +135,15 @@ extension StatusItemController {
     }
 
     private func menuCardHeight(for view: NSView, width: CGFloat) -> CGFloat {
-        let basePadding: CGFloat = 6
-        let descenderSafety: CGFloat = 1
+        let layout = (view as? MenuRowContainerView)?.rowPayload.layout ?? .standalone
 
         if let measured = view as? MenuCardMeasuring {
-            return max(1, ceil(measured.measuredHeight(width: width) + basePadding + descenderSafety))
+            return max(1, ceil(measured.measuredHeight(width: width) + layout.verticalPadding))
         }
 
         view.frame = NSRect(origin: .zero, size: NSSize(width: width, height: 1))
         let fitted = view.fittingSize
-        return max(1, ceil(fitted.height + basePadding + descenderSafety))
+        return max(1, ceil(fitted.height + layout.verticalPadding))
     }
 }
 

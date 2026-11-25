@@ -155,6 +155,16 @@ final class MenuHostingView<Content: View>: NSHostingView<Content> {
     }
 }
 
+enum MenuCardRowLayout {
+    case standalone
+    /// These rows form one visually continuous card and draw their own selection.
+    case joined
+
+    var verticalPadding: CGFloat {
+        self == .joined ? 0 : 7
+    }
+}
+
 /// Row payload remembered by erased hosting views so tab switches can exchange
 /// SwiftUI content between an attached and a cached hosting view without ever
 /// detaching `item.view`. Detaching mid-tracking makes Tahoe's NSMenu paint the
@@ -169,6 +179,7 @@ struct MenuCardRowPayload {
     let containsInteractiveControls: Bool
     let usesGPUSelection: Bool
     let onClick: (() -> Void)?
+    var layout: MenuCardRowLayout = .standalone
 }
 
 /// One stable AppKit class for every menu-card row. Keeping the outer view attached while payloads
@@ -541,7 +552,8 @@ final class MenuRowContainerView: NSView, MenuCardHighlighting, MenuCardMeasurin
             submenuIndicatorAlignment: payload.submenuIndicatorAlignment,
             submenuIndicatorTopPadding: payload.submenuIndicatorTopPadding,
             refreshMonitor: refreshMonitor,
-            interactiveRegionStore: interactiveRegionStore)
+            interactiveRegionStore: interactiveRegionStore,
+            layout: payload.layout)
         {
             payload.content
         }
@@ -865,6 +877,7 @@ struct MenuCardSectionContainerView<Content: View>: View {
     let submenuIndicatorTopPadding: CGFloat
     var refreshMonitor: MenuCardRefreshMonitor?
     var interactiveRegionStore: MenuCardInteractiveRegionStore?
+    let layout: MenuCardRowLayout
     @ViewBuilder let content: () -> Content
 
     init(
@@ -874,6 +887,7 @@ struct MenuCardSectionContainerView<Content: View>: View {
         submenuIndicatorTopPadding: CGFloat,
         refreshMonitor: MenuCardRefreshMonitor?,
         interactiveRegionStore: MenuCardInteractiveRegionStore? = nil,
+        layout: MenuCardRowLayout = .standalone,
         @ViewBuilder content: @escaping () -> Content)
     {
         self.highlightState = highlightState
@@ -882,6 +896,7 @@ struct MenuCardSectionContainerView<Content: View>: View {
         self.submenuIndicatorTopPadding = submenuIndicatorTopPadding
         self.refreshMonitor = refreshMonitor
         self.interactiveRegionStore = interactiveRegionStore
+        self.layout = layout
         self.content = content
     }
 
@@ -895,7 +910,7 @@ struct MenuCardSectionContainerView<Content: View>: View {
             }
             .foregroundStyle(MenuHighlightStyle.primary(self.highlightState.isHighlighted))
             .background(alignment: .topLeading) {
-                if self.highlightState.isHighlighted {
+                if self.highlightState.isHighlighted, self.layout == .standalone {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(MenuHighlightStyle.selectionBackground(true))
                         .padding(.horizontal, 6)
