@@ -21,17 +21,33 @@ public struct UsageSessionsLeft: Equatable, Sendable {
     public let percentLeft: Double
     /// The rest of the weekly limit in full sessions.
     public let left: Double
-    /// Time until the weekly reset in 5-hour spans; `fit` is its whole part.
-    public let available: Double
+    /// What the current 5-hour window still allows, as a share of a full session (0–1), and when it resets;
+    /// nil without a running 5-hour window (the next session can start at once).
+    public let current: (left: Double, resetsAt: Double)?
+    /// Full 5-hour spans from the current window's reset (or from now) to the weekly reset; `fit` is its
+    /// whole part. A clock count: it assumes back-to-back sessions.
+    public let spans: Double
     public let basis: Basis
 
+    /// The most the rest of the week can take, in sessions: the current window's rest, then full sessions.
+    public var available: Double {
+        (self.current?.left ?? 0) + self.spans
+    }
+
+    /// Full sessions that fit after the current one, before the weekly reset.
     public var fit: Int {
-        Int(self.available.rounded(.down))
+        Int(self.spans.rounded(.down))
     }
 
     /// More limit is left than time to spend it, even with back-to-back sessions.
     public var timeIsShort: Bool {
         self.left > self.available
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.percentPerSession == rhs.percentPerSession && lhs.percentLeft == rhs.percentLeft
+            && lhs.left == rhs.left && lhs.spans == rhs.spans && lhs.basis == rhs.basis
+            && lhs.current?.left == rhs.current?.left && lhs.current?.resetsAt == rhs.current?.resetsAt
     }
 
     /// The line belongs to the weekly row only; other rows get `nil`.
@@ -68,15 +84,27 @@ public struct UsageSessionsLeft: Equatable, Sendable {
               used < 100,
               let resetsAt = week.resetsAt
         else { return nil }
-        let remaining = resetsAt - now.timeIntervalSince1970
+        let stamp = now.timeIntervalSince1970
+        let remaining = resetsAt - stamp
         guard remaining > 0, remaining <= UsagePanelState.WindowKind.week.span + 120 else { return nil }
         guard let (share, basis) = self.share(of: account, donors: donors) else { return nil }
         let percentLeft = 100 - max(0, used)
+        // The running 5-hour window: what it still allows until it resets. New full sessions start after it.
+        var current: (left: Double, resetsAt: Double)?
+        if let session = account.window(.fiveHour), session.rolled != true,
+           let sessionReset = session.resetsAt, sessionReset > stamp,
+           sessionReset - stamp <= UsagePanelState.WindowKind.fiveHour.span + 120
+        {
+            let ends = min(sessionReset, resetsAt)
+            current = (min(1, max(0, 100 - (session.pct ?? 0)) / 100), ends)
+        }
+        let start = current?.resetsAt ?? stamp
         return UsageSessionsLeft(
             percentPerSession: share,
             percentLeft: percentLeft,
             left: percentLeft / share,
-            available: remaining / self.sessionSpan,
+            current: current,
+            spans: max(0, resetsAt - start) / self.sessionSpan,
             basis: basis)
     }
 
@@ -126,12 +154,14 @@ public struct UsageSessionsLeft: Equatable, Sendable {
         return self.left < 1.05 ? " full 5h session left" : " full 5h sessions left"
     }
 
-    /// "21 fit before reset", "only 1 fits before reset", "none fit before reset".
+    /// "21 more fit before reset", "only 1 more fits before reset", "no full one fits before reset": full
+    /// sessions after the current one ("more" only while a 5-hour window runs).
     public var fitText: String {
-        switch self.fit {
-        case 0: self.timeIsShort ? "none fit before reset" : "fits before reset"
-        case 1: self.timeIsShort ? "only 1 fits before reset" : "1 fits before reset"
-        default: self.timeIsShort ? "only \(self.fit) fit before reset" : "\(self.fit) fit before reset"
+        let more = self.current == nil ? "" : " more"
+        return switch self.fit {
+        case 0: self.timeIsShort ? "no full one fits before reset" : "fits before reset"
+        case 1: self.timeIsShort ? "only 1\(more) fits before reset" : "1\(more) fits before reset"
+        default: self.timeIsShort ? "only \(self.fit)\(more) fit before reset" : "\(self.fit)\(more) fit before reset"
         }
     }
 
@@ -145,15 +175,23 @@ public struct UsageSessionsLeft: Equatable, Sendable {
             + "so the \(UsageFormat.percent(self.percentLeft)) left is \(self.leftNumber)\(self.leftUnit.dropLast(5))."
         let unused = "part of this limit will go unused even at full speed."
         let enough = "there is time to use all of it."
-        let verdict = switch (self.fit, self.timeIsShort) {
-        case (0, true): "No full session fits before the reset: \(unused)"
-        case (0, false): "The reset is less than 5 hours away, but that is still enough time to use all of it."
-        case (1, true): "Only 1 full session fits before the reset: \(unused)"
-        case (1, false): "1 full session fits before the reset: \(enough)"
-        case (_, true): "Only \(self.fit) full sessions fit before the reset: \(unused)"
-        case (_, false): "\(self.fit) full sessions fit before the reset: \(enough)"
+        // The running 5-hour window first: its rest is usable until it resets, full sessions come after it.
+        var now = ""
+        var after = ""
+        if let current = self.current {
+            let clock = UsageFormat.clock(Date(timeIntervalSince1970: current.resetsAt))
+            now = "The current session has \(UsageFormat.percent(current.left * 100)) left until \(clock). "
+            after = " after it"
         }
-        return "\(size) \(verdict)"
+        let verdict = switch (self.fit, self.timeIsShort) {
+        case (0, true): "No full session fits\(after) before the reset: \(unused)"
+        case (0, false): "Less than 5 hours are left\(after) before the reset, but that is still enough to use all of it."
+        case (1, true): "Only 1 full session fits\(after) before the reset: \(unused)"
+        case (1, false): "1 full session fits\(after) before the reset: \(enough)"
+        case (_, true): "Only \(self.fit) full sessions fit\(after) before the reset: \(unused)"
+        case (_, false): "\(self.fit) full sessions fit\(after) before the reset: \(enough)"
+        }
+        return "\(size) \(now)\(verdict)"
     }
 
     public var basisNote: String {
