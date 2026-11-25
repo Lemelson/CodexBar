@@ -32,7 +32,8 @@ extension StatusItemController {
             self?.lemelsonCurrentPageKey() ?? "?"
         }
         let key: (UInt16, String) -> Void = { [weak self, weak menu] code, label in
-            guard let self, let menu else { return }
+            // A key reaches the open menu only: none once it closed.
+            guard let self, menu != nil else { return }
             let character = String(UnicodeScalar(code == 123 ? 0xF702 : 0xF703)!)
             guard let event = NSEvent.keyEvent(
                 with: .keyDown,
@@ -87,10 +88,13 @@ extension StatusItemController {
             let fit = "\(Int(scroll?.documentView?.frame.height ?? -1))/\(Int(scroll?.contentView.bounds.height ?? -1))"
             if index == nil, let window = scroll?.window, let content = window.contentView {
                 // What sits in the menu window besides the rows (NSMenu's scroll arrows among them).
-                func walk(_ view: NSView, _ depth: Int) {
+                @MainActor func walk(_ view: NSView, _ depth: Int) {
                     guard depth <= 3 else { return }
                     let name = String(describing: type(of: view))
-                    log.notice("tree \(String(repeating: "  ", count: depth), privacy: .public)\(name, privacy: .public) \(NSStringFromRect(view.frame), privacy: .public) hidden=\(view.isHidden) alpha=\(view.alphaValue)")
+                    let frame = NSStringFromRect(view.frame)
+                    let hidden = view.isHidden
+                    let alpha = view.alphaValue
+                    log.notice("tree \(String(repeating: "  ", count: depth), privacy: .public)\(name, privacy: .public) \(frame, privacy: .public) hidden=\(hidden) alpha=\(alpha)")
                     for sub in view.subviews where !(sub is NSClipView) || depth < 2 {
                         walk(sub, depth + 1)
                     }
@@ -193,8 +197,11 @@ extension StatusItemController {
             steps + scrollSteps
         }
         for (delay, action) in plan {
+            // The timer runs on the main run loop, so the step runs on the main actor; the box only carries it
+            // across the timer's @Sendable callback.
+            let step = LemelsonSelfTestStep(run: action)
             let timer = Timer(timeInterval: delay, repeats: false) { _ in
-                MainActor.assumeIsolated(action)
+                MainActor.assumeIsolated { step.run() }
             }
             RunLoop.main.add(timer, forMode: .common)
         }
@@ -223,4 +230,10 @@ extension StatusItemController {
         }
         return true
     }
+}
+
+/// One step of a self-test plan, carried into a main-run-loop timer's callback and run there with
+/// `MainActor.assumeIsolated` (which traps if it is ever called elsewhere).
+private struct LemelsonSelfTestStep: @unchecked Sendable {
+    let run: () -> Void
 }
