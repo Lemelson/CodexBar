@@ -166,9 +166,12 @@ public struct UsageProviderPage {
         // The card: header, then the limit rows (or one notice), then the app's facts.
         let style = spec.cardStyle
         let windows = block.limitWindows
+        // The collector's numbers belong to another account than the one CodexBar shows: its limits, plan,
+        // reading age and plan worth are left out (spend on this Mac stays: it is not per account).
+        let otherAccount = block.error == nil && Self.limitsOfAnotherAccount(block, shown: accountKey)
         let notice: (text: String, detail: String?)? = if let error = block.error {
             ("\(spec.name)'s data could not be read this time.", error)
-        } else if Self.limitsOfAnotherAccount(block, shown: accountKey) {
+        } else if otherAccount {
             ("No limits collected yet for this \(spec.name) account.", nil)
         } else if windows.isEmpty {
             ("No quota readings yet: CodexBar has not recorded a 5-hour or weekly window.", nil)
@@ -184,13 +187,13 @@ public struct UsageProviderPage {
         add(.header, "header", UsageLimitCardHeader(
             name: spec.name,
             style: style,
-            plan: spec.shortPlan(block.account.planName ?? block.worth?.planName),
-            measuredAt: block.account.measuredAt,
+            plan: otherAccount ? nil : spec.shortPlan(block.account.planName ?? block.worth?.planName),
+            measuredAt: otherAccount ? nil : block.account.measuredAt,
             now: now,
             note: account.map { UsageLimitCardHeader.Note($0, isWarning: false) },
             width: width,
             hasLimits: slices > 0), separatorAfter: slices == 0, inCard: true,
-            fingerprint: account == nil ? "" : ":account")
+            fingerprint: (account == nil ? "" : ":account") + (otherAccount ? ":other" : ""))
         if let notice {
             let last = isLast()
             add(.notice, "notice", UsageLimitCardNoticeRow(
@@ -250,7 +253,8 @@ public struct UsageProviderPage {
         self.rows = rows
 
         let until = state.generatedDate
-        self.valueRow = spend.flatMap { UsageProviderWorth(block: block, spec: spec, spend: $0) }.map { worth in
+        self.valueRow = (otherAccount ? nil : spend)
+            .flatMap { UsageProviderWorth(block: block, spec: spec, spend: $0) }.map { worth in
             Row(
                 id: spec.idPrefix + "value",
                 part: .value,
