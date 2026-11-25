@@ -45,8 +45,10 @@ import SwiftUI
 //
 // Codex (--only codex, codex-details, codex-cache): the summary's own `codex` block when it has one, else the
 // Antigravity fixture of the same name renamed to Codex (CodexFixture). --codex reads the block from a file
-// (a whole summary: its `codex`, else its `antigravity` renamed; or the block alone). The Codex card shows two
-// made-up facts (credits, limit reset credits) where the app will put its own; --no-extras leaves them out.
+// (a whole summary: its `codex`, else its `antigravity` renamed; or the block alone). With --fixture the Codex
+// card also shows two facts from made-up numbers (credits, limit reset credits), drawn by the app's own
+// `UsageCodexFacts`; --no-extras leaves them out. The real summary gets none: the app takes them from
+// CodexBar's live Codex snapshot, which the preview cannot read.
 //
 // --only pages draws Claude Limits, the Antigravity page and the Codex page side by side.
 
@@ -521,7 +523,7 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     hoverDay: argument(after: "--hover-day"),
     antigravity: antigravity,
     codex: codex,
-    codexExtras: arguments.contains("--no-extras") ? [] : CodexFixture.extras))
+    codexExtras: argument(after: "--fixture") == nil || arguments.contains("--no-extras") ? [] : CodexFixture.extras(now: now)))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)

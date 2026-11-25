@@ -44,16 +44,14 @@ enum CodexFixture {
         return result
     }
 
-    /// Stand-ins for the facts the app will add to the Codex card (credits, limit reset credits): only to see
-    /// the slot in the preview. The numbers are made up.
-    @MainActor static var extras: [UsageProviderPage.Extra] {
-        [
-            .init(fact: UsageLimitCardFact(
-                id: "credits", symbol: "creditcard", title: "Credits", value: "58,169 left")),
-            .init(fact: UsageLimitCardFact(
-                id: "reset-credits", symbol: "arrow.counterclockwise", title: "Limit reset credits",
-                value: "3 available", caption: "Next one expires in 5d 9h")),
-        ]
+    /// Made-up inputs for the facts the app adds to the Codex card (credits, limit reset credits), drawn by
+    /// the same `UsageCodexFacts` the app uses. Only with `--fixture`: the preview cannot read CodexBar's live
+    /// Codex snapshot, so a picture of the real summary has no facts.
+    @MainActor static func extras(now: Date) -> [UsageProviderPage.Extra] {
+        UsageCodexFacts.extras(
+            creditsLeft: 58169.35,
+            resetCredits: [5.4, 6.5, 17.5].map { now.addingTimeInterval($0 * 86400) },
+            now: now)
     }
 
     private static func decode(block: Any, generatedAt: Double) -> UsagePanelState? {
