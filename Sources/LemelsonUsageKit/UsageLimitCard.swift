@@ -85,7 +85,7 @@ struct UsageLimitCardSlice: ViewModifier {
                 }
             }
             .frame(width: self.width)
-            .padding(.bottom, self.last ? 8 : 0)
+            .padding(.bottom, self.last ? 6 : 0)
     }
 }
 
@@ -264,6 +264,13 @@ public enum UsageLimitVerdict: Equatable, Sendable {
         return "Runs out \(early) before reset"
     }
 
+    /// "Out 3d 4h early": the same, short enough to stand in for the reset time at the right of a row
+    /// (the reset time is in the row's panel), so a limit that will not last never makes its row taller.
+    public var runOutShort: String? {
+        guard case let .outIn(_, early?) = self else { return nil }
+        return "Out \(early) early"
+    }
+
     var symbol: String {
         switch self {
         case .enough: "checkmark.circle.fill"
@@ -416,7 +423,9 @@ public struct UsageLimitCardRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .trailing, spacing: 3) {
-                    if self.window.rolled == true {
+                    if let early = verdict.runOutShort {
+                        UsageRunOutLine(text: early)
+                    } else if self.window.rolled == true {
                         Text("New window")
                     } else if let reset = self.window.resetsAt {
                         Text(UsageFormat.reset(reset, now: self.now))
@@ -431,9 +440,6 @@ public struct UsageLimitCardRow: View {
                 .font(.system(size: 9.5))
                 .foregroundStyle(UsageInk.secondary(self.highlighted))
                 .fixedSize()
-            }
-            if let line = verdict.runOutLine {
-                UsageRunOutLine(text: line)
             }
         }
         .foregroundStyle(UsageInk.primary(self.highlighted))

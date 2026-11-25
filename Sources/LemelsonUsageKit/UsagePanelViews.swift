@@ -497,16 +497,17 @@ struct UsageChip: View {
 }
 
 /// "⚠ Out in 1h 2m, 1h 42m before reset": shown only when the limit will not last until its reset.
+/// "⚠ Out 3d 4h early" in the place of a limit row's reset time, in the row's small type.
 struct UsageRunOutLine: View {
     let text: String
     @Environment(\.usageRowHighlighted) private var highlighted
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
+        HStack(alignment: .firstTextBaseline, spacing: 3) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 9))
+                .font(.system(size: 8))
             Text(self.text)
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 9.5, weight: .semibold))
                 .lineLimit(1)
         }
         .foregroundStyle(self.highlighted ? .white : UsagePalette.paceBad)
@@ -601,9 +602,10 @@ public struct UsageFooterView: View {
     }
 
     /// The note and the status on one line; without room for both, the status alone (never cut mid-word).
+    /// Without a note, the full status when it fits ("Updated 19:14 · refreshes when you open this menu").
     private var compactLine: some View {
         let status = self.shortStatus
-        let line = self.note.map { "\($0) · \(status)" } ?? status
+        let line = self.note.map { "\($0) · \(status)" } ?? self.status
         return ViewThatFits(in: .horizontal) {
             Text(line).fixedSize()
             Text(status.prefix(1).uppercased() + status.dropFirst()).lineLimit(1)
@@ -611,7 +613,8 @@ public struct UsageFooterView: View {
         .font(.system(size: 10.5))
         .foregroundStyle(self.statusStyle)
         .padding(.horizontal, 20)
-        .padding(.vertical, 6)
+        .padding(.top, 4)
+        .padding(.bottom, 2)
         .frame(width: self.width, alignment: .leading)
     }
 
