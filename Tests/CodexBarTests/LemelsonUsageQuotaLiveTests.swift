@@ -2,10 +2,10 @@ import Foundation
 import LemelsonUsageKit
 import Testing
 
-// lemelson: the Antigravity live readings file (usage/ANTIGRAVITY-STATE.md, "Live readings file").
+// lemelson: the live quota readings files of Antigravity and Codex (usage/ANTIGRAVITY-STATE.md, "Live readings file").
 @MainActor
-struct LemelsonUsageAntigravityLiveTests {
-    typealias Reading = UsageAntigravityLiveReading
+struct LemelsonUsageQuotaLiveTests {
+    typealias Reading = UsageQuotaLiveReading
 
     private func reading(_ ts: Int, five: Double? = 1, week: Double? = 40.8, reset: Int? = 1_795_439_520) -> Reading {
         Reading(
@@ -50,36 +50,44 @@ struct LemelsonUsageAntigravityLiveTests {
         // Unknown (nil or blank): the key is left out.
         #expect(Reading(ts: 7, fiveHour: base.fiveHour, week: base.week, plan: " ").jsonLine == base.jsonLine)
         // A new plan name alone does not make a line.
-        #expect(UsageAntigravityLiveWriter.decide(Reading(ts: 8, fiveHour: base.fiveHour, week: base.week, plan: "Other"), after: planned) == .unchanged)
+        #expect(UsageQuotaLiveWriter.decide(Reading(ts: 8, fiveHour: base.fiveHour, week: base.week, plan: "Other"), after: planned) == .unchanged)
+    }
+
+    @Test
+    func `one file per provider next to the summary`() {
+        let folder = UsagePanelStore.defaultURL.deletingLastPathComponent()
+        #expect(UsageQuotaLiveWriter.antigravity.url == folder.appendingPathComponent("antigravity-quota.jsonl"))
+        #expect(UsageQuotaLiveWriter.codex.url == folder.appendingPathComponent("codex-quota.jsonl"))
+        #expect(UsageQuotaLiveWriter.codex.lockURL.lastPathComponent == "codex-quota.jsonl.lock")
     }
 
     @Test
     func `changed, unchanged and the ten minute rule`() {
         let first = self.reading(1000)
-        #expect(UsageAntigravityLiveWriter.decide(first, after: nil) == .written)
+        #expect(UsageQuotaLiveWriter.decide(first, after: nil) == .written)
         // Same values, less than ten minutes later.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1599), after: first) == .unchanged)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1599), after: first) == .unchanged)
         // Same values, ten minutes later.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1600), after: first) == .written)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1600), after: first) == .written)
         // A changed percent, a changed reset, a window that appears or goes: written at once.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1001, five: 2), after: first) == .written)
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1001, reset: 1_795_457_520), after: first) == .written)
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1001, five: nil), after: first) == .written)
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1001, reset: nil), after: first) == .written)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1001, five: 2), after: first) == .written)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1001, reset: 1_795_457_520), after: first) == .written)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1001, five: nil), after: first) == .written)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1001, reset: nil), after: first) == .written)
         // A reset time that moved by a few seconds is the same reset.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1001, reset: 1_795_439_550), after: first) == .unchanged)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1001, reset: 1_795_439_550), after: first) == .unchanged)
         // The same snapshot again, or an older one.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(1000, five: 5), after: first) == .stale)
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(900, five: 5), after: first) == .stale)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(1000, five: 5), after: first) == .stale)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(900, five: 5), after: first) == .stale)
         // Nothing to write.
-        #expect(UsageAntigravityLiveWriter.decide(self.reading(2000, five: nil, week: nil), after: first) == .empty)
+        #expect(UsageQuotaLiveWriter.decide(self.reading(2000, five: nil, week: nil), after: first) == .empty)
     }
 
     @Test
     func `writer appends whole lines under the lock and resumes after a restart`() throws {
         let url = try self.scratchFile()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let writer = UsageAntigravityLiveWriter(url: url)
+        let writer = UsageQuotaLiveWriter(url: url)
         #expect(writer.record(self.reading(1000)) == .written)
         #expect(writer.record(self.reading(1100)) == .unchanged)
         #expect(writer.record(self.reading(1200, five: 3)) == .written)
@@ -95,7 +103,7 @@ struct LemelsonUsageAntigravityLiveTests {
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o644)
 
         // A new writer (the app restarted) continues from the last line of the file.
-        let again = UsageAntigravityLiveWriter(url: url)
+        let again = UsageQuotaLiveWriter(url: url)
         #expect(again.record(self.reading(1900, five: 3)) == .unchanged)
         #expect(again.last == self.reading(1800, five: 3))
 
@@ -104,6 +112,6 @@ struct LemelsonUsageAntigravityLiveTests {
         try handle.seekToEnd()
         try handle.write(contentsOf: Data("{\"ts\": 5000, \"source\"".utf8))
         try handle.close()
-        #expect(UsageAntigravityLiveWriter.lastLine(of: url) == self.reading(1800, five: 3))
+        #expect(UsageQuotaLiveWriter.lastLine(of: url) == self.reading(1800, five: 3))
     }
 }

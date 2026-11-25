@@ -695,8 +695,9 @@ extension StatusItemController {
     }
 
     private func addMenuCards(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu? = nil) -> Bool {
-        // lemelson: every build starts with the stock rows allowed; only the Claude panel turns them off.
+        // lemelson: every build starts with the stock rows allowed; only the fork's pages turn them off.
         LemelsonPanelSession.shared.stockExtrasVisible = true
+        LemelsonPanelSession.shared.keptOpenAIWebItems = nil
         let fleetProjection = self.fleetAccountProjection(for: context.currentProvider)
         if self.addFleetFallback(fleetProjection, to: menu, context: context) {
             return false
@@ -861,11 +862,18 @@ extension StatusItemController {
                     context: context.openAIContext,
                     addedOpenAIWebItems: addedOpenAIWebItems)
                 self.addUsageHistoryClusterIfNeeded(to: menu, context: context)
+            } else if let kept = LemelsonPanelSession.shared.keptOpenAIWebItems {
+                // lemelson: the Codex page keeps the web charts it has no counterpart for.
+                self.addOpenAIWebItemsIfNeeded(
+                    to: menu,
+                    currentProvider: context.currentProvider,
+                    context: kept,
+                    addedOpenAIWebItems: false)
             }
         }
         if switcherSelection != .overview {
             self.addUserPluginMenuCards(to: menu, width: context.menuWidth)
-            // lemelson: the prompt cache row of a Claude or Antigravity page, right above the action rows.
+            // lemelson: the prompt cache row of a Claude, Antigravity or Codex page, right above the action rows.
             self.addLemelsonPendingCacheRow(to: menu, width: context.menuWidth)
         }
     }

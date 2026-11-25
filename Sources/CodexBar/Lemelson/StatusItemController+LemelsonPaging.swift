@@ -455,9 +455,9 @@ extension StatusItemController {
     func lemelsonMenuDidPopulate(_ menu: NSMenu) {
         self.lemelsonDetailMenuDidPopulate(menu)
         LemelsonPageTransition.shared.menuDidPopulate(menu)
-        self.lemelsonAntigravityPageMayBeShown(in: menu)
+        self.lemelsonProviderPageMayBeShown(in: menu)
         if self.openMenus[ObjectIdentifier(menu)] != nil, menu.supermenu == nil {
-            self.lemelsonScheduleAntigravityWarmup()
+            self.lemelsonScheduleProviderWarmup()
         }
     }
 }

@@ -192,6 +192,41 @@ struct LemelsonProviderBlockTests {
     }
 
     @Test @MainActor
+    func `codex facts come from the balance and the reset credits the app passes`() throws {
+        let now = Self.now
+        let extras = UsageCodexFacts.extras(
+            creditsLeft: 58169.35,
+            creditsNote: "  ",
+            resetCredits: [now.addingTimeInterval(5 * 86400 + 9 * 3600), nil, now.addingTimeInterval(86400)],
+            now: now)
+        #expect(extras.map(\.fact.id) == ["credits", "reset-credits"])
+        #expect(extras[0].fact.value == "58,169 left")
+        #expect(extras[0].fact.caption == nil)
+        #expect(extras[0].detail == nil)
+        #expect(extras[1].fact.value == "3 available")
+        // The soonest expiry, whatever the order.
+        #expect(extras[1].fact.caption == "Next one expires in 1d")
+        #expect(extras[1].detail != nil)
+        // Nothing to show: no rows at all.
+        #expect(UsageCodexFacts.extras(creditsLeft: nil, resetCredits: nil, now: now).isEmpty)
+        #expect(UsageCodexFacts.extras(creditsLeft: nil, resetCredits: [], now: now).isEmpty)
+        let small = UsageCodexFacts.extras(creditsLeft: 12.5, creditsNote: "Monthly cap", resetCredits: [nil], now: now)
+        #expect(small.map(\.fact.value) == ["12.5 left", "1 available"])
+        #expect(small.map(\.fact.caption) == ["Monthly cap", "No expiry date"])
+    }
+
+    @Test @MainActor
+    func `the account line goes under the card name and changes the header height key`() throws {
+        let state = try Self.state(key: "codex", block: Self.codexBlock())
+        let plain = try #require(UsageProviderPage(spec: .codex, state: state, now: Self.now, width: 310))
+        let named = try #require(UsageProviderPage(
+            spec: .codex, state: state, now: Self.now, width: 310, account: "someone@example.com"))
+        #expect(plain.rows.map(\.id) == named.rows.map(\.id))
+        #expect(plain.rows[0].heightFingerprint != named.rows[0].heightFingerprint)
+        #expect(plain.rows[1].heightFingerprint == named.rows[1].heightFingerprint)
+    }
+
+    @Test @MainActor
     func `a failed collector step shows one notice inside the card`() throws {
         let state = try Self.state(key: "antigravity", block: ["uuid": "antigravity", "error": "boom"])
         let page = try #require(UsageProviderPage(spec: .antigravity, state: state, now: Self.now, width: 310))

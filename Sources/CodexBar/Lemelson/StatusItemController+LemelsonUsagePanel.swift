@@ -83,6 +83,9 @@ final class LemelsonPanelSession {
     var refreshAgain = false
     /// Whether the stock CodexBar rows (Cost, Usage history, Plan Usage) stay under the panel.
     var stockExtrasVisible = true
+    /// With the stock rows off: the OpenAI web chart rows a page still keeps under it (the Codex page keeps
+    /// Usage breakdown and Credits history, which it has no counterpart for). Nil: none.
+    var keptOpenAIWebItems: StatusItemController.OpenAIWebContext?
     /// The mode whose rows are in the menu now, and rendered rows of the other modes kept for an
     /// instant switch (a fresh hosting view paints a frame late, which reads as a blink).
     var renderedMode: LemelsonPanelMode?
@@ -350,11 +353,14 @@ extension StatusItemController {
         let session = LemelsonPanelSession.shared
         session.stockExtrasVisible = true
         session.pendingCacheRow = nil
-        // The Antigravity tab is one page of its own (`+LemelsonAntigravity.swift`).
-        if context.currentProvider == .antigravity {
-            return self.addLemelsonAntigravityPage(to: menu, context: context)
+        session.keptOpenAIWebItems = nil
+        // The Antigravity and Codex tabs are one page each (`+LemelsonProviderPages.swift`); the rows of the
+        // provider page that is left are kept for the next visit.
+        let providerPage = LemelsonProviderPageState.state(for: context.currentProvider)
+        self.lemelsonKeepProviderRowsLeaving(except: providerPage?.provider)
+        if providerPage != nil {
+            return self.addLemelsonProviderPage(to: menu, context: context)
         }
-        self.lemelsonKeepAntigravityRowsLeaving()
         guard context.currentProvider == .claude,
               self.menuCardRenderingEnabledForController,
               let state = UsagePanelStore.load()
@@ -611,9 +617,9 @@ extension StatusItemController {
         }
         if let leaving = session.renderedMode, leaving != session.mode {
             var stash: [String: NSView] = [:]
-            // The Antigravity page's rows belong to another tab, not to a Claude mode.
+            // The Antigravity and Codex pages' rows belong to another tab, not to a Claude mode.
             for (id, view) in self.menuCardViewRecyclePool
-                where id.hasPrefix("lemelson") && !Self.lemelsonIsAntigravityRow(id)
+                where id.hasPrefix("lemelson") && !Self.lemelsonIsProviderPageRow(id)
             {
                 stash[id] = view
             }
@@ -761,8 +767,10 @@ extension StatusItemController {
         if stateDate != session.renderedStateDate {
             changed = true
         }
-        if let rendered = LemelsonAntigravityState.shared.renderedStateDate, rendered != stateDate {
-            changed = true
+        for page in LemelsonProviderPageState.all {
+            if let rendered = page.renderedStateDate, rendered != stateDate {
+                changed = true
+            }
         }
         if self.lemelsonStartRefreshIfDue() {
             changed = true
@@ -771,7 +779,7 @@ extension StatusItemController {
             self.invalidateMenus()
         }
         self.lemelsonScheduleModeWarmup()
-        self.lemelsonAntigravityPageMayBeShown(in: menu)
+        self.lemelsonProviderPageMayBeShown(in: menu)
     }
 
     func lemelsonAllMenusDidClose() {
@@ -780,8 +788,7 @@ extension StatusItemController {
         self.lemelsonDetailAllMenusDidClose()
         session.modeWarmTimer?.invalidate()
         session.modeWarmTimer = nil
-        LemelsonAntigravityState.shared.warmTimer?.invalidate()
-        LemelsonAntigravityState.shared.warmTimer = nil
+        self.lemelsonCancelProviderWarmups()
         session.openSubpanels = 0
         session.rebuildPending = false
         guard session.storeRefreshPending else { return }
@@ -853,9 +860,8 @@ extension StatusItemController {
         }
         session.rebuildPending = false
         // The rebuild only goes ahead while the menu still shows the tab it is for.
-        let provider: UsageProvider = self.lemelsonCurrentPageKey() == UsageProvider.antigravity.rawValue
-            ? .antigravity
-            : .claude
+        let provider = LemelsonProviderPageState.state(forPageKey: self.lemelsonCurrentPageKey())?.provider
+            ?? .claude
         for menu in self.openMenus.values where menu.supermenu == nil {
             self.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: provider)
         }
@@ -961,7 +967,8 @@ extension StatusItemController {
         // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Antigravity, opened on
         // Claude Limits. The log names the page after each step, so another line still reads.
         // On Antigravity (the last page) its two limit rows are pointed at: the detail panel appears
-        // fused to the menu and morphs from one row to the other and back.
+        // fused to the menu and morphs from one row to the other and back. Codex's two limit rows are pointed
+        // at the same way on the way back.
         let back = 1.3
         let steps: [(TimeInterval, () -> Void)] = [
             (0.7, { key(right, "right, to Spend") }),
@@ -986,17 +993,21 @@ extension StatusItemController {
             // Back again 80 ms later: the strip turns around from where it is.
             (8.38 + back, { key(left, "left mid-slide, reversal, to Overview") }),
             (8.8 + back, { key(right, "right, to Codex") }),
-            (9.1 + back, { key(right, "right into Claude Limits") }),
-            (9.6 + back, { highlight(0) }),
-            (10.0 + back, { highlight(2) }),
-            (11.1 + back, { [weak menu] in
+            // The Codex page's two limit rows: the detail panel appears and morphs between them.
+            (9.4 + back, { highlight(0) }),
+            (10.0 + back, { highlight(1) }),
+            (10.5 + back, { highlight(nil) }),
+            (10.9 + back, { key(right, "right into Claude Limits") }),
+            (11.4 + back, { highlight(0) }),
+            (11.8 + back, { highlight(2) }),
+            (12.9 + back, { [weak menu] in
                 LemelsonPageTransition.shared.trace = nil
                 menu?.cancelTracking()
             }),
         ]
         // With `lemelsonSmoothScroll` on: a slow vertical two-finger scroll and its momentum, one sample
         // per frame like a real gesture.
-        var scrollSteps: [(TimeInterval, () -> Void)] = [(10.1 + back, { highlight(nil) })]
+        var scrollSteps: [(TimeInterval, () -> Void)] = [(11.9 + back, { highlight(nil) })]
         let scrollStart = ProcessInfo.processInfo.systemUptime
         for index in 0...40 {
             let sample = index == 0
@@ -1007,7 +1018,7 @@ extension StatusItemController {
                     phase: index <= 20 ? .changed : .none,
                     isMomentum: index > 20,
                     time: scrollStart + Double(index) / 60)
-            scrollSteps.append((10.15 + back + Double(index) / 60, { [weak self, weak menu] in
+            scrollSteps.append((11.95 + back + Double(index) / 60, { [weak self, weak menu] in
                 guard let self, let menu else { return }
                 let scrollView = Self.attachedMenuScrollView(in: menu)
                 let before = scrollView?.contentView.bounds.origin.y ?? -1

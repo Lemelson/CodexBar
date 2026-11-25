@@ -97,7 +97,8 @@ public struct UsageProviderPage {
     public let cacheRow: Row?
 
     /// Nil when the summary has no block for this provider: then the stock card stays.
-    /// `clock` gives the time a hover detail is built at (as for Claude, the moment it is first shown);
+    /// `account` is a quiet line under the card name (Codex: the e-mail CodexBar's own Codex card shows); nil
+    /// leaves it out. `clock` gives the time a hover detail is built at (as for Claude, the moment it is first shown);
     /// the preview passes its fixed time.
     public init?(
         spec: UsageProviderSpec,
@@ -106,6 +107,7 @@ public struct UsageProviderPage {
         width: CGFloat,
         detailWidth: CGFloat = UsageProviderPage.defaultDetailWidth,
         refreshing: Bool = false,
+        account: String? = nil,
         extras: [Extra] = [],
         clock: @escaping @MainActor () -> Date = { Date() })
     {
@@ -167,8 +169,10 @@ public struct UsageProviderPage {
             plan: spec.shortPlan(block.account.planName ?? block.worth?.planName),
             measuredAt: block.account.measuredAt,
             now: now,
+            note: account.map { UsageLimitCardHeader.Note($0, isWarning: false) },
             width: width,
-            hasLimits: slices > 0), separatorAfter: slices == 0, inCard: true)
+            hasLimits: slices > 0), separatorAfter: slices == 0, inCard: true,
+            fingerprint: account == nil ? "" : ":account")
         if let notice {
             let last = isLast()
             add(.notice, "notice", UsageLimitCardNoticeRow(

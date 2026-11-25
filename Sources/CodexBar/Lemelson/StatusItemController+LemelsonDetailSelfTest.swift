@@ -368,7 +368,8 @@ extension StatusItemController {
     /// to the app's own queue (the real path through NSMenu's tracking loop): Claude Limits, the cache row,
     /// Spend (Accounts → Models → Accounts, then 90d), Value, Classic and its cache row, Antigravity and its
     /// cache row and Status Page, back to Classic's Status Page (the fused panel) and its "Open Status Page"
-    /// row, Codex's Status Page, and back to Claude, where a click on Status Page closes the menu (the
+    /// row, the Codex page (its rows listed, both limit rows, the reset credits fact, the cache row, the
+    /// footer, Status Page), and back to Claude, where a click on Status Page closes the menu (the
     /// self-test only logs the page it would open).
     func lemelsonTourSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
         let log = Self.lemelsonLog
@@ -428,14 +429,26 @@ extension StatusItemController {
         at(13.1, [(0, { tools.key(right: false, "left, to Spend") })])
         at(13.6, [(0, { tools.key(right: false, "left, to Limits") })])
         at(14.2, [(0, { tools.key(right: false, "left, to Codex") })])
-        at(15.0, hover("Status Page", statusRow))
-        at(16.0, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
-        at(16.8, hover("Status Page", statusRow))
-        at(17.6, [(0, {
+        // The Codex page: its two limit rows (the detail panel morphs between them), a card fact with a
+        // detail (limit reset credits, when CodexBar has them), the cache row and the footer.
+        let codex = UsageProviderSpec.codex
+        let codexRow: (String) -> () -> NSMenuItem? = { [weak menu] id in
+            { menu?.items.first { ($0.representedObject as? String) == id } }
+        }
+        at(14.9, [(0, { tools.describeRows(prefixes: [codex.idPrefix, codex.limitRowPrefix], label: "codex") })])
+        at(15.0, hover("Codex 5h", codexRow(codex.limitRowPrefix + "5h")))
+        at(15.7, hover("Codex 7d", codexRow(codex.limitRowPrefix + "7d")))
+        at(16.4, hover("Codex reset credits", codexRow(codex.idPrefix + "fact-reset-credits")))
+        at(17.1, hover("cache", cacheRow))
+        at(17.8, [(0, { tools.describeFooter() })])
+        at(18.0, hover("Status Page", statusRow))
+        at(19.0, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
+        at(19.8, hover("Status Page", statusRow))
+        at(20.6, [(0, {
             guard let item = statusRow() else { return }
             tools.click(item, label: "Status Page")
         })])
-        at(18.4, [(0, { [weak menu] in
+        at(21.4, [(0, { [weak menu] in
             log.notice("tour: end, menu open=\(menu.map { self.openMenus[ObjectIdentifier($0)] != nil } ?? false)")
             #if DEBUG
             LemelsonMenuEventFilter.probe = nil
@@ -549,10 +562,11 @@ struct LemelsonSelfTestTools {
         StatusItemController.lemelsonLog
     }
 
-    /// The prompt cache row of a Claude or Antigravity page.
+    /// The prompt cache row of a Claude, Antigravity or Codex page.
     static func isCacheRow(_ item: NSMenuItem) -> Bool {
         let id = item.representedObject as? String
-        return id == "lemelsonCache-claude" || id == UsageProviderSpec.antigravity.idPrefix + "cache"
+        return id == "lemelsonCache-claude"
+            || UsageProviderSpec.Key.allCases.contains { id == UsageProviderSpec.spec(for: $0).idPrefix + "cache" }
     }
 
     func page() -> String {
@@ -621,6 +635,22 @@ struct LemelsonSelfTestTools {
         let name = highlighted.map { $0.title.isEmpty ? ($0.representedObject as? String ?? "?") : $0.title } ?? "none"
         let row = item.flatMap(self.rect(of:)).map { NSStringFromRect($0.0) } ?? "-"
         self.log.notice("tour: \(label, privacy: .public) on \(self.page(), privacy: .public): highlighted=\(name, privacy: .public) panel=\(panel.visibleKey ?? "hidden", privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public) row=\(row, privacy: .public) menu=\(NSStringFromRect(self.menuWindow?.frame ?? .zero), privacy: .public)")
+    }
+
+    /// Every row of the menu whose id starts with one of `prefixes`, with its frame and the height its
+    /// content wants: the page's rows as built, in menu order.
+    func describeRows(prefixes: [String], label: String) {
+        guard let menu = self.menu else { return }
+        var count = 0
+        for item in menu.items {
+            guard let id = item.representedObject as? String, prefixes.contains(where: id.hasPrefix) else { continue }
+            count += 1
+            let frame = self.rect(of: item).map { NSStringFromRect($0.0) } ?? "-"
+            let wants = item.view.map { Int($0.fittingSize.height) } ?? -1
+            self.log.notice("tour: \(label, privacy: .public) row \(id, privacy: .public) \(frame, privacy: .public) wants \(wants)")
+        }
+        let titles = menu.items.filter { !$0.isSeparatorItem && $0.view == nil }.map(\.title)
+        self.log.notice("tour: \(label, privacy: .public) \(count) page rows on \(self.page(), privacy: .public); native rows: \(titles.joined(separator: " | "), privacy: .public)")
     }
 
     /// Frames of the rows around the cache row: it and the native rows next to it should line up.

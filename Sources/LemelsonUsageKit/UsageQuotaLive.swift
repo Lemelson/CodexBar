@@ -1,8 +1,10 @@
 import Foundation
 
-// The live readings file of the Antigravity quota (contract: usage/ANTIGRAVITY-STATE.md, section
-// "Live readings file (written by the app)"). CodexBar's own history keeps only the peak of each clock
-// hour; every fresh reading the app gets is appended here, and the collector imports it.
+// The live readings files of a provider quota (contract: usage/ANTIGRAVITY-STATE.md, section
+// "Live readings file (written by the app)"; usage/CODEX-STATE.md uses the same format):
+// `antigravity-quota.jsonl` (Antigravity's Gemini 5-hour and weekly quota) and `codex-quota.jsonl` (Codex's
+// session and weekly window). CodexBar's own history keeps only the peak of each clock hour; every fresh
+// reading the app gets is appended here, and the collector imports it.
 //
 //   {"ts": 1795424947, "source": "codexbar-live", "windows": {"5h": {"pct": 1.0, "resetsAt": 1795439520}, …},
 //    "plan": "…"}
@@ -15,7 +17,7 @@ import Foundation
 // compaction never loses it.
 
 /// One quota reading: USED percent and reset time of the 5-hour and the weekly window.
-public struct UsageAntigravityLiveReading: Equatable, Sendable {
+public struct UsageQuotaLiveReading: Equatable, Sendable {
     public struct Window: Equatable, Sendable {
         /// Used percent, 0–100.
         public var pct: Double
@@ -67,7 +69,7 @@ public struct UsageAntigravityLiveReading: Equatable, Sendable {
     public static let resetTolerance = 60
 
     /// Same windows, same percentages and the same reset times (within `resetTolerance`).
-    public func hasSameValues(as other: UsageAntigravityLiveReading) -> Bool {
+    public func hasSameValues(as other: UsageQuotaLiveReading) -> Bool {
         func same(_ lhs: Window?, _ rhs: Window?) -> Bool {
             switch (lhs, rhs) {
             case (nil, nil):
@@ -127,13 +129,18 @@ public struct UsageAntigravityLiveReading: Equatable, Sendable {
     }
 }
 
-/// Appends readings to the live file following the contract's rules.
+/// Appends readings to one provider's live file following the contract's rules. One writer per file: it
+/// remembers the last line it wrote.
 @MainActor
-public final class UsageAntigravityLiveWriter {
-    public static let shared = UsageAntigravityLiveWriter()
+public final class UsageQuotaLiveWriter {
+    /// `antigravity-quota.jsonl`.
+    public static let antigravity = UsageQuotaLiveWriter(url: UsageQuotaLiveWriter.url(fileName: "antigravity-quota.jsonl"))
+    /// `codex-quota.jsonl`.
+    public static let codex = UsageQuotaLiveWriter(url: UsageQuotaLiveWriter.url(fileName: "codex-quota.jsonl"))
 
-    public static var defaultURL: URL {
-        UsagePanelStore.defaultURL.deletingLastPathComponent().appendingPathComponent("antigravity-quota.jsonl")
+    /// A file next to the summary (`state.json`).
+    public nonisolated static func url(fileName: String) -> URL {
+        UsagePanelStore.defaultURL.deletingLastPathComponent().appendingPathComponent(fileName)
     }
 
     /// A line goes in at least this often while readings keep coming, even when nothing changed.
@@ -156,17 +163,17 @@ public final class UsageAntigravityLiveWriter {
     }
 
     /// The last line written (or found at the end of the file on first use).
-    public private(set) var last: UsageAntigravityLiveReading?
+    public private(set) var last: UsageQuotaLiveReading?
     private var loadedLast = false
 
-    public init(url: URL = UsageAntigravityLiveWriter.defaultURL) {
+    public init(url: URL) {
         self.url = url
     }
 
     /// Whether `reading` goes into the file after `last`: some value changed, or ten minutes passed.
     public nonisolated static func decide(
-        _ reading: UsageAntigravityLiveReading,
-        after last: UsageAntigravityLiveReading?) -> Outcome
+        _ reading: UsageQuotaLiveReading,
+        after last: UsageQuotaLiveReading?) -> Outcome
     {
         guard !reading.isEmpty else { return .empty }
         guard let last else { return .written }
@@ -176,7 +183,7 @@ public final class UsageAntigravityLiveWriter {
     }
 
     @discardableResult
-    public func record(_ reading: UsageAntigravityLiveReading) -> Outcome {
+    public func record(_ reading: UsageQuotaLiveReading) -> Outcome {
         if !self.loadedLast {
             self.loadedLast = true
             self.last = Self.lastLine(of: self.url)
@@ -221,7 +228,7 @@ public final class UsageAntigravityLiveWriter {
     }
 
     /// The last complete line of the file, read from its tail.
-    public nonisolated static func lastLine(of url: URL) -> UsageAntigravityLiveReading? {
+    public nonisolated static func lastLine(of url: URL) -> UsageQuotaLiveReading? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
@@ -232,7 +239,7 @@ public final class UsageAntigravityLiveWriter {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         lines.removeLast()
         for line in lines.reversed() {
-            if let reading = UsageAntigravityLiveReading(jsonLine: line) {
+            if let reading = UsageQuotaLiveReading(jsonLine: line) {
                 return reading
             }
         }
