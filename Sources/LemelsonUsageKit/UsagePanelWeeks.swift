@@ -166,7 +166,11 @@ struct UsageWeekLimit: Equatable {
         guard let used = self.used else { return ": \(you)" }
         var text: String
         let others = self.others ?? 0
-        if others < 0.5 {
+        if others < 0.5, self.reading == .atLeast, mine >= 0.5 {
+            // The limit was last read early in the week (an account that was not polled then): this Mac's part
+            // already covers that reading, so how much others used afterwards was never measured.
+            text = ": \(you), others unknown"
+        } else if others < 0.5 {
             text = mine < 0.5 ? "" : ", all yours"
         } else {
             let sign = self.reading == .atLeast ? "≥" : "≈"
