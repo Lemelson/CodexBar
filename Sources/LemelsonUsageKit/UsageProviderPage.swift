@@ -1,3 +1,5 @@
+import CryptoKit
+import Foundation
 import SwiftUI
 
 // MARK: - The page as menu rows
@@ -278,10 +280,21 @@ public struct UsageProviderPage {
     }
 
     /// The collector names the account its limits come from, the app names the account it shows, and the
-    /// two differ. Unknown on either side: no check (older summaries, a history not loaded yet).
+    /// two differ. The collector writes `quotaSource.account` as a short hash of CodexBar's key (the first 12
+    /// hex characters of its SHA-256, `usage/quota_provider.py` `account_hash`), so the key is compared both
+    /// as is and hashed. Unknown on either side: no check (older summaries, a history not loaded yet).
     public static func limitsOfAnotherAccount(_ block: UsageProviderBlock, shown: String?) -> Bool {
-        guard let shown, !shown.isEmpty, let collected = block.quotaSource?.accountKey else { return false }
-        return shown != collected
+        guard let shown, !shown.isEmpty, let collected = block.quotaSource?.accountKey?.lowercased() else {
+            return false
+        }
+        if shown.lowercased() == collected { return false }
+        // A hash shorter than 8 characters would match too easily; such a name is taken as a key only.
+        return !(collected.count >= 8 && Self.accountHash(shown).hasPrefix(collected))
+    }
+
+    /// The SHA-256 of an account key in lowercase hex: the collector's short account name is its prefix.
+    static func accountHash(_ key: String) -> String {
+        SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// The hover detail of one limit row: the same panel as a Claude limit, single source.

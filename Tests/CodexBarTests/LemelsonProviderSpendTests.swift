@@ -136,10 +136,20 @@ struct LemelsonProviderSpendTests {
         // Unknown on either side: no check.
         let unknown = try #require(UsageProviderPage(spec: .codex, state: state, now: Self.now, width: 310))
         #expect(unknown.rows.contains { $0.part == .limit(.week) })
-        // The older name of the key decodes too.
-        let legacy = try LemelsonProviderBlockTests.state(
-            key: "codex", block: Self.block(extra: ["quotaSource": ["account": "k"]]))
-        #expect(legacy.codex?.quotaSource?.accountKey == "k")
+        // The collector's own name: "account", the first 12 hex characters of the key's SHA-256
+        // (usage/quota_provider.py account_hash). The same account passes, another one gets the notice.
+        let real = "codex:v1:provider-account:16f67a35-0ccf-4275-b37e-2a012624a6d6"
+        let hashed = try LemelsonProviderBlockTests.state(
+            key: "codex", block: Self.block(extra: ["quotaSource": ["account": "b77c53f4e468"]]))
+        let parsed = try #require(hashed.codex)
+        #expect(parsed.quotaSource?.accountKey == "b77c53f4e468")
+        #expect(!UsageProviderPage.limitsOfAnotherAccount(parsed, shown: real))
+        #expect(UsageProviderPage.limitsOfAnotherAccount(parsed, shown: "codex:v1:provider-account:other"))
+        let antigravity = try LemelsonProviderBlockTests.state(
+            key: "codex", block: Self.block(extra: ["quotaSource": ["account": "f69e38e798ab"]]))
+        #expect(try !UsageProviderPage.limitsOfAnotherAccount(
+            #require(antigravity.codex),
+            shown: "4b32437a24c18ef0a8c42f256f2a7309e0bc788adea89b2efea7ccb1c9896dcf"))
     }
 
     @Test
