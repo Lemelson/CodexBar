@@ -200,7 +200,7 @@ public struct UsageProviderPage {
                 text: notice.text, detail: notice.detail, style: style, width: width, last: last),
                 separatorAfter: last, inCard: true)
         } else {
-            for (kind, window) in windows {
+            for (index, (kind, window)) in windows.enumerated() {
                 let last = isLast()
                 add(
                     .limit(kind),
@@ -214,7 +214,8 @@ public struct UsageProviderPage {
                         sources: .single,
                         sessionsLeft: block.sessionsLeft(for: kind, now: now),
                         sessionsNote: block.sessionsMeasuringCaption(for: kind, now: now),
-                        last: last),
+                        last: last,
+                        afterHeader: index == 0),
                     separatorAfter: last,
                     inCard: true,
                     detail: {

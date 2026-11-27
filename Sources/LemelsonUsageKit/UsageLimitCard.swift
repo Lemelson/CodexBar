@@ -52,6 +52,8 @@ struct UsageLimitCardSlice: ViewModifier {
     var first = false
     var last = false
     var highlighted = false
+    /// The row right under the header: it draws the end of the header's tint wash at its top.
+    var spill = false
     @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
@@ -69,6 +71,11 @@ struct UsageLimitCardSlice: ViewModifier {
                     Color(nsColor: .selectedContentBackgroundColor)
                 } else {
                     Color.primary.opacity(self.scheme == .dark ? 0.044 : 0.045)
+                        .overlay(alignment: .top) {
+                            if self.spill {
+                                UsageLimitCardWash.spill(self.style.tint).frame(height: UsageLimitCardWash.spillHeight)
+                            }
+                        }
                 }
             }
             .clipShape(shape)
@@ -86,6 +93,45 @@ struct UsageLimitCardSlice: ViewModifier {
             }
             .frame(width: self.width)
             .padding(.bottom, self.last ? 6 : 0)
+    }
+}
+
+/// The account colour behind a card's name: strongest at the top, a fast drop, then a long tail that ends a fifth
+/// of a header's height into the first row. The header and that row are separate menu rows, so each draws its
+/// part of the one gradient (the header from the top to `edge`, the row from `edge` to the end).
+enum UsageLimitCardWash {
+    /// Opacity at the very top (the first design had 0.40).
+    static let strength = 0.56
+    /// How far the wash reaches, in header heights.
+    static let reach = 1.2
+    /// The part below the header, in points: the reach past a single-line header (41 pt).
+    static let spillHeight: CGFloat = 8
+    /// Where the opacity curve bends, as a share of the whole wash, and the share of `strength` left there.
+    private static let knee = 0.55
+    private static let kneeShare = 0.425
+    /// The bottom of the header as a share of the whole wash.
+    private static let edge = 1 / reach
+
+    /// Opacity at `x`: 0 is the top of the header, 1 the end of the wash.
+    static func opacity(_ x: Double) -> Double {
+        let share = x <= self.knee
+            ? 1 - (1 - self.kneeShare) * x / self.knee
+            : self.kneeShare * (1 - (x - self.knee) / (1 - self.knee))
+        return self.strength * min(1, max(0, share))
+    }
+
+    static func header(_ tint: Color) -> LinearGradient {
+        LinearGradient(
+            stops: [0, self.knee, self.edge].map { .init(color: tint.opacity(self.opacity($0)), location: $0 / self.edge) },
+            startPoint: .top,
+            endPoint: .bottom)
+    }
+
+    static func spill(_ tint: Color) -> LinearGradient {
+        LinearGradient(
+            colors: [tint.opacity(self.opacity(self.edge)), tint.opacity(0)],
+            startPoint: .top,
+            endPoint: .bottom)
     }
 }
 
@@ -216,16 +262,7 @@ public struct UsageLimitCardHeader: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background {
-            LinearGradient(
-                stops: [
-                    .init(color: self.style.tint.opacity(0.40), location: 0),
-                    .init(color: self.style.tint.opacity(0.17), location: 0.55),
-                    .init(color: self.style.tint.opacity(0), location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom)
-        }
+        .background { UsageLimitCardWash.header(self.style.tint) }
         .modifier(UsageLimitCardSlice(style: self.style, width: self.width, first: true, last: !self.hasLimits))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(self.accessibilitySummary)
@@ -380,6 +417,8 @@ public struct UsageLimitCardRow: View {
     /// In place of `sessionsLeft` while the session size is being measured: "5h sessions: measuring, 1 of 3…".
     let sessionsNote: String?
     let last: Bool
+    /// The first row under the header: draws the end of the header's tint wash.
+    let afterHeader: Bool
     @Environment(\.usageRowHighlighted) private var highlighted
 
     public init(
@@ -391,7 +430,8 @@ public struct UsageLimitCardRow: View {
         sources: UsageLimitSources = .split,
         sessionsLeft: UsageSessionsLeft?,
         sessionsNote: String? = nil,
-        last: Bool)
+        last: Bool,
+        afterHeader: Bool = false)
     {
         self.kind = kind
         self.window = window
@@ -402,6 +442,7 @@ public struct UsageLimitCardRow: View {
         self.sessionsLeft = sessionsLeft
         self.sessionsNote = sessionsNote
         self.last = last
+        self.afterHeader = afterHeader
     }
 
     private var symbol: String {
@@ -474,7 +515,8 @@ public struct UsageLimitCardRow: View {
         .padding(.vertical, 8)
         .modifier(UsageLimitCardSeam())
         .modifier(UsageLimitCardSlice(
-            style: self.style, width: self.width, last: self.last, highlighted: self.highlighted))
+            style: self.style, width: self.width, last: self.last, highlighted: self.highlighted,
+            spill: self.afterHeader))
     }
 }
 
@@ -589,6 +631,6 @@ public struct UsageLimitCardNoticeRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .modifier(UsageLimitCardSeam())
-        .modifier(UsageLimitCardSlice(style: self.style, width: self.width, last: self.last))
+        .modifier(UsageLimitCardSlice(style: self.style, width: self.width, last: self.last, spill: true))
     }
 }

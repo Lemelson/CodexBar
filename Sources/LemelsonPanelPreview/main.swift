@@ -331,7 +331,8 @@ struct PreviewRoot: View {
                     now: self.now,
                     width: self.menuWidth,
                     sessionsLeft: UsageSessionsLeft.make(for: entry.0, account: account, in: state, now: self.now),
-                    last: index == windows.count - 1)
+                    last: index == windows.count - 1,
+                    afterHeader: index == 0)
                     .environment(\.usageRowHighlighted, self.highlighted)
             }
         }
