@@ -18,11 +18,19 @@ struct ClaudeSwitcherStateFetchStrategy: ProviderFetchStrategy {
             .appendingPathComponent("Library/Application Support/ClaudeSwitcher/usage/state.json")
     }
 
-    /// The strategy is enabled by the mere presence of the summary: without it CodexBar works as usual.
+    static var accountsURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/ClaudeSwitcher/accounts.json")
+    }
+
+    /// Enabled whenever Claude Switcher has either `state.json` or `accounts.json` so CodexBar never
+    /// bypasses Switcher's VPN rule by falling back to direct network probes while `state.json` updates.
     static func makeIfAvailable(fileManager: FileManager = .default) -> ClaudeSwitcherStateFetchStrategy? {
         // Tests exercise CodexBar's own source routing; a summary on the developer's Mac must not change it.
         guard !TestProcessSafety.isRunning else { return nil }
-        return fileManager.fileExists(atPath: self.stateURL.path) ? ClaudeSwitcherStateFetchStrategy() : nil
+        let exists = fileManager.fileExists(atPath: self.stateURL.path)
+            || fileManager.fileExists(atPath: self.accountsURL.path)
+        return exists ? ClaudeSwitcherStateFetchStrategy() : nil
     }
 
     func isAvailable(_: ProviderFetchContext) async -> Bool {
@@ -31,9 +39,7 @@ struct ClaudeSwitcherStateFetchStrategy: ProviderFetchStrategy {
 
     func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
         let state = try Self.loadState()
-        guard let account = state.accounts.first(where: { $0.active == true }) else {
-            throw StateError.noActiveAccount
-        }
+        let account = try Self.resolveActiveAccount(in: state)
         guard let usage = Self.snapshot(for: account, now: Date()) else {
             throw StateError.noMeasurement(account.short)
         }
@@ -69,12 +75,51 @@ struct ClaudeSwitcherStateFetchStrategy: ProviderFetchStrategy {
     }
 
     struct Account: Decodable {
+        let uuid: String?
         let name: String
         let short: String
         let active: Bool?
         let planName: String?
         let has5h: Bool?
         let windows: [String: Window]?
+    }
+
+    private struct SwitcherAccountsFile: Decodable {
+        struct Entry: Decodable {
+            let id: String
+            let accountUuid: String?
+        }
+
+        let activeId: String?
+        let accounts: [Entry]
+    }
+
+    static func activeAccountUuid(from accountsURL: URL = ClaudeSwitcherStateFetchStrategy.accountsURL) -> String? {
+        guard let data = try? Data(contentsOf: accountsURL, options: [.uncached]),
+              let store = try? JSONDecoder().decode(SwitcherAccountsFile.self, from: data),
+              let activeId = store.activeId,
+              let uuid = store.accounts.first(where: { $0.id == activeId })?.accountUuid,
+              !uuid.isEmpty
+        else { return nil }
+        return uuid
+    }
+
+    /// Reconciles `state.json` against `accounts.json` when available so an account switch never displays
+    /// the previous account's limits while `tick.py --switch` is still writing the new `state.json`.
+    static func resolveActiveAccount(
+        in state: State,
+        accountsURL: URL = ClaudeSwitcherStateFetchStrategy.accountsURL) throws -> Account
+    {
+        if let liveUuid = self.activeAccountUuid(from: accountsURL) {
+            if let matched = state.accounts.first(where: { $0.uuid == liveUuid }) {
+                return matched
+            }
+            throw StateError.noActiveAccount
+        }
+        guard let account = state.accounts.first(where: { $0.active == true }) else {
+            throw StateError.noActiveAccount
+        }
+        return account
     }
 
     struct Window: Decodable {

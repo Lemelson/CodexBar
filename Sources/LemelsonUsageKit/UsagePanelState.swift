@@ -17,6 +17,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     /// What runs the limits refresh when the menu opens.
     public var collector: Collector?
     public var vpnUp: Bool?
+    public var vpnState: String?
     public var accounts: [Account]
     /// Gemini use through Antigravity (`usage/ANTIGRAVITY-STATE.md`). Decoded leniently: a malformed
     /// block never breaks the Claude part of the summary.
@@ -34,7 +35,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     private var cacheErrorField: Lenient<String>?
 
     enum CodingKeys: String, CodingKey {
-        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, antigravity, codex, cache
+        case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, vpnState, antigravity, codex, cache
         case cacheErrorField = "cacheError"
         case kFable = "k_fable"
         case kSource = "k_source"
@@ -87,6 +88,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         /// account is the active one. Missing in older summaries: see `refreshesInBackground`.
         public var refresh: String?
         public var refreshEverySec: Double?
+        public var pausedByVpn: Bool?
         /// Prompt cache of this account by span ("today", "7d", "30d"); never fails the summary.
         public var cache: UsageCacheStats? = nil
         /// Set when the collector failed on this account ("error: ValueError: …"): the entry then has only its
@@ -128,10 +130,11 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
             }
         }
 
-        /// Read in the background, but skipped while the VPN is on (`lastPoll.status == "vpn_mismatch"`):
-        /// the reading is waiting, not failing.
+        /// Read in the background, but skipped while the VPN is on (`pausedByVpn == true` or
+        /// `lastPoll.status == "vpn_mismatch"`): the reading is waiting, not failing.
         public var isPausedByVPN: Bool {
-            self.refreshesInBackground && self.lastPoll?.status == "vpn_mismatch"
+            if let paused = self.pausedByVpn { return paused }
+            return self.refreshesInBackground && self.lastPoll?.status == "vpn_mismatch"
         }
 
         public func window(_ kind: WindowKind) -> Window? {

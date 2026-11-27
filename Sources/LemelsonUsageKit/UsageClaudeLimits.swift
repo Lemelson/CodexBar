@@ -51,7 +51,8 @@ extension UsageLimitCardStyle {
 
 extension UsageLimitCardHeader {
     /// A Claude account's card header: no plan on the right (the three accounts are told apart by name and
-    /// tint), the age of an old reading, and a note when the account needs something.
+    /// tint), the VPN pause status and the age of an old reading in the top-right corner, and a warning note
+    /// below only when the account needs an action.
     public init(
         account: UsagePanelState.Account,
         style: UsageLimitCardStyle,
@@ -62,6 +63,8 @@ extension UsageLimitCardHeader {
         self.init(
             name: account.displayName,
             style: style,
+            status: account.limitCardStatus,
+            statusAccessibilityLabel: account.limitCardStatus != nil ? "Paused while VPN is on" : nil,
             measuredAt: account.measuredAt,
             now: now,
             note: account.limitCardNote,
@@ -71,21 +74,32 @@ extension UsageLimitCardHeader {
 }
 
 extension UsagePanelState.Account {
-    /// The line under a Claude account's name: what needs an action from me, else the VPN pause.
-    var limitCardNote: UsageLimitCardHeader.Note? {
+    /// The line under a Claude account's name: only what needs an action from me (warnings).
+    public var limitCardNote: UsageLimitCardHeader.Note? {
         if let note = self.unavailableNote ?? (self.lastPoll?.status == "auth_rejected" ? nil : self.actionNote) {
             return .init(note, isWarning: true)
         }
-        return self.pauseNote.map { .init($0, isWarning: false) }
+        return nil
+    }
+
+    /// Quiet trailing label in the header's top-right corner when paused by VPN (unless a warning takes precedence).
+    public var limitCardStatus: String? {
+        guard self.limitCardNote == nil else { return nil }
+        return self.pauseStatus
+    }
+
+    /// Age badge text shown in the card header ("2h old"), or nil while fresh.
+    public func limitCardAgeText(now: Date) -> String? {
+        UsageLimitCardHeader.ageText(measuredAt: self.measuredAt, now: now)
     }
 
     /// An account the collector skips while the VPN is on is waiting, not failing.
-    var pauseNote: String? {
-        self.isPausedByVPN ? "Paused while VPN is on" : nil
+    var pauseStatus: String? {
+        self.isPausedByVPN ? "Paused · VPN" : nil
     }
 
     /// What needs an action from me. Of the reasons an account is merely waiting only the VPN pause is shown
-    /// (`pauseNote`, quietly); for the rest the age of the reading says enough.
+    /// (`pauseStatus`, quietly in the header corner); for the rest the age of the reading says enough.
     var actionNote: String? {
         switch self.lastPoll?.status {
         case "auth_rejected":

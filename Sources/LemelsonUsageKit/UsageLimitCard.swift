@@ -116,6 +116,10 @@ public struct UsageLimitCardHeader: View {
     let style: UsageLimitCardStyle
     /// Short plan name on the right ("Ultra 5x", "Plus"); nil leaves it out.
     let plan: String?
+    /// Compact quiet status on the right ("Paused · VPN"); keeps paused cards single-line.
+    let status: String?
+    /// Spoken VoiceOver description for `status` when the visual text is abbreviated.
+    let statusAccessibilityLabel: String?
     /// Time of the newest reading: its age is shown once it is no longer fresh.
     let measuredAt: Double?
     let now: Date
@@ -129,6 +133,8 @@ public struct UsageLimitCardHeader: View {
         name: String,
         style: UsageLimitCardStyle,
         plan: String? = nil,
+        status: String? = nil,
+        statusAccessibilityLabel: String? = nil,
         measuredAt: Double?,
         now: Date,
         note: Note? = nil,
@@ -138,6 +144,8 @@ public struct UsageLimitCardHeader: View {
         self.name = name
         self.style = style
         self.plan = plan
+        self.status = status
+        self.statusAccessibilityLabel = statusAccessibilityLabel
         self.measuredAt = measuredAt
         self.now = now
         self.note = note
@@ -146,9 +154,19 @@ public struct UsageLimitCardHeader: View {
     }
 
     /// "2h old", once the reading is no longer fresh.
-    static func ageText(measuredAt: Double?, now: Date) -> String? {
+    nonisolated public static func ageText(measuredAt: Double?, now: Date) -> String? {
         guard let measuredAt, !UsageLimitReading.isFresh(measuredAt, now: now) else { return nil }
         return UsageFormat.age(measuredAt, now: now).replacingOccurrences(of: " ago", with: " old")
+    }
+
+    /// Full spoken VoiceOver summary of the card header (expands abbreviated trailing statuses).
+    public var accessibilitySummary: String {
+        var parts = [self.name]
+        if let plan { parts.append(plan) }
+        if let status { parts.append(self.statusAccessibilityLabel ?? status) }
+        if let age = Self.ageText(measuredAt: self.measuredAt, now: self.now) { parts.append(age) }
+        if let note { parts.append(note.text) }
+        return parts.joined(separator: ", ")
     }
 
     public var body: some View {
@@ -163,6 +181,7 @@ public struct UsageLimitCardHeader: View {
                 Text(self.name)
                     .font(.system(size: 14, weight: .semibold))
                     .lineLimit(1)
+                    .layoutPriority(2)
                 if self.style.active {
                     Circle().fill(self.style.tint).frame(width: 6, height: 6).accessibilityHidden(true)
                 }
@@ -171,15 +190,22 @@ public struct UsageLimitCardHeader: View {
                     if let plan {
                         Text(plan)
                             .font(.system(size: 10.5, weight: .medium))
+                            .layoutPriority(1)
+                    }
+                    if let status {
+                        Text(status)
+                            .font(.system(size: 9.5, weight: .medium))
+                            .truncationMode(.tail)
+                            .accessibilityLabel(self.statusAccessibilityLabel ?? status)
                     }
                     if let age = Self.ageText(measuredAt: self.measuredAt, now: self.now) {
                         Label(age, systemImage: "clock.arrow.circlepath")
                             .font(.system(size: 9.5, weight: .regular))
+                            .layoutPriority(1)
                     }
                 }
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .layoutPriority(1)
             }
             if let note {
                 Text(note.text)
@@ -201,7 +227,8 @@ public struct UsageLimitCardHeader: View {
                 endPoint: .bottom)
         }
         .modifier(UsageLimitCardSlice(style: self.style, width: self.width, first: true, last: !self.hasLimits))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(self.accessibilitySummary)
         .accessibilityAddTraits(self.style.active ? .isSelected : [])
     }
 }

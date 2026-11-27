@@ -384,6 +384,7 @@ extension StatusItemController {
     /// Called once at start. Each provider's observation re-arms itself on every change of the store.
     func lemelsonObserveProviderPages() {
         guard !SettingsStore.isRunningTests else { return }
+        self.lemelsonObserveAccountSwitches()
         for page in LemelsonProviderPageState.all {
             self.lemelsonObserve(page)
         }

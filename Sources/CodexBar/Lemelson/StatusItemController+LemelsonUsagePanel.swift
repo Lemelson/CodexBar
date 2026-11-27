@@ -100,6 +100,10 @@ final class LemelsonPanelSession {
     var warmWidth: CGFloat = 0
     var isWarming = false
     var modeWarmTimer: Timer?
+    var activeSwitchToken: String?
+    var switchObservers: [NSObjectProtocol] = []
+    var stateWatcher: DispatchSourceFileSystemObject?
+    var lastObservedStateDate: Date?
 
     /// The pinned mode: every menu opens in it. Nil: the menu opens in the mode shown last.
     var pinnedMode: LemelsonPanelMode? {
@@ -136,10 +140,10 @@ private enum LemelsonCollectorRunner {
     }
 
     /// Returns when the collector exits, or after 45 seconds at most. No thread waits in the meantime.
-    static func run(python: String, tick: String) async {
+    static func run(python: String, tick: String, switchRefresh: Bool = false) async {
         let box = Box()
         box.process.executableURL = URL(fileURLWithPath: python)
-        box.process.arguments = [tick, "--refresh"]
+        box.process.arguments = [tick, switchRefresh ? "--switch" : "--refresh"]
         box.process.standardOutput = FileHandle.nullDevice
         box.process.standardError = FileHandle.nullDevice
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
@@ -833,7 +837,7 @@ extension StatusItemController {
     /// at most once every 45 seconds and follows the VPN rule. `force` (fresh Antigravity or Codex readings) skips
     /// the 20 seconds and, while a pass is running, asks for one more after it.
     @discardableResult
-    func lemelsonStartRefreshIfDue(force: Bool = false) -> Bool {
+    func lemelsonStartRefreshIfDue(force: Bool = false, switchRefresh: Bool = false) -> Bool {
         let session = LemelsonPanelSession.shared
         guard !session.isRefreshing else {
             if force { session.refreshAgain = true }
@@ -852,10 +856,129 @@ extension StatusItemController {
         let python = collector.python
         let tick = collector.tick
         Task.detached(priority: .userInitiated) { [weak self] in
-            await LemelsonCollectorRunner.run(python: python, tick: tick)
+            await LemelsonCollectorRunner.run(python: python, tick: tick, switchRefresh: switchRefresh)
             await self?.lemelsonRefreshDidFinish()
         }
         return true
+    }
+
+    // MARK: - Immediate refresh on Claude Switcher account switch
+
+    private static let switcherAccountDidSwitchNotification =
+        Notification.Name("com.lemelson.claudeswitcher.accountDidSwitch")
+    private static let switcherUsageRefreshDidFinishNotification =
+        Notification.Name("com.lemelson.claudeswitcher.usageRefreshDidFinish")
+
+    /// Subscribes once at startup to Claude Switcher's distributed notifications and watches the usage
+    /// directory for atomic `state.json` replacements so the menu bar icon, Overview, and open menu
+    /// update immediately whenever an account switch completes.
+    func lemelsonObserveAccountSwitches() {
+        let session = LemelsonPanelSession.shared
+        guard session.switchObservers.isEmpty else { return }
+        let dnc = DistributedNotificationCenter.default()
+        let startObs = dnc.addObserver(
+            forName: Self.switcherAccountDidSwitchNotification,
+            object: nil,
+            queue: .main)
+        { [weak self] note in
+            let token = note.userInfo?["token"] as? String
+            let collectorStarted = (note.userInfo?["collectorStarted"] as? Bool) ?? true
+            Task { @MainActor [weak self] in
+                self?.lemelsonHandleAccountDidSwitch(token: token, collectorStarted: collectorStarted)
+            }
+        }
+        let finishObs = dnc.addObserver(
+            forName: Self.switcherUsageRefreshDidFinishNotification,
+            object: nil,
+            queue: .main)
+        { [weak self] note in
+            let token = note.userInfo?["token"] as? String
+            Task { @MainActor [weak self] in
+                self?.lemelsonHandleUsageRefreshDidFinish(token: token)
+            }
+        }
+        session.switchObservers = [startObs, finishObs]
+        self.lemelsonStartStateWatcher()
+    }
+
+    func lemelsonStopAccountSwitchObservers() {
+        let session = LemelsonPanelSession.shared
+        let dnc = DistributedNotificationCenter.default()
+        for obs in session.switchObservers {
+            dnc.removeObserver(obs)
+        }
+        session.switchObservers.removeAll()
+        session.stateWatcher?.cancel()
+        session.stateWatcher = nil
+    }
+
+    private func lemelsonStartStateWatcher() {
+        let session = LemelsonPanelSession.shared
+        guard session.stateWatcher == nil else { return }
+        let usageDir = UsagePanelStore.defaultURL.deletingLastPathComponent()
+        let fd = open(usageDir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        session.lastObservedStateDate = UsagePanelStore.modificationDate()
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .attrib],
+            queue: .main)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.lemelsonStateFileDidChange()
+            }
+        }
+        source.setCancelHandler {
+            close(fd)
+        }
+        source.resume()
+        session.stateWatcher = source
+    }
+
+    private func lemelsonStateFileDidChange() {
+        let session = LemelsonPanelSession.shared
+        guard let modDate = UsagePanelStore.modificationDate(),
+              modDate != session.lastObservedStateDate
+        else { return }
+        session.lastObservedStateDate = modDate
+        self.invalidateMenus()
+        if !self.openMenus.isEmpty {
+            self.lemelsonRebuildOpenMenus()
+        }
+        self.lemelsonRefreshStore()
+    }
+
+    private func lemelsonHandleAccountDidSwitch(token: String?, collectorStarted: Bool) {
+        let session = LemelsonPanelSession.shared
+        session.activeSwitchToken = token
+        session.renderedStateDate = nil
+        session.warmRows.removeAll()
+        if collectorStarted {
+            session.isRefreshing = true
+            session.lastRefreshStarted = Date()
+        } else {
+            self.lemelsonStartRefreshIfDue(force: true, switchRefresh: true)
+        }
+        self.invalidateMenus()
+        if !self.openMenus.isEmpty {
+            self.lemelsonRebuildOpenMenus()
+        }
+        self.lemelsonRefreshStore()
+    }
+
+    private func lemelsonHandleUsageRefreshDidFinish(token: String?) {
+        let session = LemelsonPanelSession.shared
+        if let active = session.activeSwitchToken, let token, active != token {
+            return
+        }
+        session.activeSwitchToken = nil
+        session.isRefreshing = false
+        session.lastObservedStateDate = UsagePanelStore.modificationDate()
+        self.invalidateMenus()
+        if !self.openMenus.isEmpty {
+            self.lemelsonRebuildOpenMenus()
+        }
+        self.lemelsonRefreshStore()
     }
 
     private func lemelsonRefreshDidFinish() {

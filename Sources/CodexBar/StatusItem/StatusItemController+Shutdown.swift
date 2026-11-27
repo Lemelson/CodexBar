@@ -24,6 +24,7 @@ extension StatusItemController {
     private func cancelShutdownTasks() {
         self.frontmostProviderMonitor?.stop()
         self.frontmostProviderMonitor = nil
+        self.lemelsonStopAccountSwitchObservers()
         self.agentSessions.stop()
         self.store.credentialNotificationsStopped = true
         self.store.retireCredentialNotifications()
