@@ -174,6 +174,14 @@ extension StatusItemController {
             extras: codex?.extras ?? [])
         else { return nil }
         page.renderedStateDate = UsagePanelStore.modificationDate()
+        // The spend chart's day panel, keyed by the spend row's id so warm-up and cached tab swaps keep it.
+        if let chartDay = built.chartDayDetail {
+            self.lemelsonRegisterChartDayDetail(
+                forRowID: page.spec.spendChartID,
+                .swiftUI(key: chartDay.key, width: built.detailWidth) {
+                    chartDay.build()
+                })
+        }
 
         for row in built.rows {
             // The footer's caption changes with the refreshing state.

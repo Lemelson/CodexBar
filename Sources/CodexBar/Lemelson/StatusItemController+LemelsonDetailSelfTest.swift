@@ -11,10 +11,19 @@ import os
 
 extension StatusItemController {
     static var lemelsonDetailSelfTestRequested: Bool {
-        UserDefaults.standard.bool(forKey: "lemelsonSelfTestDetail")
+        UserDefaults.standard.bool(forKey: "lemelsonSelfTestDetail") || self.lemelsonOverviewSelfTestRequested
+    }
+
+    /// `lemelsonSelfTestOverview -bool YES` (with `lemelsonSelfTestStart overview`): the Overview plan below
+    /// instead of the detail panel plan.
+    static var lemelsonOverviewSelfTestRequested: Bool {
+        UserDefaults.standard.bool(forKey: "lemelsonSelfTestOverview")
     }
 
     func lemelsonDetailSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        if Self.lemelsonOverviewSelfTestRequested {
+            return self.lemelsonOverviewSelfTestPlan(menu: menu)
+        }
         let log = Self.lemelsonLog
         let panel = UsageHoverPanelController.shared
         panel.trace = { message in
@@ -155,6 +164,171 @@ extension StatusItemController {
                 menu?.cancelTracking()
             }),
         ]
+    }
+
+    // MARK: - Overview
+
+    /// `lemelsonSelfTestOverview -bool YES` with `lemelsonSelfTestStart overview`: the Overview page's rows and
+    /// height, then its spend chart end to end inside the open menu, with events posted to this app's own queue
+    /// (`NSApp.postEvent`, the real path through NSMenu's tracking loop and the event filter; the pointer never
+    /// moves): a hover opens the day panel left of the menu, a press, three drags and a release across ~40 % of
+    /// the plot zoom into those days, one Escape zooms out with the menu still open. Then every Overview row with
+    /// a detail (the three providers, the prompt cache) is hovered and its panel's size logged.
+    func lemelsonOverviewSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        let log = Self.lemelsonLog
+        let panel = UsageHoverPanelController.shared
+        let pointer = UsageChartPointer.shared
+        let focus = UsageDayFocus.shared
+        let selection = UsagePanelSelection.shared
+        panel.trace = { message in
+            log.notice("panel: \(message, privacy: .public)")
+        }
+        pointer.trace = { message in
+            log.notice("chart: \(message, privacy: .public)")
+        }
+        let tools = LemelsonSelfTestTools(controller: self, menu: menu)
+        let menuWindow: () -> NSWindow? = { [weak self, weak menu] in
+            menu.flatMap { self?.lemelsonMenuWindow(of: $0) }
+        }
+        let isOpen: () -> Bool = { [weak self, weak menu] in
+            menu.map { self?.openMenus[ObjectIdentifier($0)] != nil } ?? false
+        }
+        // A point on the visible chart's plot, `fraction` of its width from the left, half-way down.
+        let plotPoint: (CGFloat) -> NSPoint? = { fraction in
+            guard let plot = pointer.activeChartPlotScreenRect() else { return nil }
+            return NSPoint(x: plot.minX + plot.width * fraction, y: plot.midY)
+        }
+        let postOnPlot: (NSEvent.EventType, CGFloat, String) -> Void = { type, fraction, label in
+            guard let point = plotPoint(fraction) else {
+                return log.notice("overview: no visible chart for \(label, privacy: .public) (registered \(pointer.registeredChartIDs.joined(separator: ","), privacy: .public))")
+            }
+            tools.post(type, at: point, in: menuWindow())
+            log.notice("overview: post \(label, privacy: .public) at \(Int(point.x)),\(Int(point.y))")
+        }
+        // The Overview rows that have a detail view, in menu order: the providers and the prompt cache.
+        let detailRows: () -> [NSMenuItem] = { [weak menu] in
+            let keys = LemelsonDetailPanelState.shared.itemKeys
+            return (menu?.items ?? []).filter { item in
+                guard keys[ObjectIdentifier(item)] != nil, let id = item.representedObject as? String else { return false }
+                return Self.lemelsonIsOverviewPageRow(id) || LemelsonSelfTestTools.isCacheRow(item)
+            }
+        }
+        let name: (NSMenuItem) -> String = { item in
+            (item.representedObject as? String) ?? item.title
+        }
+
+        var plan: [(TimeInterval, () -> Void)] = [
+            (0.4, {
+                let page = tools.page()
+                log.notice("overview: opened on \(page, privacy: .public)\(page == "overview" ? "" : " (set lemelsonSelfTestStart overview)", privacy: .public)")
+            }),
+            (0.6, { tools.describeOverviewRows(label: "overview") }),
+            // Hover: the day panel slides out left of the menu.
+            (1.2, {
+                log.notice("overview: charts registered \(pointer.registeredChartIDs.joined(separator: ","), privacy: .public) plot \(NSStringFromRect(pointer.activeChartPlotScreenRect() ?? .zero), privacy: .public)")
+                postOnPlot(.mouseMoved, 0.8, "hover at 80%")
+            }),
+            (1.8, {
+                let alpha = String(format: "%.2f", panel.panelWindow?.alphaValue ?? -1)
+                log.notice("overview: after hover: day panel=\(panel.isShowingChartDayPanel) panel=\(panel.visibleKey ?? "hidden", privacy: .public) alpha=\(alpha, privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public) chart=\(focus.activeChartID ?? "none", privacy: .public) day=\(focus.hoveredDayKey ?? "none", privacy: .public)")
+            }),
+            // Drag across ~40 % of the plot: press, three drags, release.
+            (2.2, { postOnPlot(.leftMouseDown, 0.3, "press at 30%") }),
+            (2.35, { postOnPlot(.leftMouseDragged, 0.45, "drag to 45%") }),
+            (2.5, { postOnPlot(.leftMouseDragged, 0.6, "drag to 60%") }),
+            (2.65, { postOnPlot(.leftMouseDragged, 0.7, "drag to 70%") }),
+            (2.75, {
+                log.notice("overview: mid-drag: dragging=\(pointer.isDragging) span=\(focus.dragRange?.shortTitle ?? "none", privacy: .public) day panel=\(panel.isShowingChartDayPanel) menu open=\(isOpen())")
+            }),
+            (2.85, { postOnPlot(.leftMouseUp, 0.7, "release at 70%") }),
+            (3.35, {
+                let range = selection.customRange
+                log.notice("overview: after release: zoom=\(range?.shortTitle ?? "none", privacy: .public) days=\(range?.dayCount ?? 0) active drag=\(pointer.hasActiveDrag) menu open=\(isOpen())")
+            }),
+            // One Escape zooms out; the menu stays open.
+            (3.6, {
+                guard let window = menuWindow(), let event = NSEvent.keyEvent(
+                    with: .keyDown, location: .zero, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil,
+                    characters: "\u{1B}", charactersIgnoringModifiers: "\u{1B}", isARepeat: false, keyCode: 53)
+                else { return log.notice("overview: no menu window for Escape") }
+                NSApp.postEvent(event, atStart: false)
+                log.notice("overview: post Escape")
+            }),
+            (4.0, {
+                log.notice("overview: after Escape: zoom=\(selection.customRange?.shortTitle ?? "none", privacy: .public) menu open=\(isOpen()) page=\(tools.page(), privacy: .public)")
+            }),
+            // Second drag + double-click to zoom out (swallows paired leftMouseUp, keeps menu open).
+            (4.2, { postOnPlot(.leftMouseDown, 0.35, "press2 at 35%") }),
+            (4.35, { postOnPlot(.leftMouseDragged, 0.65, "drag2 to 65%") }),
+            (4.5, { postOnPlot(.leftMouseUp, 0.65, "release2 at 65%") }),
+            (4.85, {
+                guard let point = plotPoint(0.5), let window = menuWindow() else { return }
+                let local = window.convertPoint(fromScreen: point)
+                let ts = ProcessInfo.processInfo.systemUptime
+                if let down = NSEvent.mouseEvent(
+                    with: .leftMouseDown, location: local, modifierFlags: [], timestamp: ts,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 2, pressure: 1),
+                   let up = NSEvent.mouseEvent(
+                       with: .leftMouseUp, location: local, modifierFlags: [], timestamp: ts + 0.02,
+                       windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 2, pressure: 0)
+                {
+                    NSApp.postEvent(down, atStart: false)
+                    NSApp.postEvent(up, atStart: false)
+                    log.notice("overview: post double-click at 50% (zoom before=\(selection.customRange?.shortTitle ?? "none", privacy: .public))")
+                }
+            }),
+            (5.25, {
+                log.notice("overview: after double-click: zoom=\(selection.customRange?.shortTitle ?? "none", privacy: .public) menu open=\(isOpen())")
+            }),
+        ]
+        // The rows with a detail: three providers and the prompt cache (at most six, to bound the run).
+        for index in 0..<6 {
+            let start = 5.5 + Double(index) * 0.85
+            plan.append((start, {
+                let rows = detailRows()
+                if index == 0 {
+                    log.notice("overview: \(rows.count) rows with a detail: \(rows.map(name).joined(separator: ", "), privacy: .public)")
+                }
+                guard rows.indices.contains(index) else { return }
+                tools.moveOver(rows[index], label: name(rows[index]))
+            }))
+            plan.append((start + 0.6, {
+                let rows = detailRows()
+                guard rows.indices.contains(index) else { return }
+                tools.describeHover(name(rows[index]), item: rows[index])
+                let alpha = String(format: "%.2f", panel.panelWindow?.alphaValue ?? -1)
+                log.notice("overview: hover \(name(rows[index]), privacy: .public): panel=\(panel.visibleKey ?? "hidden", privacy: .public) alpha=\(alpha, privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public)")
+            }))
+        }
+        // Switch right to Codex (hitting cached-swap) and verify its chart day panel opens cleanly.
+        plan.append((10.8, { [weak self] in
+            guard let self else { return }
+            let character = String(UnicodeScalar(0xF703)!)
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function],
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: 0, context: nil,
+                characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 124)
+            else { return }
+            _ = self.lemelsonHandleTrackedEvent(event)
+            log.notice("overview: paged right to \(self.lemelsonCurrentPageKey(), privacy: .public)")
+        }))
+        plan.append((11.6, {
+            log.notice("overview: after page right: page=\(tools.page(), privacy: .public) charts=\(pointer.registeredChartIDs.joined(separator: ","), privacy: .public)")
+            postOnPlot(.mouseMoved, 0.8, "codex chart hover at 80%")
+        }))
+        plan.append((12.2, {
+            let alpha = String(format: "%.2f", panel.panelWindow?.alphaValue ?? -1)
+            log.notice("overview: after codex hover: day panel=\(panel.isShowingChartDayPanel) panel=\(panel.visibleKey ?? "hidden", privacy: .public) alpha=\(alpha, privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public)")
+        }))
+        plan.append((12.6, { [weak menu] in
+            log.notice("overview: end, menu open=\(isOpen())")
+            panel.trace = nil
+            pointer.trace = nil
+            LemelsonPageTransition.shared.trace = nil
+            menu?.cancelTracking()
+        }))
+        return plan
     }
 
     /// `lemelsonSelfTestAdopted -bool YES`: points at every row of the opened page whose details the
@@ -456,13 +630,20 @@ extension StatusItemController {
         at(18.5, hover("cache", cacheRow))
         at(19.2, [(0, { tools.describeFooter() })])
         at(19.4, hover("Status Page", statusRow))
-        at(20.4, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
-        at(21.2, hover("Status Page", statusRow))
-        at(22.0, [(0, {
+        // Left of Codex is Overview: its rows and height against the screen, then back to Codex.
+        at(20.0, [(0, { tools.key(right: false, "left, to Overview") })])
+        at(20.7, [(0, {
+            guard tools.page() == "overview" else { return log.notice("tour: left of Codex is \(tools.page(), privacy: .public), not overview") }
+            tools.describeOverviewRows(label: "overview")
+        })])
+        at(20.9, [(0, { tools.key(right: true, "right, back to Codex") })])
+        at(21.6, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
+        at(22.4, hover("Status Page", statusRow))
+        at(23.2, [(0, {
             guard let item = statusRow() else { return }
             tools.click(item, label: "Status Page")
         })])
-        at(22.8, [(0, { [weak menu] in
+        at(24.0, [(0, { [weak menu] in
             log.notice("tour: end, menu open=\(menu.map { self.openMenus[ObjectIdentifier($0)] != nil } ?? false)")
             #if DEBUG
             LemelsonMenuEventFilter.probe = nil
@@ -666,6 +847,27 @@ struct LemelsonSelfTestTools {
         let titles = menu.items.filter { !$0.isSeparatorItem && $0.view == nil }.map(\.title)
         self.log.notice("tour: \(label, privacy: .public) \(count) page rows on \(self.page(), privacy: .public); native rows: \(titles.joined(separator: " | "), privacy: .public)")
         // The whole menu against the room it has on this screen: the page fits when the first is smaller.
+        let visible = (self.menuWindow?.screen ?? NSScreen.main).map { Int($0.visibleFrame.height) } ?? -1
+        let window = Int(self.menuWindow?.frame.height ?? 0)
+        self.log.notice("tour: \(label, privacy: .public) menu content \(Int(menu.size.height)) pt, window \(window) pt, visible \(visible) pt")
+    }
+
+    /// The Overview page's rows (`LemelsonOverviewPageState.owns`) with their frames, and the whole menu
+    /// against the room it has on this screen.
+    func describeOverviewRows(label: String) {
+        guard let menu = self.menu else { return }
+        var count = 0
+        var total = 0
+        for item in menu.items {
+            guard let id = item.representedObject as? String, StatusItemController.lemelsonIsOverviewPageRow(id)
+            else { continue }
+            count += 1
+            let frame = self.rect(of: item)?.0 ?? .zero
+            total += Int(frame.height)
+            let wants = item.view.map { Int($0.fittingSize.height) } ?? -1
+            self.log.notice("tour: \(label, privacy: .public) row \(id, privacy: .public) height \(Int(frame.height)) wants \(wants) \(NSStringFromRect(frame), privacy: .public)")
+        }
+        self.log.notice("tour: \(label, privacy: .public) \(count) page rows, \(total) pt, on \(self.page(), privacy: .public)")
         let visible = (self.menuWindow?.screen ?? NSScreen.main).map { Int($0.visibleFrame.height) } ?? -1
         let window = Int(self.menuWindow?.frame.height ?? 0)
         self.log.notice("tour: \(label, privacy: .public) menu content \(Int(menu.size.height)) pt, window \(window) pt, visible \(visible) pt")

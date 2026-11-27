@@ -282,12 +282,37 @@ public final class UsagePanelSelection: ObservableObject {
     @Published public var spendPeriod: UsageSpendPeriod {
         didSet {
             UserDefaults.standard.set(self.spendPeriod.rawValue, forKey: Self.periodKey)
+            // Any period choice ends a zoom, also the period that was chosen before it.
+            if self.customRange != nil {
+                self.customRange = nil
+            }
         }
     }
+
+    /// The span a drag across a per-day chart zoomed into; nil shows `spendPeriod`. Menu-wide like the
+    /// period, but not saved: a new launch starts on the period.
+    @Published public var customRange: UsageSpendRange? = nil
 
     @Published public var spendBreakdown: UsageSpendBreakdown {
         didSet {
             UserDefaults.standard.set(self.spendBreakdown.rawValue, forKey: Self.breakdownKey)
+        }
+    }
+
+    /// A period button: ends a zoom and shows `period` (also when it is the period chosen before the zoom).
+    public func selectPeriod(_ period: UsageSpendPeriod) {
+        if self.customRange != nil {
+            self.customRange = nil
+        }
+        if self.spendPeriod != period {
+            self.spendPeriod = period
+        }
+    }
+
+    /// Zoom out to the chosen period.
+    public func clearCustomRange() {
+        if self.customRange != nil {
+            self.customRange = nil
         }
     }
 
@@ -341,6 +366,9 @@ public struct UsageSpendAccountTotals: Sendable, Equatable {
 /// reads ready values instead of walking the daily records and the calendar again.
 /// All values depend only on the summary and on today's date.
 public struct UsageSpendDigest: Sendable, Equatable {
+    /// The chart id of Claude Spend's per-day chart (its day panel: `UsageDayDetailCatalog.panelKey(for:)`).
+    public static let defaultChartID = "lemelsonSpendSummary"
+
     /// Spend of one account on one day: one bar segment of the chart.
     public struct Bar: Identifiable, Sendable, Equatable {
         let key: String
@@ -370,17 +398,43 @@ public struct UsageSpendDigest: Sendable, Equatable {
         let chart: UsageDayChartData
         let modelChart: UsageDayChartData
         let whole: UsageModelSplit
+        /// Set for a zoom: the span shown (`period` is then the smallest preset period covering it).
+        var range: UsageSpendRange?
 
         func chart(_ breakdown: UsageSpendBreakdown) -> UsageDayChartData {
             breakdown == .accounts ? self.chart : self.modelChart
         }
     }
 
+    /// One day of all accounts together: what the day panel and a zoom read.
+    struct DayRecord: Sendable, Equatable {
+        let key: String
+        let date: Date
+        /// Parallel to `legend`: dollars as the chart's bars count them, tokens from the model split.
+        let byAccount: [UsageModelUse]
+        let split: UsageModelSplit
+
+        var total: UsageModelUse {
+            self.byAccount.reduce(UsageModelUse(), +)
+        }
+    }
+
     public let today: UsageModelSplit
     public let week: UsageModelSplit
     let legend: [Legend]
+    /// The Claude models every layer and the day panel list: those of the longest period, so a zoom or a
+    /// day never changes the number of rows.
+    let families: [UsageModelFamily]
     private let periods: [Period]
     private let accounts: [String: UsageSpendAccountTotals]
+    private let days: [DayRecord]
+    private let dayIndex: [String: Int]
+    private let dayTotals: [UsageDayTotal]
+    private let chartLegend: [UsageDayChartData.Legend]
+    private let accountBars: [UsageDayChartData.Bar]
+    private let modelBars: [UsageDayChartData.Bar]
+    private let accountNotes: [String: String]
+    private let modelNotes: [String: String]
 
     public init(state: UsagePanelState, now: Date) {
         let totals = state.accounts.map { UsageSpendAccountTotals(account: $0, now: now) }
@@ -391,14 +445,17 @@ public struct UsageSpendDigest: Sendable, Equatable {
         self.today = whole(1)
         self.week = whole(7)
         // An account the collector failed on has no days: it stays out of the chart's legend.
-        self.legend = state.accounts.filter { !$0.isUnavailable }.map { account in
+        let shown = state.accounts.filter { !$0.isUnavailable }
+        let legend = shown.map { account in
             Legend(id: account.id, name: account.displayName, colorIndex: state.colorIndex(of: account))
         }
+        self.legend = legend
         var byID: [String: UsageSpendAccountTotals] = [:]
         for (account, total) in zip(state.accounts, totals) {
             byID[account.id] = total
         }
         self.accounts = byID
+        self.families = whole(UsageSpendPeriod.allCases.map(\.days).max() ?? 180).shownFamilies
 
         // Every bar once; each period keeps the ones inside its range (the order stays as before).
         let allBars = state.accounts.flatMap { account in
@@ -415,6 +472,17 @@ public struct UsageSpendDigest: Sendable, Equatable {
                     fable: day.fable ?? 0)
             }
         }
+        let accountBars = allBars.map {
+            UsageDayChartData.Bar(key: $0.key, date: $0.date, series: $0.account, color: .account($0.colorIndex),
+                                  usd: $0.usd)
+        }
+        // The grey part of a pointed-at day: that day's Opus and Fable over all accounts.
+        var sums: [String: (opus: Double, fable: Double)] = [:]
+        for bar in allBars {
+            let sum = sums[bar.key] ?? (0, 0)
+            sums[bar.key] = (sum.opus + bar.opus, sum.fable + bar.fable)
+        }
+        let accountNotes = sums.mapValues { "Opus \(UsageFormat.usd($0.opus)) · Fable \(UsageFormat.usd($0.fable))" }
         // The same days by model, all accounts together.
         var modelDays: [String: UsageModelSplit] = [:]
         for account in state.accounts {
@@ -430,47 +498,54 @@ public struct UsageSpendDigest: Sendable, Equatable {
                 return UsageDayChartData.Bar(key: key, date: date, series: family.title, color: .claude(family), usd: usd)
             }
         }
+        let modelNotes = modelDays.mapValues { "\(UsageFormat.tokens($0.total.tokens)) tokens" }
+        let chartLegend = legend.map { UsageDayChartData.Legend(id: $0.id, name: $0.name, color: .account($0.colorIndex)) }
+        self.accountBars = accountBars
+        self.modelBars = modelBars
+        self.accountNotes = accountNotes
+        self.modelNotes = modelNotes
+        self.chartLegend = chartLegend
+
+        // Every day with use, all accounts together, for the day panel and a zoom.
+        var records: [String: (split: UsageModelSplit, byAccount: [UsageModelUse])] = [:]
+        for (index, account) in shown.enumerated() {
+            for day in account.daily ?? [] {
+                let split = day.split
+                let tokens = split.total.tokens
+                guard day.total > 0 || tokens > 0 else { continue }
+                var record = records[day.day]
+                    ?? (split: UsageModelSplit(), byAccount: Array(repeating: UsageModelUse(), count: shown.count))
+                record.split.add(split)
+                record.byAccount[index] = record.byAccount[index] + UsageModelUse(usd: day.total, tokens: tokens)
+                records[day.day] = record
+            }
+        }
+        let days = records.keys.sorted().compactMap { key -> DayRecord? in
+            guard let record = records[key], let date = UsageDayKey.date(key) else { return nil }
+            return DayRecord(key: key, date: date, byAccount: record.byAccount, split: record.split)
+        }
+        self.days = days
+        self.dayIndex = Dictionary(uniqueKeysWithValues: days.enumerated().map { ($1.key, $0) })
+        self.dayTotals = days.map { UsageDayTotal(key: $0.key, date: $0.date, use: $0.total) }
+
         let trackedSince = state.trackedSince
-        let legend = self.legend.map { UsageDayChartData.Legend(id: $0.id, name: $0.name, color: .account($0.colorIndex)) }
         self.periods = UsageSpendPeriod.allCases.map { period in
             let domain = Self.domain(period: period, trackedSince: trackedSince, now: now)
             let from = UsageDayKey.string(domain.lowerBound)
-            let bars = allBars.filter { $0.key >= from }
-            // The grey part of a pointed-at day: that day's Opus and Fable over all accounts.
-            var sums: [String: (opus: Double, fable: Double)] = [:]
-            for bar in bars {
-                let sum = sums[bar.key] ?? (0, 0)
-                sums[bar.key] = (sum.opus + bar.opus, sum.fable + bar.fable)
-            }
-            let chart = UsageDayChartData(
+            let split = whole(period.days)
+            let charts = Self.charts(
                 period: period,
                 domain: domain,
-                bars: bars.map {
-                    UsageDayChartData.Bar(key: $0.key, date: $0.date, series: $0.account, color: .account($0.colorIndex),
-                                          usd: $0.usd)
-                },
+                includes: { $0 >= from },
                 hint: Self.hint(period: period, domain: domain, now: now),
-                legend: legend,
-                dayNotes: sums.mapValues { "Opus \(UsageFormat.usd($0.opus)) · Fable \(UsageFormat.usd($0.fable))" },
-                emptyText: "No Claude Code spend on this Mac in this period.",
-                chipLimit: nil,
-                centsInChips: false)
-            let periodModelBars = modelBars.filter { $0.key >= from }
-            let periodSplit = whole(period.days)
-            let modelChart = UsageDayChartData(
-                period: period,
-                domain: domain,
-                bars: periodModelBars,
-                hint: chart.hint,
-                legend: periodSplit.shownFamilies.map {
-                    UsageDayChartData.Legend(id: $0.rawValue, name: $0.title, color: .claude($0))
-                },
-                dayNotes: modelDays.filter { $0.key >= from }
-                    .mapValues { "\(UsageFormat.tokens($0.total.tokens)) tokens" },
-                emptyText: chart.emptyText,
-                chipLimit: nil,
-                centsInChips: true)
-            return Period(period: period, chart: chart, modelChart: modelChart, whole: periodSplit)
+                split: split,
+                accountBars: accountBars,
+                modelBars: modelBars,
+                legend: chartLegend,
+                accountNotes: accountNotes,
+                modelNotes: modelNotes,
+                range: nil)
+            return Period(period: period, chart: charts.accounts, modelChart: charts.models, whole: split)
         }
     }
 
@@ -480,6 +555,164 @@ public struct UsageSpendDigest: Sendable, Equatable {
 
     public func totals(for account: UsagePanelState.Account) -> UsageSpendAccountTotals? {
         self.accounts[account.id]
+    }
+
+    // MARK: Zoom
+
+    /// The layer of a zoom: the same charts and models as a period, over the span's days only.
+    public func period(range: UsageSpendRange) -> Period {
+        var split = UsageModelSplit()
+        for day in self.days where range.contains(day.key) {
+            split.add(day.split)
+        }
+        let covering = range.coveringPeriod
+        let charts = Self.charts(
+            period: covering,
+            domain: range.domain,
+            includes: { range.contains($0) },
+            hint: Self.zoomHint,
+            split: split,
+            accountBars: self.accountBars,
+            modelBars: self.modelBars,
+            legend: self.chartLegend,
+            accountNotes: self.accountNotes,
+            modelNotes: self.modelNotes,
+            range: range)
+        return Period(period: covering, chart: charts.accounts, modelChart: charts.models, whole: split, range: range)
+    }
+
+    /// The zoomed header's tiles: the span's total, daily average and busiest day.
+    public func customSummary(for range: UsageSpendRange) -> UsageCustomRangeSummary {
+        UsageDayStats.summary(range: range, days: self.dayTotals)
+    }
+
+    // MARK: Day panel
+
+    /// The day panel of Claude Spend's chart: by account and by model, whichever split the chart shows.
+    public func dayDetailCatalog(chartID: String = UsageSpendDigest.defaultChartID, now: Date) -> UsageDayDetailCatalog {
+        let digest = self
+        let todayKey = UsageDayKey.string(now)
+        return UsageDayDetailCatalog(
+            chartID: chartID,
+            defaultDayKey: todayKey,
+            fixedSection1Rows: self.legend.count,
+            fixedSection2Rows: self.families.count,
+            section1NameWidth: 66,
+            // `UsageModelRow.claudeNameWidth`: room for "Sonnet".
+            section2NameWidth: 40,
+            dayDetail: { key, period, range in
+                digest.dayDetail(key, period: period, range: range, todayKey: todayKey)
+            },
+            rangePreview: { range in
+                digest.rangePreview(range)
+            })
+    }
+
+    func dayDetail(_ key: String, period: UsageSpendPeriod, range: UsageSpendRange?, todayKey: String) -> UsageDayDetail {
+        let domain = range?.domain ?? self[period].chart.domain
+        let context = UsageDayStats.context(dayKey: key, domain: domain, days: self.dayTotals)
+        let record = self.dayIndex[key].map { self.days[$0] }
+        let total = record?.total ?? UsageModelUse()
+        return UsageDayDetail(
+            dayKey: key,
+            date: record?.date ?? UsageDayKey.date(key) ?? domain.lowerBound,
+            isToday: key == todayKey,
+            totalUsd: total.usd,
+            totalTokens: total.tokens,
+            periodDays: context.count,
+            periodLabel: UsageDayStats.label(days: context.count, isCustom: range != nil),
+            isCustomRange: range != nil,
+            periodDailyAverageUsd: context.average,
+            rankInPeriod: context.rank,
+            section1Title: "By account",
+            section1Rows: self.accountRows(record?.byAccount ?? []),
+            section2Title: "By model",
+            section2Rows: self.familyRows(record?.split ?? UsageModelSplit()))
+    }
+
+    func rangePreview(_ range: UsageSpendRange) -> UsageRangeDetailPreview {
+        var byAccount = Array(repeating: UsageModelUse(), count: self.legend.count)
+        var split = UsageModelSplit()
+        for day in self.days where range.contains(day.key) {
+            split.add(day.split)
+            for (index, use) in day.byAccount.enumerated() where byAccount.indices.contains(index) {
+                byAccount[index] = byAccount[index] + use
+            }
+        }
+        let summary = UsageDayStats.summary(range: range, days: self.dayTotals)
+        return UsageRangeDetailPreview(
+            range: range,
+            totalUsd: summary.total.usd,
+            totalTokens: summary.total.tokens,
+            dailyAverageUsd: summary.dailyAverage.usd,
+            busiestDay: summary.busiestDay,
+            section1Title: "By account",
+            section1Rows: self.accountRows(byAccount),
+            section2Title: "By model",
+            section2Rows: self.familyRows(split))
+    }
+
+    private func accountRows(_ uses: [UsageModelUse]) -> [UsageDayDetail.Row] {
+        self.legend.enumerated().map { index, account in
+            let use = uses.indices.contains(index) ? uses[index] : UsageModelUse()
+            return UsageDayDetail.Row(
+                id: account.id, label: account.name, color: .account(account.colorIndex), usd: use.usd,
+                tokens: use.tokens)
+        }
+    }
+
+    private func familyRows(_ split: UsageModelSplit) -> [UsageDayDetail.Row] {
+        self.families.map { family in
+            UsageDayDetail.Row(
+                id: family.rawValue, label: family.title, color: .claude(family), usd: split[family].usd,
+                tokens: split[family].tokens)
+        }
+    }
+
+    // MARK: Building
+
+    /// One period's (or one zoom's) chart by account and by model.
+    private static func charts(
+        period: UsageSpendPeriod,
+        domain: ClosedRange<Date>,
+        includes: (String) -> Bool,
+        hint: String,
+        split: UsageModelSplit,
+        accountBars: [UsageDayChartData.Bar],
+        modelBars: [UsageDayChartData.Bar],
+        legend: [UsageDayChartData.Legend],
+        accountNotes: [String: String],
+        modelNotes: [String: String],
+        range: UsageSpendRange?) -> (accounts: UsageDayChartData, models: UsageDayChartData)
+    {
+        let emptyText = range == nil
+            ? "No Claude Code spend on this Mac in this period."
+            : "No Claude Code spend on this Mac on these days."
+        let accounts = UsageDayChartData(
+            period: period,
+            domain: domain,
+            bars: accountBars.filter { includes($0.key) },
+            hint: hint,
+            legend: legend,
+            dayNotes: accountNotes.filter { includes($0.key) },
+            emptyText: emptyText,
+            chipLimit: nil,
+            centsInChips: false,
+            customRange: range)
+        let models = UsageDayChartData(
+            period: period,
+            domain: domain,
+            bars: modelBars.filter { includes($0.key) },
+            hint: hint,
+            legend: split.shownFamilies.map {
+                UsageDayChartData.Legend(id: $0.rawValue, name: $0.title, color: .claude($0))
+            },
+            dayNotes: modelNotes.filter { includes($0.key) },
+            emptyText: emptyText,
+            chipLimit: nil,
+            centsInChips: true,
+            customRange: range)
+        return (accounts, models)
     }
 
     /// Claude Code logs on this Mac do not go back forever: the empty part of the chart is not drawn.
@@ -499,11 +732,13 @@ public struct UsageSpendDigest: Sendable, Equatable {
         let calendar = Calendar.current
         let asked = calendar.date(byAdding: .day, value: -(period.days - 1), to: calendar.startOfDay(for: now))
         if let asked, domain.lowerBound > asked {
-            return "Since \(UsageFormat.format(domain.lowerBound, "MMM d")), the first day on record. "
-                + "Point at a bar."
+            return "Since \(UsageFormat.format(domain.lowerBound, "MMM d")) · point at a bar or drag to zoom."
         }
-        return "Point at a bar for that day."
+        return "Point at a bar; drag across days to zoom in."
     }
+
+    /// The caption of a zoomed chart at rest.
+    static let zoomHint = "Double-click the chart or pick a period to zoom out."
 }
 
 // MARK: - Shared rows
@@ -516,6 +751,12 @@ struct UsageModelRow: View {
     let color: Color
     /// Provider model names such as "Hydrogen" need more than the default.
     var nameWidth: CGFloat = 36
+    /// Cents below $10 ("$0.42"): a single day of a small model.
+    var fine: Bool = false
+    /// Model has tokens but no API price in the collector: show "no price" instead of "$0".
+    var unpriced: Bool = false
+    /// Empty day placeholder: hide bar and show em-dashes while preserving row height.
+    var placeholder: Bool = false
 
     /// Room for "Sonnet".
     static let claudeNameWidth: CGFloat = 40
@@ -524,23 +765,44 @@ struct UsageModelRow: View {
     static let usdWidth: CGFloat = 50
     static let shareWidth: CGFloat = 30
 
+    private var showsUnpriced: Bool {
+        !self.placeholder && self.unpriced && self.use.usd < 0.005 && self.use.tokens > 0
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             Text(self.name)
                 .font(.system(size: 11))
                 .lineLimit(1)
                 .frame(width: self.nameWidth, alignment: .leading)
-            UsageSplitBar(parts: [(self.use.usd, self.color)], scale: max(0.01, self.total))
-            Text(UsageFormat.tokens(self.use.tokens))
+            UsageSplitBar(
+                parts: self.placeholder ? [] : [(self.use.usd, self.color)],
+                scale: max(0.01, self.total))
+            Text(self.placeholder ? "—" : UsageFormat.tokens(self.use.tokens))
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: Self.tokensWidth, alignment: .trailing)
-            Text(UsageFormat.usd(self.use.usd))
-                .font(.system(size: 11, weight: .semibold))
-                .monospacedDigit()
-                .frame(width: Self.usdWidth, alignment: .trailing)
-            Text(UsageFormat.percent(self.use.usd / max(0.01, self.total) * 100))
+            if self.placeholder {
+                Text("—")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: Self.usdWidth, alignment: .trailing)
+            } else if self.showsUnpriced {
+                Text("no price")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: Self.usdWidth, alignment: .trailing)
+            } else {
+                Text(self.fine ? UsageFormat.usdFine(self.use.usd) : UsageFormat.usd(self.use.usd))
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .frame(width: Self.usdWidth, alignment: .trailing)
+            }
+            Text(self.placeholder || self.showsUnpriced
+                ? "—"
+                : UsageFormat.percent(self.use.usd / max(0.01, self.total) * 100))
                 .font(.system(size: 10.5))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -574,6 +836,7 @@ struct UsageModelLine: Identifiable, Sendable, Equatable {
     let label: String
     let color: UsageSeriesColor
     let use: UsageModelUse
+    var unpriced: Bool = false
 }
 
 /// The "By model" block of every spend section: column labels, one row per model, and an optional quiet
@@ -596,7 +859,8 @@ struct UsageModelRows: View {
                     use: line.use,
                     total: self.total,
                     color: line.color.color,
-                    nameWidth: self.nameWidth)
+                    nameWidth: self.nameWidth,
+                    unpriced: line.unpriced)
             }
             if !self.notes.isEmpty {
                 ViewThatFits(in: .horizontal) {

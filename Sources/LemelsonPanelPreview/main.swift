@@ -6,13 +6,15 @@ import SwiftUI
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
 //       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache
-//               |codex|codex-details|codex-cache|pages]
+//               |codex|codex-details|codex-cache|pages|overview|overview-details|overview-cache|day-detail]
 //       (limits, spend, value and details also as a comma list: --only limits,spend,value)
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--codex block.json] [--claude-cache real|full|plain|none]
 //       [--period 30] [--breakdown models] [--fill-missing] [--manual-age 30]
 //       [--drift month|week] [--hover-month 0] [--drift-fixture months] [--unit opus|mix|fable]
 //       [--value-period month|week] [--broken-account 1] [--cache-error]
+//       [--custom-range 2026-11-03..2026-11-14] [--drag-range 2026-11-05..2026-11-12]
+//       [--overview-breakdown providers|models]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
@@ -51,6 +53,18 @@ import SwiftUI
 // CodexBar's live Codex snapshot, which the preview cannot read.
 //
 // --only pages draws Claude Limits, the Antigravity page and the Codex page side by side.
+//
+// Overview (from the summary as is: all Claude accounts, its `codex` and `antigravity` blocks):
+// --only overview draws the page with its footer, the prompt cache row of all subscriptions and stand-ins for
+// the menu's own rows; overview-details the three provider panels and the page's day panel side by side;
+// overview-cache the cache row and its panel. --overview-breakdown picks the Providers / Models split
+// (default providers).
+// --only day-detail draws the day panels of Overview, Claude Spend, Codex and Antigravity (the summary's blocks,
+// else the fixture "full") for --hover-day (default today), plus Overview's panel for a day without calls and
+// for a dragged span (--drag-range, default the last 7 days).
+// --custom-range zooms every spend section into that span, as a drag across a chart does (spend, overview,
+// codex, antigravity show the zoomed state). --drag-range draws the charts and day panels as if that span were
+// being dragged across (the live selection band).
 
 struct ModeChips: View {
     let selected: String
@@ -145,6 +159,7 @@ struct PreviewRoot: View {
     var antigravity: UsagePanelState?
     var codex: UsagePanelState?
     var codexExtras: [UsageProviderPage.Extra] = []
+    var dragRange: UsageSpendRange?
 
     private let menuWidth: CGFloat = 310
     private let panelWidth: CGFloat = 340
@@ -198,8 +213,29 @@ struct PreviewRoot: View {
             if self.only == "codex-cache" {
                 self.providerCache(.codex, self.codex)
             }
+            if let state = self.state {
+                if self.only == "overview" {
+                    self.card(width: self.menuWidth) { self.overviewPage(state) }
+                }
+                if self.only == "overview-details" {
+                    self.overviewDetails(state)
+                }
+                if self.only == "overview-cache" {
+                    if let summary = UsageCacheSummary.all(state) {
+                        self.cachePair(summary)
+                    } else {
+                        self.card(width: self.menuWidth) {
+                            Text("No cache data in this summary: Overview has no cache row.").font(.system(size: 11)).padding(20)
+                        }
+                    }
+                }
+                if self.only == "day-detail" {
+                    self.dayDetails(state)
+                }
+            }
         }
         .environment(\.usagePreviewHoveredDay, self.hoverDay)
+        .environment(\.usagePreviewDragRange, self.dragRange)
         .padding(20)
         .background(Color(nsColor: .underPageBackgroundColor))
         .overlay {
@@ -305,6 +341,102 @@ struct PreviewRoot: View {
         }
     }
 
+    /// Overview as the menu stacks it: the page's rows (separators where a row asks for one), then the prompt
+    /// cache row right under the footer's status line, one group closed by a separator, and the menu's own rows.
+    @ViewBuilder private func overviewPage(_ state: UsagePanelState) -> some View {
+        let page = UsageOverviewPage(state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth)
+        Color.clear.frame(height: 4)
+        ForEach(Array(page.rows.enumerated()), id: \.element.id) { index, row in
+            let lit = self.highlighted && row.detail != nil
+            row.view
+                .environment(\.usageRowHighlighted, lit)
+                .modifier(PreviewChevron(shown: row.detail != nil, lit: lit))
+                .background(lit ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
+            // The footer's separator gives way to the line rows, as `addLemelsonLineRows` does.
+            if row.separatorAfter, index < page.rows.count - 1 || page.lineRows.isEmpty {
+                MenuSeparator()
+            }
+        }
+        if !page.lineRows.isEmpty {
+            ForEach(page.lineRows) { row in
+                row.view.frame(height: UsageCacheRowView.rowHeight)
+            }
+            MenuSeparator()
+        }
+        MockMenuItem(title: "Usage Dashboard", width: self.menuWidth)
+        MockMenuItem(title: "Status Page", width: self.menuWidth)
+            .padding(.bottom, 5)
+    }
+
+    /// The three provider panels and the page's day panel (for --hover-day, else today; --drag-range shows the
+    /// dragged span instead).
+    @ViewBuilder private func overviewDetails(_ state: UsagePanelState) -> some View {
+        let page = UsageOverviewPage(state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth)
+        ForEach(page.rows.filter { $0.detail != nil }) { row in
+            if let detail = row.detail {
+                self.card(width: self.panelWidth) { detail() }
+            }
+        }
+        if page.spend.hasSpend {
+            self.card(width: self.panelWidth) {
+                UsageDayDetailPanelView(
+                    catalog: page.spend.dayDetailCatalog(now: self.now),
+                    width: self.panelWidth,
+                    previewDayKey: self.hoverDay,
+                    previewRange: self.dragRange)
+            }
+        }
+    }
+
+    /// The day panels of every per-day chart, side by side: Overview (the day, a day without calls, a dragged
+    /// span), Claude Spend, Codex and Antigravity.
+    @ViewBuilder private func dayDetails(_ state: UsagePanelState) -> some View {
+        let day = self.hoverDay ?? UsageDayKey.string(self.now)
+        let calendar = Calendar.current
+        let emptyDay = UsageDayKey.string(calendar.date(byAdding: .day, value: -400, to: self.now) ?? self.now)
+        let weekAgo = calendar.date(byAdding: .day, value: -6, to: self.now) ?? self.now
+        let drag = self.dragRange ?? UsageSpendRange(startDate: weekAgo, endDate: self.now)
+        let overview = UsageOverviewSpend(state: state, now: self.now).dayDetailCatalog(now: self.now)
+        VStack(spacing: 18) {
+            self.dayCard("Overview · \(day)", UsageDayDetailPanelView(catalog: overview, width: self.panelWidth, previewDayKey: day))
+            self.dayCard("Overview · no calls", UsageDayDetailPanelView(catalog: overview, width: self.panelWidth, previewDayKey: emptyDay))
+        }
+        if let drag {
+            self.dayCard("Overview · dragging \(drag.shortTitle)", UsageDayDetailPanelView(
+                catalog: overview, width: self.panelWidth, previewDayKey: day, previewRange: drag))
+        }
+        self.dayCard("Claude Spend · \(day)", UsageDayDetailPanelView(
+            catalog: UsageSpendDigest(state: state, now: self.now).dayDetailCatalog(now: self.now),
+            width: self.panelWidth,
+            previewDayKey: day))
+        ForEach([UsageProviderSpec.codex, .antigravity], id: \.name) { spec in
+            if let block = self.providerState(spec, fallback: state).flatMap(spec.block(in:)), block.error == nil {
+                self.dayCard("\(spec.name) · \(day)", UsageDayDetailPanelView(
+                    catalog: UsageProviderSpend(block: block, spec: spec, now: self.now)
+                        .dayDetailCatalog(spec: spec, now: self.now),
+                    width: self.panelWidth,
+                    previewDayKey: day))
+            }
+        }
+    }
+
+    /// The summary's own block for the provider, else the fixture "full".
+    private func providerState(_ spec: UsageProviderSpec, fallback state: UsagePanelState) -> UsagePanelState? {
+        if spec.block(in: state) != nil {
+            return state
+        }
+        return spec.key == .codex ? CodexFixture.state("full", now: self.now) : AntigravityFixture.state("full", now: self.now)
+    }
+
+    private func dayCard(_ caption: String, _ panel: UsageDayDetailPanelView) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(caption)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+            self.card(width: self.panelWidth) { panel }
+        }
+    }
+
     private func card(width: CGFloat, @ViewBuilder content: () -> some View) -> some View {
         // Card slices fill the height they are given (a menu row's); side by side, a shorter column must not
         // stretch them to the tallest one.
@@ -400,6 +532,17 @@ func argument(after flag: String) -> String? {
     return arguments[index + 1]
 }
 
+/// "2026-11-03..2026-11-14" (either order); exits on a malformed span.
+func rangeArgument(after flag: String) -> UsageSpendRange? {
+    guard let text = argument(after: flag) else { return nil }
+    let parts = text.components(separatedBy: "..")
+    guard parts.count == 2, let range = UsageSpendRange(startDay: parts[0], endDay: parts[1]) else {
+        FileHandle.standardError.write(Data("\(flag): expected yyyy-mm-dd..yyyy-mm-dd, got \(text)\n".utf8))
+        exit(2)
+    }
+    return range
+}
+
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
     let usage = "usage: LemelsonPanelPreview out.png [--state file] [--dark] [--warm] [--now t] "
@@ -407,7 +550,8 @@ guard arguments.count >= 2 else {
         + "[--fixture name] [--antigravity file] [--codex file] [--no-extras] [--claude-cache real|full|plain|none] [--period n] "
         + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours] [--drift month|week] "
         + "[--hover-month n] [--drift-fixture months] [--unit opus|mix|fable] [--value-period month|week] "
-        + "[--broken-account n] [--cache-error]\n"
+        + "[--broken-account n] [--cache-error] [--custom-range a..b] [--drag-range a..b] "
+        + "[--overview-breakdown providers|models]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
@@ -520,6 +664,11 @@ UsagePanelSelection.shared.driftPeriod = argument(after: "--drift")
 UsagePanelSelection.shared.driftUnit = argument(after: "--unit").flatMap(UsageDriftUnit.init(rawValue:)) ?? .opus
 UsagePanelSelection.shared.valuePeriod = argument(after: "--value-period")
     .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
+UsageOverviewSelection.shared.breakdown = argument(after: "--overview-breakdown")
+    .flatMap(UsageOverviewBreakdown.init(rawValue:)) ?? .providers
+// After the period: choosing a period ends a zoom.
+UsagePanelSelection.shared.customRange = rangeArgument(after: "--custom-range")
+let dragRange = rangeArgument(after: "--drag-range")
 
 let appearance = NSAppearance(named: arguments.contains("--dark") ? .darkAqua : .aqua)
 
@@ -536,7 +685,8 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     hoverDay: argument(after: "--hover-day"),
     antigravity: antigravity,
     codex: codex,
-    codexExtras: argument(after: "--fixture") == nil || arguments.contains("--no-extras") ? [] : CodexFixture.extras(now: now)))
+    codexExtras: argument(after: "--fixture") == nil || arguments.contains("--no-extras") ? [] : CodexFixture.extras(now: now),
+    dragRange: dragRange))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)

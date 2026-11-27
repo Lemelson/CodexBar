@@ -18,6 +18,12 @@ struct UsageSegmentedControl<Option: Hashable>: NSViewRepresentable {
     let title: (Option) -> String
     @Binding var selection: Option
     var fillWidth: Bool = false
+    /// No segment lit (a zoomed spend chart: no period applies). A click on any segment, the bound one
+    /// included, then still reports it.
+    var deselected: Bool = false
+    /// Called for every click that picks a segment, also the one already selected while `deselected`; in place
+    /// of writing `selection` when set.
+    var onSelect: ((Option) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -38,26 +44,32 @@ struct UsageSegmentedControl<Option: Hashable>: NSViewRepresentable {
         control.setContentCompressionResistancePriority(.required, for: .vertical)
         control.setContentHuggingPriority(self.fillWidth ? .defaultLow : .required, for: .horizontal)
 
-        let selectedIndex = self.options.firstIndex(of: self.selection) ?? -1
+        let selectedIndex = self.deselected ? -1 : (self.options.firstIndex(of: self.selection) ?? -1)
         if control.selectedSegment != selectedIndex {
             control.selectedSegment = selectedIndex
         }
 
         context.coordinator.options = self.options
         context.coordinator.lastLabels = labels
-        context.coordinator.selected = self.selection
-        context.coordinator.setSelection = { [selection = self.$selection] value in
-            selection.wrappedValue = value
-        }
+        self.configure(context.coordinator)
         return control
+    }
+
+    private func configure(_ coordinator: Coordinator) {
+        coordinator.selected = self.selection
+        coordinator.deselected = self.deselected
+        if let onSelect = self.onSelect {
+            coordinator.setSelection = onSelect
+        } else {
+            coordinator.setSelection = { [selection = self.$selection] value in
+                selection.wrappedValue = value
+            }
+        }
     }
 
     func updateNSView(_ control: NSSegmentedControl, context: Context) {
         context.coordinator.options = self.options
-        context.coordinator.selected = self.selection
-        context.coordinator.setSelection = { [selection = self.$selection] value in
-            selection.wrappedValue = value
-        }
+        self.configure(context.coordinator)
 
         let labels = self.options.map(self.title)
         if context.coordinator.lastLabels != labels {
@@ -75,7 +87,7 @@ struct UsageSegmentedControl<Option: Hashable>: NSViewRepresentable {
             control.segmentDistribution = desiredDistribution
         }
 
-        let desiredIndex = self.options.firstIndex(of: self.selection) ?? -1
+        let desiredIndex = self.deselected ? -1 : (self.options.firstIndex(of: self.selection) ?? -1)
         if control.selectedSegment != desiredIndex {
             control.selectedSegment = desiredIndex
         }
@@ -96,14 +108,17 @@ struct UsageSegmentedControl<Option: Hashable>: NSViewRepresentable {
         var options: [Option] = []
         var lastLabels: [String] = []
         var selected: Option?
+        var deselected = false
         var setSelection: ((Option) -> Void)?
 
         @objc func changed(_ sender: NSSegmentedControl) {
             let index = sender.selectedSegment
             guard self.options.indices.contains(index) else { return }
             let next = self.options[index]
-            guard next != self.selected else { return }
+            // Deselected, the segment of the bound value is a real choice too (it ends a zoom).
+            guard next != self.selected || self.deselected else { return }
             self.selected = next
+            self.deselected = false
             self.setSelection?(next)
         }
     }

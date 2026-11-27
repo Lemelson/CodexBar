@@ -234,7 +234,7 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
     enum Key: String, CodingKey {
         case uuid, name, short, active, planName, planPriceUsd, has5h, sessionPctOfWeek, kFable
         case windows, rates, drift, lastMeasuredAt, weeks, daily, trackedSince, value
-        case usdToday, tokensToday, usd7d, tokens7d, usd30d, tokens30d
+        case usdToday, tokensToday, usd24h, tokens24h, usd7d, tokens7d, usd30d, tokens30d
         case beta, error, models, cache, coverage, quotaSource, valueReason, calibration
     }
 
@@ -278,6 +278,8 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
             daily: keys?.lenient([Lenient<UsagePanelState.Day>].self, .daily)?.compactMap(\.value),
             usdToday: number(.usdToday),
             tokensToday: number(.tokensToday),
+            usd24h: number(.usd24h),
+            tokens24h: number(.tokens24h),
             usd7d: number(.usd7d),
             tokens7d: number(.tokens7d),
             usd30d: number(.usd30d),
@@ -494,7 +496,7 @@ public struct UsageProviderSpend: Sendable, Equatable {
     /// A model row: one named model, or everything after the first few as "Other".
     typealias ModelRow = UsageModelLine
 
-    /// One selectable period: chart, model rows and the total.
+    /// One selectable period (or one zoom): chart, model rows and the total.
     public struct Period: Sendable, Equatable {
         public let period: UsageSpendPeriod
         let chart: UsageDayChartData
@@ -505,19 +507,44 @@ public struct UsageProviderSpend: Sendable, Equatable {
         let otherMembers: [String]
         /// No model inside "Other" had use in this period: the members are only named.
         let otherIsEmpty: Bool
+        /// Set for a zoom: the span shown (`period` is then the smallest preset period covering it).
+        var range: UsageSpendRange?
 
         /// The note under the rows with the first `count` members named and the rest counted:
         /// "Other: Astra $4,738, Sol 5.6 $1,942 and 4 more." Nil without an "Other" row.
         func otherNote(naming count: Int) -> String? {
             guard !self.otherMembers.isEmpty else { return nil }
+            if self.otherIsEmpty, self.range != nil {
+                return "Other: none on these days."
+            }
             let named = self.otherMembers.prefix(max(0, count))
             let rest = self.otherMembers.count - named.count
             var text = "Other: " + named.joined(separator: ", ")
             if rest > 0 {
                 text += named.isEmpty ? "\(rest) models" : " and \(rest) more"
             }
-            return text + (self.otherIsEmpty ? " (none in this period)." : ".")
+            let none = self.range == nil ? " (none in this period)." : " (none on these days)."
+            return text + (self.otherIsEmpty ? none : ".")
         }
+    }
+
+    /// One day of the history: use by model id, and the tokens of models the collector had no price for.
+    struct DayUses: Sendable, Equatable {
+        let key: String
+        let date: Date?
+        let uses: [String: UsageModelUse]
+        let unpriced: [String: Double]
+
+        var total: UsageModelUse {
+            self.uses.values.reduce(UsageModelUse(), +)
+        }
+    }
+
+    /// Which models get a named row (and a distinct color) for one split, and which share "Other".
+    struct RowPlan {
+        let named: [String]
+        let rest: [String]
+        let colors: [String: UsageSeriesColor]
     }
 
     public let today: UsageModelUse
@@ -530,6 +557,15 @@ public struct UsageProviderSpend: Sendable, Equatable {
     /// Display name of every model id the block names, by `UsageProviderBlock.modelLabels(spec:)`.
     public let labels: [String: String]
     private let periods: [Period]
+    private let perDay: [DayUses]
+    private let dayIndex: [String: Int]
+    private let dayTotals: [UsageDayTotal]
+    /// Every model of the history, most spend first.
+    private let order: [String]
+    private let hasOther: Bool
+    /// Models without a price in the 30-day model list.
+    private let unpricedModels: Set<String>
+    private let providerName: String
 
     /// Named model rows; with more models than this plus one, the rest share an "Other" row.
     static let namedRows = 3
@@ -547,16 +583,12 @@ public struct UsageProviderSpend: Sendable, Equatable {
             }
             return result
         }
-        let perDay = days.map { (key: $0.day, uses: uses($0)) }
+        let perDay = days.map {
+            DayUses(key: $0.day, date: UsageDayKey.date($0.day), uses: uses($0), unpriced: $0.unpriced ?? [:])
+        }
         func sum(lastDays count: Int) -> [String: UsageModelUse] {
             let from = UsageDayKey.start(days: count, now: now)
-            var total: [String: UsageModelUse] = [:]
-            for day in perDay where day.key >= from {
-                for (id, use) in day.uses {
-                    total[id, default: UsageModelUse()] = total[id, default: UsageModelUse()] + use
-                }
-            }
-            return total
+            return Self.sum(perDay) { $0 >= from }
         }
         func whole(_ split: [String: UsageModelUse]) -> UsageModelUse {
             split.values.reduce(UsageModelUse(), +)
@@ -592,79 +624,146 @@ public struct UsageProviderSpend: Sendable, Equatable {
             }
         }
         self.offered = offered
+        self.perDay = perDay
+        self.dayIndex = Dictionary(perDay.enumerated().map { ($1.key, $0) }, uniquingKeysWith: { _, last in last })
+        self.dayTotals = perDay.compactMap { day in day.date.map { UsageDayTotal(key: day.key, date: $0, use: day.total) } }
+        self.order = order
+        self.hasOther = hasOther
+        self.unpricedModels = unpriced
+        self.providerName = spec.name
 
         self.periods = UsageSpendPeriod.allCases.map { period in
-            let split = splits[period] ?? [:]
-            // This period's leaders get the named rows and the distinct colors, by rank; models without use in
-            // the period fill the rows that are left, in the order of the whole history.
-            let used = Self.ranked(order.filter { (split[$0]?.usd ?? 0) > 0 || (split[$0]?.tokens ?? 0) > 0 }, by: split)
-            let ranked = used + order.filter { !used.contains($0) }
-            let named = hasOther ? Array(ranked.prefix(Self.namedRows)) : ranked
-            let rest = ranked.filter { !named.contains($0) }
-            var colors: [String: UsageSeriesColor] = [:]
-            for (index, id) in named.enumerated() {
-                colors[id] = .model(index)
-            }
-            let legend = named.map { UsageDayChartData.Legend(id: $0, name: labels[$0] ?? $0, color: colors[$0] ?? .other) }
-                + (rest.isEmpty ? [] : [UsageDayChartData.Legend(id: "other", name: "Other", color: .other)])
             let domain = Self.domain(period: period, firstDay: firstDay, now: now)
             let from = UsageDayKey.string(domain.lowerBound)
-            var bars: [UsageDayChartData.Bar] = []
-            var notes: [String: String] = [:]
-            for day in perDay where day.key >= from {
-                guard let date = UsageDayKey.date(day.key) else { continue }
-                for id in named {
-                    if let use = day.uses[id], use.usd > 0 {
-                        bars.append(.init(key: day.key, date: date, series: labels[id] ?? id, color: colors[id] ?? .other,
-                                          usd: use.usd))
-                    }
-                }
-                let others = rest.reduce(0) { $0 + (day.uses[$1]?.usd ?? 0) }
-                if others > 0 {
-                    bars.append(.init(key: day.key, date: date, series: "Other", color: .other, usd: others))
-                }
-                let tokens = day.uses.values.reduce(0) { $0 + $1.tokens }
-                if tokens > 0 {
-                    notes[day.key] = "\(UsageFormat.tokens(tokens)) tokens"
-                }
-            }
-            var rows = named.map { id in
-                ModelRow(id: id, label: labels[id] ?? id, color: colors[id] ?? .other, use: split[id] ?? UsageModelUse())
-            }
-            var members: [String] = []
-            var otherIsEmpty = false
-            if !rest.isEmpty {
-                // No price: the 30-day model list, plus the days of this period that name such a model (the
-                // collector's daily "unpriced"), so an older model without a price is not taken for a cheap one.
-                let periodFrom = UsageDayKey.start(days: period.days, now: now)
-                let unpriced = days.filter { $0.day >= periodFrom }
-                    .reduce(into: unpriced) { set, day in set.formUnion(day.unpriced.map { Array($0.keys) } ?? []) }
-                let uses = rest.map { ($0, split[$0] ?? UsageModelUse()) }
-                rows.append(ModelRow(id: "other", label: "Other", color: .other, use: uses.reduce(UsageModelUse()) { $0 + $1.1 }))
-                let shown = uses.filter { $0.1.tokens > 0 || $0.1.usd > 0 }
-                if shown.isEmpty {
-                    otherIsEmpty = true
-                    members = rest.map { labels[$0] ?? $0 }.sorted()
-                } else {
-                    members = shown.map { id, use in
-                        "\(labels[id] ?? id) \(Self.cost(use.usd, unpriced: unpriced.contains(id)))"
-                    }
-                }
-            }
-            let chart = UsageDayChartData(
+            let periodFrom = UsageDayKey.start(days: period.days, now: now)
+            return Self.makePeriod(
                 period: period,
+                range: nil,
+                split: splits[period] ?? [:],
                 domain: domain,
-                bars: bars,
+                includes: { $0 >= from },
+                unpricedIncludes: { $0 >= periodFrom },
                 hint: Self.hint(period: period, firstDay: firstDay, now: now),
-                legend: legend,
-                dayNotes: notes,
-                emptyText: "No \(spec.name) use on this Mac in this period.",
-                chipLimit: 3,
-                centsInChips: true)
-            return Period(
-                period: period, chart: chart, rows: rows, whole: whole(split), otherMembers: members,
-                otherIsEmpty: otherIsEmpty)
+                perDay: perDay,
+                order: order,
+                labels: labels,
+                hasOther: hasOther,
+                unpriced: unpriced,
+                name: spec.name)
         }
+    }
+
+    /// One period's (or one zoom's) chart, rows and Other note.
+    private static func makePeriod(
+        period: UsageSpendPeriod,
+        range: UsageSpendRange?,
+        split: [String: UsageModelUse],
+        domain: ClosedRange<Date>,
+        includes: (String) -> Bool,
+        unpricedIncludes: (String) -> Bool,
+        hint: String,
+        perDay: [DayUses],
+        order: [String],
+        labels: [String: String],
+        hasOther: Bool,
+        unpriced: Set<String>,
+        name: String) -> Period
+    {
+        // This period's leaders get the named rows and the distinct colors, by rank; models without use in
+        // the period fill the rows that are left, in the order of the whole history.
+        let plan = Self.rowPlan(split: split, order: order, hasOther: hasOther)
+        let named = plan.named
+        let rest = plan.rest
+        let colors = plan.colors
+        let legend = named.map { UsageDayChartData.Legend(id: $0, name: labels[$0] ?? $0, color: colors[$0] ?? .other) }
+            + (rest.isEmpty ? [] : [UsageDayChartData.Legend(id: "other", name: "Other", color: .other)])
+        var bars: [UsageDayChartData.Bar] = []
+        var notes: [String: String] = [:]
+        for day in perDay where includes(day.key) {
+            guard let date = day.date else { continue }
+            for id in named {
+                if let use = day.uses[id], use.usd > 0 {
+                    bars.append(.init(key: day.key, date: date, series: labels[id] ?? id, color: colors[id] ?? .other,
+                                      usd: use.usd))
+                }
+            }
+            let others = rest.reduce(0) { $0 + (day.uses[$1]?.usd ?? 0) }
+            if others > 0 {
+                bars.append(.init(key: day.key, date: date, series: "Other", color: .other, usd: others))
+            }
+            let tokens = day.uses.values.reduce(0) { $0 + $1.tokens }
+            if tokens > 0 {
+                notes[day.key] = "\(UsageFormat.tokens(tokens)) tokens"
+            }
+        }
+        // No price: the 30-day model list, plus the days of this period that name such a model (the
+        // collector's daily "unpriced"), so an older or unpriced model is never shown as "$0".
+        let unpricedHere = perDay.filter { unpricedIncludes($0.key) }
+            .reduce(into: unpriced) { set, day in set.formUnion(day.unpriced.keys) }
+        var rows = named.map { id in
+            ModelRow(
+                id: id,
+                label: labels[id] ?? id,
+                color: colors[id] ?? .other,
+                use: split[id] ?? UsageModelUse(),
+                unpriced: unpricedHere.contains(id))
+        }
+        var members: [String] = []
+        var otherIsEmpty = false
+        if !rest.isEmpty {
+            let uses = rest.map { ($0, split[$0] ?? UsageModelUse()) }
+            rows.append(ModelRow(id: "other", label: "Other", color: .other, use: uses.reduce(UsageModelUse()) { $0 + $1.1 }))
+            let shown = uses.filter { $0.1.tokens > 0 || $0.1.usd > 0 }
+            if shown.isEmpty {
+                otherIsEmpty = true
+                members = rest.map { labels[$0] ?? $0 }.sorted()
+            } else {
+                members = shown.map { id, use in
+                    "\(labels[id] ?? id) \(Self.cost(use.usd, unpriced: unpricedHere.contains(id)))"
+                }
+            }
+        }
+        let chart = UsageDayChartData(
+            period: period,
+            domain: domain,
+            bars: bars,
+            hint: hint,
+            legend: legend,
+            dayNotes: notes,
+            emptyText: range == nil
+                ? "No \(name) use on this Mac in this period."
+                : "No \(name) use on this Mac on these days.",
+            chipLimit: 3,
+            centsInChips: true,
+            customRange: range)
+        let whole = split.values.reduce(UsageModelUse(), +)
+        return Period(
+            period: period, chart: chart, rows: rows, whole: whole, otherMembers: members,
+            otherIsEmpty: otherIsEmpty, range: range)
+    }
+
+    /// The split's leaders by rank, then the models without use in it in history order; past `namedRows`
+    /// (with more than one model left) the rest share "Other".
+    static func rowPlan(split: [String: UsageModelUse], order: [String], hasOther: Bool) -> RowPlan {
+        let used = Self.ranked(order.filter { (split[$0]?.usd ?? 0) > 0 || (split[$0]?.tokens ?? 0) > 0 }, by: split)
+        let ranked = used + order.filter { !used.contains($0) }
+        let named = hasOther ? Array(ranked.prefix(Self.namedRows)) : ranked
+        let rest = ranked.filter { !named.contains($0) }
+        var colors: [String: UsageSeriesColor] = [:]
+        for (index, id) in named.enumerated() {
+            colors[id] = .model(index)
+        }
+        return RowPlan(named: named, rest: rest, colors: colors)
+    }
+
+    private static func sum(_ perDay: [DayUses], where includes: (String) -> Bool) -> [String: UsageModelUse] {
+        var total: [String: UsageModelUse] = [:]
+        for day in perDay where includes(day.key) {
+            for (id, use) in day.uses {
+                total[id, default: UsageModelUse()] = total[id, default: UsageModelUse()] + use
+            }
+        }
+        return total
     }
 
     /// Most dollars first, then most tokens, then by id: the same order on every build.
@@ -697,6 +796,161 @@ public struct UsageProviderSpend: Sendable, Equatable {
         UsageSpendPeriod.effective(chosen, offered: self.offered)
     }
 
+    /// Row slots of the model rows: the same in every period and zoom.
+    var rowCount: Int {
+        self.hasOther ? Self.namedRows + 1 : self.order.count
+    }
+
+    // MARK: Zoom
+
+    /// The layer of a zoom: the same chart and rows as a period, over the span's days only.
+    public func period(range: UsageSpendRange) -> Period {
+        Self.makePeriod(
+            period: range.coveringPeriod,
+            range: range,
+            split: Self.sum(self.perDay) { range.contains($0) },
+            domain: range.domain,
+            includes: { range.contains($0) },
+            unpricedIncludes: { range.contains($0) },
+            hint: UsageSpendDigest.zoomHint,
+            perDay: self.perDay,
+            order: self.order,
+            labels: self.labels,
+            hasOther: self.hasOther,
+            unpriced: self.unpricedModels,
+            name: self.providerName)
+    }
+
+    /// The zoomed header's tiles: the span's total, daily average and busiest day.
+    public func customSummary(for range: UsageSpendRange) -> UsageCustomRangeSummary {
+        UsageDayStats.summary(range: range, days: self.dayTotals)
+    }
+
+    // MARK: Day panel
+
+    /// The day panel of a provider page's chart: the day by model (no section by account: one account).
+    /// `chartID` defaults to the page's (`spec.idPrefix + "spend"`).
+    public func dayDetailCatalog(chartID: String? = nil, spec: UsageProviderSpec, now: Date) -> UsageDayDetailCatalog {
+        let spend = self
+        let todayKey = UsageDayKey.string(now)
+        return UsageDayDetailCatalog(
+            chartID: chartID ?? spec.spendChartID,
+            defaultDayKey: todayKey,
+            fixedSection1Rows: 0,
+            fixedSection2Rows: self.rowCount,
+            section1NameWidth: 66,
+            // `UsageProviderPeriodLayer.nameWidth`: provider model names are longer than Claude's.
+            section2NameWidth: 66,
+            reservesNoteLine: true,
+            dayDetail: { key, period, range in
+                spend.dayDetail(key, period: spend.effective(period), range: range, todayKey: todayKey)
+            },
+            rangePreview: { range in
+                spend.rangePreview(range)
+            })
+    }
+
+    func dayDetail(_ key: String, period: UsageSpendPeriod, range: UsageSpendRange?, todayKey: String) -> UsageDayDetail {
+        let domain = range?.domain ?? self[period].chart.domain
+        let context = UsageDayStats.context(dayKey: key, domain: domain, days: self.dayTotals)
+        // The rows of the shown period or zoom, so the colors match the chart.
+        let plan: RowPlan = if let range {
+            Self.rowPlan(split: Self.sum(self.perDay) { range.contains($0) }, order: self.order, hasOther: self.hasOther)
+        } else {
+            self.plan(of: self[period])
+        }
+        let day = self.dayIndex[key].map { self.perDay[$0] }
+        let uses = day?.uses ?? [:]
+        let total = day?.total ?? UsageModelUse()
+        let dayUnpriced = self.unpricedModels.union((day?.unpriced ?? [:]).keys)
+        return UsageDayDetail(
+            dayKey: key,
+            date: day?.date ?? UsageDayKey.date(key) ?? domain.lowerBound,
+            isToday: key == todayKey,
+            totalUsd: total.usd,
+            totalTokens: total.tokens,
+            periodDays: context.count,
+            periodLabel: UsageDayStats.label(days: context.count, isCustom: range != nil),
+            isCustomRange: range != nil,
+            periodDailyAverageUsd: context.average,
+            rankInPeriod: context.rank,
+            section1Title: nil,
+            section1Rows: [],
+            section2Title: "By model",
+            section2Rows: self.rows(plan, uses: uses, unpriced: dayUnpriced),
+            otherNote: self.otherNote(plan, uses: uses),
+            unpricedNote: self.unpricedNote(day?.unpriced ?? [:]))
+    }
+
+    func rangePreview(_ range: UsageSpendRange) -> UsageRangeDetailPreview {
+        let split = Self.sum(self.perDay) { range.contains($0) }
+        let plan = Self.rowPlan(split: split, order: self.order, hasOther: self.hasOther)
+        let summary = UsageDayStats.summary(range: range, days: self.dayTotals)
+        let rangeUnpriced = self.perDay.filter { range.contains($0.key) }
+            .reduce(into: self.unpricedModels) { set, day in set.formUnion(day.unpriced.keys) }
+        return UsageRangeDetailPreview(
+            range: range,
+            totalUsd: summary.total.usd,
+            totalTokens: summary.total.tokens,
+            dailyAverageUsd: summary.dailyAverage.usd,
+            busiestDay: summary.busiestDay,
+            section1Title: nil,
+            section1Rows: [],
+            section2Title: "By model",
+            section2Rows: self.rows(plan, uses: split, unpriced: rangeUnpriced))
+    }
+
+    /// The named models, colors and "Other" of a ready period, as its rows show them.
+    private func plan(of period: Period) -> RowPlan {
+        let named = period.rows.filter { $0.id != "other" || !self.hasOther }.map(\.id)
+        var colors: [String: UsageSeriesColor] = [:]
+        for row in period.rows where named.contains(row.id) {
+            colors[row.id] = row.color
+        }
+        return RowPlan(named: named, rest: self.order.filter { !named.contains($0) }, colors: colors)
+    }
+
+    private func rows(_ plan: RowPlan, uses: [String: UsageModelUse], unpriced: Set<String>) -> [UsageDayDetail.Row] {
+        // Put models with activity on this day above inactive "$0" rows while keeping their chart colors.
+        let active = Self.ranked(plan.named.filter { (uses[$0]?.usd ?? 0) > 0 || (uses[$0]?.tokens ?? 0) > 0 }, by: uses)
+        let ordered = active + plan.named.filter { !active.contains($0) }
+        var rows = ordered.map { id in
+            let use = uses[id] ?? UsageModelUse()
+            return UsageDayDetail.Row(
+                id: id,
+                label: self.labels[id] ?? id,
+                color: plan.colors[id] ?? .other,
+                usd: use.usd,
+                tokens: use.tokens,
+                unpriced: unpriced.contains(id))
+        }
+        if !plan.rest.isEmpty {
+            let other = plan.rest.reduce(UsageModelUse()) { $0 + (uses[$1] ?? UsageModelUse()) }
+            rows.append(UsageDayDetail.Row(id: "other", label: "Other", color: .other, usd: other.usd, tokens: other.tokens))
+        }
+        return rows
+    }
+
+    /// "Other: Astra $4.70, Sol 5.6 $1.20 and 2 more." for the models inside "Other" with use that day.
+    private func otherNote(_ plan: RowPlan, uses: [String: UsageModelUse]) -> String? {
+        let used = Self.ranked(plan.rest.filter { (uses[$0]?.usd ?? 0) > 0 || (uses[$0]?.tokens ?? 0) > 0 }, by: uses)
+        guard !used.isEmpty else { return nil }
+        let named = used.prefix(2).map { id in
+            "\(self.labels[id] ?? id) \(Self.cost(uses[id]?.usd ?? 0, unpriced: self.unpricedModels.contains(id)))"
+        }
+        let rest = used.count - named.count
+        return "Other: " + named.joined(separator: ", ") + (rest > 0 ? " and \(rest) more." : ".")
+    }
+
+    /// "No price: Auto Review (12K tokens)." for the models the collector had no price for that day.
+    private func unpricedNote(_ unpriced: [String: Double]) -> String? {
+        let ids = unpriced.filter { $0.value > 0 }.sorted { $0.value > $1.value }.map(\.key)
+        guard !ids.isEmpty else { return nil }
+        let named = ids.prefix(2).map { "\(self.labels[$0] ?? $0) (\(UsageFormat.tokens(unpriced[$0] ?? 0)) tokens)" }
+        let rest = ids.count - named.count
+        return "No price: " + named.joined(separator: ", ") + (rest > 0 ? " and \(rest) more." : ".")
+    }
+
     /// From the first day on record, but at least a week wide, so a few days of history still get
     /// readable bars; never longer than the period.
     private static func domain(period: UsageSpendPeriod, firstDay: Date?, now: Date) -> ClosedRange<Date> {
@@ -715,9 +969,16 @@ public struct UsageProviderSpend: Sendable, Equatable {
         let calendar = Calendar.current
         let asked = calendar.date(byAdding: .day, value: -(period.days - 1), to: calendar.startOfDay(for: now))
         if let asked, let firstDay, firstDay > asked {
-            return "Per day since \(UsageFormat.format(firstDay, "MMM d")), the first day on record."
+            return "Since \(UsageFormat.format(firstDay, "MMM d")) · point at a bar or drag to zoom."
         }
-        return "Per day. Point at a bar for that day."
+        return "Per day. Point at a bar, drag across days to zoom in."
+    }
+}
+
+extension UsageProviderSpec {
+    /// The id of the page's per-day chart; its day panel is registered under `spendChartID + ":day"`.
+    public var spendChartID: String {
+        self.idPrefix + "spend"
     }
 }
 

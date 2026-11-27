@@ -84,6 +84,8 @@ public struct UsageCacheSummary: Sendable, Equatable {
     public enum Product: Sendable, Equatable {
         case claude
         case provider(UsageProviderSpec.Key)
+        /// Overview: Claude Code, Codex and Antigravity together, then each provider.
+        case all
     }
 
     public struct Span: Sendable, Equatable, Identifiable {
@@ -111,13 +113,32 @@ public struct UsageCacheSummary: Sendable, Equatable {
     public let parts: [Part]
     /// "By account · 7 days", "By model · 30 days".
     public let partsTitle: String
+    /// For `.all`: names of the subscriptions actually included in the combined figure ("Claude", "Codex", ...).
+    public let includedProviders: [String]
 
-    /// Row id for the menu. Claude's is its own; a provider's carries its page prefix, so the page's
-    /// warm-row recycling picks it up.
+    public init(
+        product: Product,
+        spans: [Span],
+        main: Span,
+        parts: [Part],
+        partsTitle: String,
+        includedProviders: [String] = [])
+    {
+        self.product = product
+        self.spans = spans
+        self.main = main
+        self.parts = parts
+        self.partsTitle = partsTitle
+        self.includedProviders = includedProviders
+    }
+
+    /// Row id for the menu. Claude's is its own; a provider's carries its page prefix and Overview's the
+    /// Overview prefix, so each page's warm-row recycling picks it up.
     public var rowID: String {
         switch self.product {
         case .claude: "lemelsonCache-claude"
         case let .provider(key): UsageProviderSpec.spec(for: key).idPrefix + "cache"
+        case .all: "lemelsonOverview-cache"
         }
     }
 
@@ -125,13 +146,14 @@ public struct UsageCacheSummary: Sendable, Equatable {
         switch self.product {
         case .claude: "Claude Code"
         case let .provider(key): UsageProviderSpec.spec(for: key).name
+        case .all: "All subscriptions"
         }
     }
 
-    /// "API prices" (Claude), "Gemini API prices", "OpenAI API prices".
+    /// "API prices" (Claude, Overview), "Gemini API prices", "OpenAI API prices".
     var prices: String {
         switch self.product {
-        case .claude: "API prices"
+        case .claude, .all: "API prices"
         case let .provider(key): UsageProviderSpec.spec(for: key).prices
         }
     }
@@ -198,6 +220,37 @@ public struct UsageCacheSummary: Sendable, Equatable {
             partsTitle: "By model · 30 days")
     }
 
+    /// Overview: Claude Code (as `claude(_:)` reads it), Codex and Antigravity together, one part per provider
+    /// with data. A provider whose block is missing, failed or has no percentage is left out; nil when none has.
+    public static func all(_ state: UsagePanelState) -> UsageCacheSummary? {
+        var sources: [(id: String, name: String, stats: UsageCacheStats)] = []
+        if state.cacheError == nil,
+           let claude = state.cache ?? self.combined(state.accounts.compactMap(\.cache)),
+           claude.hasData
+        {
+            sources.append(("claude", "Claude", claude))
+        }
+        for (key, block) in [(UsageProviderSpec.Key.codex, state.codex), (.antigravity, state.antigravity)] {
+            guard let block, block.error == nil, block.cache.hasData else { continue }
+            sources.append((key.rawValue, UsageProviderSpec.spec(for: key).name, block.cache))
+        }
+        let spans = self.spans(of: self.combined(sources.map(\.stats)))
+        guard let main = self.main(of: spans) else { return nil }
+        // Only include providers that actually have data in `main.id` under "By provider · <main>".
+        let parts: [Part] = sources.compactMap { source in
+            let own = self.spans(of: source.stats)
+            guard let span = own.first(where: { $0.id == main.id }) else { return nil }
+            return Part(id: source.id, name: source.name, reusedPct: span.reusedPct, savedUsd: span.savedUsd)
+        }
+        return UsageCacheSummary(
+            product: .all,
+            spans: spans,
+            main: main,
+            parts: parts.count >= 2 ? parts : [],
+            partsTitle: "By provider · \(main.title.lowercased())",
+            includedProviders: sources.map(\.name))
+    }
+
     /// Accounts together when the summary has no top-level cache: percentages weighted by the tokens behind
     /// them (or by calls), dollars added up.
     static func combined(_ all: [UsageCacheStats]) -> UsageCacheStats? {
@@ -206,7 +259,15 @@ public struct UsageCacheSummary: Sendable, Equatable {
         for (key, _) in self.spanTitles {
             let present = all.compactMap { stats -> (UsageCacheStats.Span, Double)? in
                 guard let span = stats[key], let reused = span.reusedPct else { return nil }
-                let tokens = reused > 0 ? (span.readTokens ?? 0) * 100 / reused : 0
+                // Prefer explicit read + miss tokens when `missTokens` is present (works even at 0% reuse),
+                // falling back to `readTokens / reused` when older summaries omit `missTokens`.
+                let tokens: Double = if let miss = span.missTokens {
+                    (span.readTokens ?? 0) + miss
+                } else if reused > 0 {
+                    (span.readTokens ?? 0) * 100 / reused
+                } else {
+                    0
+                }
                 let weight = tokens > 0 ? tokens : span.calls ?? 1
                 return (span, weight)
             }
@@ -215,6 +276,8 @@ public struct UsageCacheSummary: Sendable, Equatable {
             first.readPct = present.reduce(0) { $0 + ($1.0.reusedPct ?? 0) * $1.1 } / weight
             first.missPct = 100 - (first.readPct ?? 0)
             first.calls = present.reduce(0) { $0 + ($1.0.calls ?? 0) }
+            first.readTokens = self.sum(present.map(\.0.readTokens))
+            first.missTokens = self.sum(present.map(\.0.missTokens))
             first.savedUsd = self.sum(present.map(\.0.savedUsd))
             first.missUsd = self.sum(present.map(\.0.missUsd))
             spans[key] = first

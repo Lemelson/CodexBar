@@ -158,11 +158,29 @@ public struct UsageCachePanelView: View {
 
     private var note: String {
         var text = "Paid in full: a new chat, the first message after a pause, or a chat whose beginning changed."
-        if self.summary.product == .claude {
+        switch self.summary.product {
+        case .claude:
             text += " Saving text for reuse costs a little extra and counts as paid in full."
+        case .all:
+            if self.summary.includedProviders.isEmpty || self.summary.includedProviders.contains("Claude") {
+                text += " For Claude, saving text for reuse costs a little extra and counts as paid in full."
+            }
+        case .provider:
+            break
         }
         if self.summary.hasMoney {
-            text += " Dollars at \(self.summary.prices)."
+            if self.summary.product == .all {
+                let providers = self.summary.includedProviders
+                let joined: String = switch providers.count {
+                case 0: "Claude, Codex, and Antigravity"
+                case 1: providers[0]
+                case 2: "\(providers[0]) and \(providers[1])"
+                default: providers.dropLast().joined(separator: ", ") + ", and \(providers.last ?? "")"
+                }
+                text += " Dollars at API prices across \(joined)."
+            } else {
+                text += " Dollars at \(self.summary.prices)."
+            }
         }
         return text
     }

@@ -143,7 +143,8 @@ extension StatusItemController {
         if self.isMenuRefreshEnabled, (provider?.instanceID ?? self.lastMenuProvider) == .codex {
             self.deferOpenAIDashboardRefreshUntilMenuCloses(reason: "parent menu open")
         }
-        if self.settings.providerStorageFootprintsEnabled {
+        // lemelson: the fork's Overview page shows no storage footprints, so it does not rescan them.
+        if self.settings.providerStorageFootprintsEnabled, !self.lemelsonUsesCustomOverviewPage() {
             self.store.refreshStorageFootprintsForOverview()
         }
 
@@ -841,18 +842,27 @@ extension StatusItemController {
         }
         if switcherSelection == .overview {
             let enabledProviders = self.store.enabledFirstPartyProvidersForDisplay()
-            if self.addOverviewRows(
-                to: menu,
-                enabledProviders: enabledProviders,
-                menuWidth: context.menuWidth,
-                captureMenu: captureMenu)
-            {
-                menu.addItem(.separator())
+            if self.addLemelsonOverviewPage(to: menu, menuWidth: context.menuWidth, captureMenu: captureMenu) {
+                // lemelson: the Overview page adds its own footer and leaves its prompt cache row pending.
             } else {
-                self.addOverviewEmptyState(to: menu, enabledProviders: enabledProviders)
-                menu.addItem(.separator())
+                // lemelson: the stock Overview has no line rows of its own.
+                LemelsonPanelSession.shared.pendingLineRows = []
+                LemelsonPanelSession.shared.pendingBuyCredits = false
+                if self.addOverviewRows(
+                    to: menu,
+                    enabledProviders: enabledProviders,
+                    menuWidth: context.menuWidth,
+                    captureMenu: captureMenu)
+                {
+                    menu.addItem(.separator())
+                } else {
+                    self.addOverviewEmptyState(to: menu, enabledProviders: enabledProviders)
+                    menu.addItem(.separator())
+                }
             }
         } else {
+            // lemelson: the Overview page's rows that just left the menu are kept for the next visit.
+            self.lemelsonKeepOverviewRowsLeaving(isOverview: false)
             let addedOpenAIWebItems = self.addMenuCards(to: menu, context: context, captureMenu: captureMenu)
             // lemelson: in its own modes the panel decides whether the stock rows stay under it.
             if LemelsonPanelSession.shared.stockExtrasVisible {
@@ -873,11 +883,11 @@ extension StatusItemController {
         }
         if switcherSelection != .overview {
             self.addUserPluginMenuCards(to: menu, width: context.menuWidth)
-            // lemelson: the one-line rows of a Claude, Antigravity or Codex page (prompt cache, plan worth), right
-            // above the action rows; the Codex page's "Buy Credits…" first among those.
-            if self.addLemelsonPendingRows(to: menu, width: context.menuWidth) {
-                menu.addItem(self.makeBuyCreditsItem())
-            }
+        }
+        // lemelson: the one-line rows of an Overview, Claude, Antigravity or Codex page (prompt cache, plan worth),
+        // right above the action rows; the Codex page's "Buy Credits…" first among those.
+        if self.addLemelsonPendingRows(to: menu, width: context.menuWidth) {
+            menu.addItem(self.makeBuyCreditsItem())
         }
     }
 
@@ -1048,6 +1058,8 @@ extension StatusItemController {
             },
             onSelect: { [weak self, weak menu] selection in
                 guard let self, let menu else { return }
+                // lemelson: close any open hover panel or chart drag/hover before switching tabs.
+                self.lemelsonWillSelectProviderTab()
                 MenuSwitchFlickerProbe.debugLog("onSelect \(selection)")
                 var provider: UsageProvider?
                 self.preservingMergedSwitcherContentCachesDuringInvalidation {

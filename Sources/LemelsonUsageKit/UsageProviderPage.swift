@@ -10,7 +10,8 @@ import SwiftUI
 ///   limit card     `UsageLimitCardHeader`, a `UsageLimitCardRow` per window (`.single` sources), the app's
 ///                  compact facts (`extras`, e.g. Codex credits), as on Claude Limits
 ///   spend          `UsageSpendHeader` + `UsagePeriodStack` + `UsageSpendDayChart` + `UsageModelRows`, as on
-///                  Claude Spend, split by the provider's models
+///                  Claude Spend, split by the provider's models; hovering a day shows `chartDayDetail` in the
+///                  hover panel, dragging across days zooms (`UsageChartPointer`)
 ///   footer         `UsageFooterView`, one line, as on Claude
 ///   line rows      "Plan worth" and "Prompt cache" (`UsagePageLineRow`): one line each with the whole story in
 ///                  the hover panel; placed by the menu above its action rows (`lineRows`). The value panel is
@@ -102,6 +103,9 @@ public struct UsageProviderPage {
     public let valueRow: Row?
     /// The one-line "Prompt cache" row, with its detail panel; nil without cache data.
     public let cacheRow: Row?
+    /// The day panel of the spend chart (hovering a day, dragging a span), for the hover panel: register
+    /// `build` under `key` (`spec.spendChartID + ":day"`). Nil without spend.
+    public let chartDayDetail: (key: String, build: @MainActor () -> AnyView)?
 
     /// The one-line rows for the menu's footer area (above Status Page), in order: "Plan worth", "Prompt cache".
     /// Not part of `rows`: the menu places them among its own action rows, as on the Claude pages.
@@ -239,8 +243,16 @@ public struct UsageProviderPage {
         // Spend and the value read the same numbers: built once per page.
         let spend = block.error == nil ? UsageProviderSpend(block: block, spec: spec, now: now) : nil
         if let spend {
+            // The zoom chip's ✕ is a control too, also on a page without a period switch.
             add(.spend, "spend", UsageProviderSpendView(spend: spend, spec: spec, width: width),
-                separatorAfter: true, hasControls: spend.offered.count > 1)
+                separatorAfter: true, hasControls: spend.offered.count > 1 || spend.hasSpend)
+        }
+        self.chartDayDetail = spend.flatMap { spend -> (key: String, build: @MainActor () -> AnyView)? in
+            guard spend.hasSpend else { return nil }
+            let catalog = spend.dayDetailCatalog(spec: spec, now: now)
+            return (key: catalog.panelKey, build: {
+                AnyView(UsageDayDetailPanelView(catalog: catalog, width: detailWidth))
+            })
         }
         add(.footer, "footer", UsageFooterView(
             state: state,
@@ -337,24 +349,34 @@ public struct UsageProviderSpendView: View {
     let spend: UsageProviderSpend
     let spec: UsageProviderSpec
     let width: CGFloat
+    let chartID: String
 
-    public init(spend: UsageProviderSpend, spec: UsageProviderSpec, width: CGFloat) {
+    /// `chartID` defaults to `spec.spendChartID`: the id the page's day panel (`chartDayDetail`) is built for.
+    public init(spend: UsageProviderSpend, spec: UsageProviderSpec, width: CGFloat, chartID: String? = nil) {
         self.spend = spend
         self.spec = spec
         self.width = width
+        self.chartID = chartID ?? spec.spendChartID
     }
 
     public var body: some View {
+        let spend = self.spend
+        let chartID = self.chartID
         VStack(alignment: .leading, spacing: 9) {
-            if self.spend.hasSpend {
+            if spend.hasSpend {
                 UsageSpendHeader(
-                    labels: UsageSpendHeader.labels(prices: self.spec.prices, hasSwitch: self.spend.offered.count > 1),
-                    offered: self.spend.offered,
-                    today: self.spend.today,
-                    week: self.spend.week,
-                    periods: Dictionary(uniqueKeysWithValues: self.spend.offered.map { ($0, self.spend[$0].whole) }))
-                UsagePeriodStack(offered: self.spend.offered) { period in
-                    UsageProviderPeriodLayer(data: self.spend[period], offered: self.spend.offered)
+                    labels: UsageSpendHeader.labels(prices: self.spec.prices, hasSwitch: spend.offered.count > 1),
+                    offered: spend.offered,
+                    today: spend.today,
+                    week: spend.week,
+                    periods: Dictionary(uniqueKeysWithValues: spend.offered.map { ($0, spend[$0].whole) }),
+                    customSummary: { spend.customSummary(for: $0) })
+                UsagePeriodStack(
+                    offered: spend.offered,
+                    customLayer: { range in
+                        UsageProviderPeriodLayer(data: spend.period(range: range), chartID: chartID)
+                    }) { period in
+                    UsageProviderPeriodLayer(data: spend[period], chartID: chartID)
                 }
             } else {
                 Text("Spend")
@@ -373,16 +395,16 @@ public struct UsageProviderSpendView: View {
 /// "Other"), and the Other note is one line, so all layers have one height and a switch never changes the menu.
 struct UsageProviderPeriodLayer: View, Equatable {
     let data: UsageProviderSpend.Period
-    let offered: [UsageSpendPeriod]
+    let chartID: String
 
     /// Provider model names ("Hydrogen", "Auto Review") are longer than Claude's.
     static let nameWidth: CGFloat = 66
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            UsageSpendDayChart(data: self.data.chart, offered: self.offered, plotHeight: UsageProviderPage.chartHeight)
+            UsageSpendDayChart(data: self.data.chart, chartID: self.chartID, plotHeight: UsageProviderPage.chartHeight)
             UsageModelRows(
-                title: "By model · \(self.data.period.short)",
+                title: self.data.range.map { "By model · \($0.dayCount) days" } ?? "By model · \(self.data.period.short)",
                 lines: self.data.rows,
                 total: self.data.whole.usd,
                 nameWidth: Self.nameWidth,

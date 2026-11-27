@@ -208,13 +208,38 @@ extension StatusItemController {
         if event.type == .mouseMoved {
             LemelsonPagingState.shared.lastPointerMove = CACurrentMediaTime()
         }
+        let chartPointer = UsageChartPointer.shared
+        // A drag on a spend chart owns every pointer, key and scroll event until it ends, also when the
+        // pointer crosses into the day panel left of the menu.
+        if chartPointer.hasActiveDrag || chartPointer.isDragging {
+            if chartPointer.routeTrackedEvent(event) {
+                return true
+            }
+        }
         // Pointer events over the detail panel are the panel's: its controls work and the menu keeps the
         // row the panel belongs to highlighted.
         if UsageHoverPanelController.shared.routeTrackedEvent(event) {
             return true
         }
+        // Hover, press, double click and drag start over the visible spend chart.
+        if chartPointer.routeTrackedEvent(event) {
+            return true
+        }
         switch event.type {
         case .keyDown:
+            if event.keyCode == 53 {
+                // Escape: first ends a drag, then zooms out of a custom range; only then closes the menu.
+                if chartPointer.hasActiveDrag || chartPointer.isDragging {
+                    chartPointer.cancelActiveInteraction()
+                    return true
+                }
+                if UsagePanelSelection.shared.customRange != nil,
+                   chartPointer.activeChartPlotScreenRect() != nil
+                {
+                    UsagePanelSelection.shared.clearCustomRange()
+                    return true
+                }
+            }
             guard let menu = self.lemelsonPagedRootMenu() else { return false }
             return self.lemelsonHandleKey(event, menu: menu)
         case .scrollWheel:
@@ -309,6 +334,12 @@ extension StatusItemController {
         guard modes.indices.contains(target) else { return false }
         self.lemelsonSelectMode(modes[target], menu: menu)
         return true
+    }
+
+    /// Called when the user clicks a provider tab in `ProviderSwitcherView`.
+    func lemelsonWillSelectProviderTab() {
+        UsageChartPointer.shared.cancelActiveInteraction()
+        UsageHoverPanelController.shared.hide(animated: false)
     }
 
     /// Called by `navigateProviderSwitcher` right before it changes the provider tab.
@@ -434,7 +465,8 @@ extension StatusItemController {
     {
         guard let window = self.lemelsonMenuWindow(of: menu) else { return }
         LemelsonPagingState.shared.lastPageRequest = CACurrentMediaTime()
-        // The rows the panel belongs to are leaving.
+        // The rows the panel belongs to are leaving, and so is the chart a drag or hover was on.
+        UsageChartPointer.shared.cancelActiveInteraction()
         UsageHoverPanelController.shared.hide(animated: false)
         LemelsonPageTransition.shared.begin(
             menu: menu,
@@ -458,6 +490,7 @@ extension StatusItemController {
         self.lemelsonProviderPageMayBeShown(in: menu)
         if self.openMenus[ObjectIdentifier(menu)] != nil, menu.supermenu == nil {
             self.lemelsonScheduleProviderWarmup()
+            self.lemelsonScheduleOverviewWarmup()
         }
     }
 }

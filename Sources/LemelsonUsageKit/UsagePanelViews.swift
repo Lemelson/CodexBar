@@ -7,6 +7,11 @@ extension EnvironmentValues {
     /// Only for the PNG preview, which cannot move a pointer: per-day spend charts draw this day
     /// ("2026-11-21") as pointed at. Nil in the app.
     @Entry public var usagePreviewHoveredDay: String? = nil
+    /// Only for the PNG preview: per-day spend charts draw this span as being dragged across. Nil in the app.
+    @Entry public var usagePreviewDragRange: UsageSpendRange? = nil
+    /// Whether a per-day chart's layer is the visible one of its stack (`UsagePeriodStack`, the Accounts /
+    /// Models pair): only that chart tracks the pointer and draws hover marks. True outside a stack.
+    @Entry var usageChartLayerShown: Bool = true
 }
 
 // MARK: - Colors
@@ -21,7 +26,7 @@ public enum UsagePalette {
     public static let chat = UsagePalette.dynamic(light: 0x9B4DCA, dark: 0xD08CFF)
     public static let cowork = UsagePalette.dynamic(light: 0x4D9A0E, dark: 0xA3E635)
     /// Not from this Mac, with no breakdown by source.
-    public static let others = UsagePalette.dynamic(light: 0x8E8E93, dark: 0xA1A1A6)
+    public static let others = UsagePalette.dynamic(light: 0x8E8E93, dark: 0x787B84)
     public static let track = Color.primary.opacity(0.10)
     public static let paceGood = UsagePalette.dynamic(light: 0x1E9E4A, dark: 0x34D058)
     public static let paceBad = UsagePalette.dynamic(light: 0xD92D20, dark: 0xFF5A4F)
@@ -33,7 +38,7 @@ public enum UsagePalette {
     public static let opus = UsagePalette.you
     public static let fable = UsagePalette.chat
     public static let sonnet = UsagePalette.dynamic(light: 0x0D9488, dark: 0x2DD4BF)
-    public static let haiku = UsagePalette.dynamic(light: 0xC99A06, dark: 0xFACC15)
+    public static let haiku = UsagePalette.dynamic(light: 0xC99A06, dark: 0xFDE047)
 
     public static func claudeModel(_ family: UsageModelFamily) -> Color {
         switch family {
@@ -69,6 +74,11 @@ public enum UsagePalette {
     public static func model(_ index: Int) -> Color {
         self.models.indices.contains(index) ? self.models[index] : self.others
     }
+
+    /// Laid over a per-day chart outside the pointed-at day or the dragged span: washes the bars out towards
+    /// the menu's own background (lighter in light mode, darker in dark), so the marked part stands out by
+    /// brightness, also on a warm screen.
+    public static let chartWash = UsagePalette.dynamic(light: 0xF4F4F4, dark: 0x1C1C1E)
 
     /// A limit with no split by source (Antigravity, Codex): the whole bar is one color.
     public static let single = UsagePalette.models[0]

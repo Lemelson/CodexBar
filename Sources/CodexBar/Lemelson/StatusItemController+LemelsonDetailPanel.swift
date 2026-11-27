@@ -30,6 +30,10 @@ final class LemelsonDetailPanelState {
     /// Detail views of the fork's own rows, by row id. Filled whenever those rows are built (a later
     /// build of the same id replaces the builder).
     var ownEntries: [String: UsageHoverEntry] = [:]
+    /// Day panels of per-day spend charts, keyed by the spend row's id (`chartID`, matching the menu item's
+    /// `representedObject`). Published whenever a menu contains that row, so sibling warm-up and cached tab
+    /// swaps never wipe or misattribute another tab's day panel.
+    var chartDayEntries: [String: UsageHoverEntry] = [:]
     /// The detail key of every row of the open root menus that has one.
     var itemKeys: [ObjectIdentifier: String] = [:]
     /// Root menus between `menuWillOpen` and the last `menuDidClose`.
@@ -51,6 +55,11 @@ extension StatusItemController {
         LemelsonDetailPanelState.shared.ownEntries[entry.key] = entry
     }
 
+    /// Called by the builders of a per-day spend chart: registers its day panel under the spend row's id.
+    func lemelsonRegisterChartDayDetail(forRowID rowID: String, _ entry: UsageHoverEntry) {
+        LemelsonDetailPanelState.shared.chartDayEntries[rowID] = entry
+    }
+
     func lemelsonDetailRootMenuWillOpen(_ menu: NSMenu) {
         let state = LemelsonDetailPanelState.shared
         state.openRootMenus[ObjectIdentifier(menu)] = menu
@@ -66,6 +75,9 @@ extension StatusItemController {
         self.lemelsonRestoreAllAdoptedSubmenus()
         state.openRootMenus.removeAll()
         state.itemKeys.removeAll()
+        UsageChartPointer.shared.cancelActiveInteraction()
+        // A zoom lives as long as the menu: the next open starts on the chosen period.
+        UsagePanelSelection.shared.clearCustomRange()
         UsageHoverPanelController.shared.menuDidClose()
     }
 
@@ -86,11 +98,19 @@ extension StatusItemController {
         guard menu.supermenu == nil else { return }
         let state = LemelsonDetailPanelState.shared
         var entries: [UsageHoverEntry] = []
+        var seenKeys = Set<String>()
         var keys: [ObjectIdentifier: String] = [:]
         for item in menu.items {
-            guard let id = item.representedObject as? String, let entry = state.ownEntries[id] else { continue }
-            entries.append(entry)
-            keys[ObjectIdentifier(item)] = entry.key
+            guard let id = item.representedObject as? String else { continue }
+            if let entry = state.ownEntries[id] {
+                if seenKeys.insert(entry.key).inserted {
+                    entries.append(entry)
+                }
+                keys[ObjectIdentifier(item)] = entry.key
+            }
+            if let dayEntry = state.chartDayEntries[id], seenKeys.insert(dayEntry.key).inserted {
+                entries.append(dayEntry)
+            }
         }
         entries += self.lemelsonAdoptDetails(in: menu, keys: &keys)
         state.itemKeys = keys
@@ -111,8 +131,25 @@ extension StatusItemController {
               panel.hasEntry(key),
               let (rowRect, window) = self.lemelsonScreenRect(of: item, in: menu)
         else {
+            // The pointer is on the spend chart's non-selectable row (`item == nil`): keep its day panel while
+            // the pointer actually sits over the chart or the band leading to the panel. Highlighting any other
+            // enabled menu row (e.g. via arrow keys) closes the day panel.
+            if item == nil,
+               panel.isShowingChartDayPanel,
+               UsageDayFocus.shared.activeChartID != nil,
+               UsageChartPointer.shared.isPointerOverChartOrBand(at: panel.lastPointerLocation)
+            {
+                return
+            }
+            if item != nil, UsageDayFocus.shared.activeChartID != nil {
+                UsageDayFocus.shared.clear()
+            }
             panel.pointerLeftRows()
             return
+        }
+        // Onto a row with its own detail: the chart's hovered day ends, the panel moves to the row.
+        if UsageDayFocus.shared.activeChartID != nil {
+            UsageDayFocus.shared.clear()
         }
         panel.show(
             key: key,

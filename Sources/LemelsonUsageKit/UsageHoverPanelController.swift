@@ -109,7 +109,9 @@ public final class UsageHoverPanelController: NSObject {
     /// Brings the blurred background to the tone of the system menu, so the joint does not show.
     private let tintLayer = CAShapeLayer()
     private let clipView = NSView()
-    private var displayLink: CADisplayLink?
+    /// Common-modes timer driving morph and fade: a `CADisplayLink` created on an off-screen panel window can
+    /// fail to fire during `NSMenu` tracking, freezing the card's geometry and alpha.
+    private var tickTimer: Timer?
 
     private var currentKey: String?
     private var anchorRow = NSRect.zero
@@ -213,6 +215,8 @@ public final class UsageHoverPanelController: NSObject {
     }
 
     public func menuDidClose() {
+        // A drag or a hovered day on a per-day chart ends with the menu.
+        UsageChartPointer.shared.cancelActiveInteraction()
         self.menuOpen = false
         self.warmTimer?.invalidate()
         self.warmTimer = nil
@@ -404,6 +408,41 @@ public final class UsageHoverPanelController: NSObject {
         }
     }
 
+    /// True while the panel shows a per-day chart's day panel (keys end in ":day").
+    public var isShowingChartDayPanel: Bool {
+        self.isVisible && self.currentKey?.hasSuffix(":day") == true
+    }
+
+    /// For a pointer that keeps moving over one anchor (a per-day chart): the first call shows the entry, later
+    /// calls for the same entry only keep it up and move its anchor, with no new slide or fade.
+    public func showIfNeededOrKeep(
+        key: String,
+        rowRect: NSRect,
+        menuFrame: NSRect,
+        screen: NSScreen?,
+        appearance: NSAppearance?)
+    {
+        if self.isVisible, self.currentKey == key, self.menuFrame == menuFrame {
+            self.stopGrace()
+            self.anchorRow = rowRect
+            return
+        }
+        self.show(key: key, rowRect: rowRect, menuFrame: menuFrame, screen: screen, appearance: appearance)
+    }
+
+    /// Adds (or replaces) one entry without touching the others, e.g. a chart's day panel. The next
+    /// `setEntries` replaces the whole set: pass the entry there too to keep it.
+    public func registerDynamicEntry(_ entry: UsageHoverEntry) {
+        if self.entries[entry.key] == nil {
+            self.order.append(entry.key)
+        }
+        self.entries[entry.key] = entry
+        if self.slots[entry.key] != nil {
+            self.stale.insert(entry.key)
+        }
+        self.scheduleWarmup()
+    }
+
     /// The pointer left the rows: close after a short grace period unless it is over the panel.
     public func pointerLeftRows() {
         guard self.isVisible, self.graceTimer == nil else { return }
@@ -430,6 +469,11 @@ public final class UsageHoverPanelController: NSObject {
         } else {
             self.startTicking()
         }
+    }
+
+    /// The last pointer position seen in a tracked menu event (or `NSEvent.mouseLocation` before any event).
+    public var lastPointerLocation: NSPoint {
+        self.pointerLocation
     }
 
     private var pointerLocation: NSPoint {
@@ -759,7 +803,7 @@ public final class UsageHoverPanelController: NSObject {
     }
 
     /// The event's position on screen. An event with no window carries screen coordinates.
-    private static func screenLocation(of event: NSEvent) -> NSPoint {
+    public static func screenLocation(of event: NSEvent) -> NSPoint {
         if let window = event.window {
             return window.convertPoint(toScreen: event.locationInWindow)
         }
@@ -972,25 +1016,32 @@ public final class UsageHoverPanelController: NSObject {
         root.addSubview(self.clipView)
         root.addSubview(self.borderView)
         self.window = panel
-
-        let link = root.displayLink(target: self, selector: #selector(self.tick(_:)))
-        link.add(to: .main, forMode: .common)
-        link.isPaused = true
-        self.displayLink = link
     }
 
     private func startTicking() {
+        guard self.moving || self.alpha != self.alphaTarget else {
+            self.stopTickingIfIdle()
+            return
+        }
+        guard self.tickTimer == nil else { return }
         self.lastTick = CACurrentMediaTime()
-        self.displayLink?.isPaused = false
+        let timer = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.tick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.tickTimer = timer
     }
 
     private func stopTickingIfIdle() {
         if !self.moving, self.alpha == self.alphaTarget {
-            self.displayLink?.isPaused = true
+            self.tickTimer?.invalidate()
+            self.tickTimer = nil
         }
     }
 
-    @objc private func tick(_: CADisplayLink) {
+    private func tick() {
         let now = CACurrentMediaTime()
         let delta = min(0.05, max(0, now - self.lastTick))
         self.lastTick = now

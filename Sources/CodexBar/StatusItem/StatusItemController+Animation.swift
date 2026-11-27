@@ -251,6 +251,11 @@ extension StatusItemController {
         {
             return true
         }
+        // lemelson: merged menu bar shows rolling 24h spend in USD across all subscriptions.
+        if let wasCached = self.lemelsonApplyMenuBarSpend(button: button, statusItem: self.statusItem) {
+            self.noteIconPerfRender(skipped: wasCached)
+            return wasCached
+        }
         defer {
             let providers = self.stackedMergeIconProvidersIfActive().map { [$0.top, $0.bottom] }
                 ?? self.primaryProviderForUnifiedIcon().firstPartyProvider.map { [$0] } ?? []

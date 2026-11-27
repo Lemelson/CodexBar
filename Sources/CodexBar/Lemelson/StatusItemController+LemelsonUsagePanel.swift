@@ -369,6 +369,8 @@ extension StatusItemController {
         if context.menuWidth > 0 {
             session.menuWidth = context.menuWidth
         }
+        // Overview rows that just left the menu are kept for the next visit.
+        self.lemelsonKeepOverviewRowsLeaving(isOverview: false)
         // The Antigravity and Codex tabs are one page each (`+LemelsonProviderPages.swift`); the rows of the
         // provider page that is left are kept for the next visit.
         let providerPage = LemelsonProviderPageState.state(for: context.currentProvider)
@@ -471,6 +473,13 @@ extension StatusItemController {
         let panelWidth = Self.lemelsonSubpanelWidth
         // All Spend numbers for every period, computed once: the period switch and hovering only read them.
         let spend = UsageSpendDigest(state: state, now: now)
+        // The chart's day panel, keyed by the spend row's id so warm-up and cached tab swaps keep it.
+        let catalog = spend.dayDetailCatalog(now: now)
+        self.lemelsonRegisterChartDayDetail(
+            forRowID: UsageSpendDigest.defaultChartID,
+            .swiftUI(key: catalog.panelKey, width: panelWidth) {
+                AnyView(UsageDayDetailPanelView(catalog: catalog, width: panelWidth))
+            })
         menu.addItem(self.makeMenuCardItem(
             UsageSpendSummaryView(state: state, now: now, width: width, spend: spend),
             id: "lemelsonSpendSummary",
@@ -659,6 +668,7 @@ extension StatusItemController {
             // The Antigravity and Codex pages' rows belong to another tab, not to a Claude mode.
             for (id, view) in self.menuCardViewRecyclePool
                 where id.hasPrefix("lemelson") && !Self.lemelsonIsProviderPageRow(id)
+                && !Self.lemelsonIsOverviewPageRow(id)
             {
                 stash[id] = view
             }
@@ -810,6 +820,9 @@ extension StatusItemController {
                 changed = true
             }
         }
+        if let rendered = LemelsonOverviewPageState.shared.renderedStateDate, rendered != stateDate {
+            changed = true
+        }
         if self.lemelsonStartRefreshIfDue() {
             changed = true
         }
@@ -817,6 +830,7 @@ extension StatusItemController {
             self.invalidateMenus()
         }
         self.lemelsonScheduleModeWarmup()
+        self.lemelsonScheduleOverviewWarmup()
         self.lemelsonProviderPageMayBeShown(in: menu)
     }
 
@@ -827,8 +841,11 @@ extension StatusItemController {
         session.modeWarmTimer?.invalidate()
         session.modeWarmTimer = nil
         self.lemelsonCancelProviderWarmups()
+        self.lemelsonCancelOverviewWarmup()
         session.openSubpanels = 0
         session.rebuildPending = false
+        // The menu bar's 24-hour figure waits for the menu to close: no status item redraw while it tracks.
+        self.lemelsonMenuBarSpendDidChange()
         guard session.storeRefreshPending else { return }
         session.storeRefreshPending = false
         self.lemelsonRefreshStore()
@@ -900,6 +917,8 @@ extension StatusItemController {
         }
         session.switchObservers = [startObs, finishObs]
         self.lemelsonStartStateWatcher()
+        // The menu bar shows the 24-hour figure from launch, not from the first collector tick.
+        self.lemelsonMenuBarSpendDidChange()
     }
 
     func lemelsonStopAccountSwitchObservers() {
@@ -945,6 +964,10 @@ extension StatusItemController {
         self.invalidateMenus()
         if !self.openMenus.isEmpty {
             self.lemelsonRebuildOpenMenus()
+        } else {
+            // A collector tick or an account switch: the menu bar's 24-hour figure follows at once
+            // (while the menu is open it follows when the menu closes).
+            self.lemelsonMenuBarSpendDidChange()
         }
         self.lemelsonRefreshStore()
     }
@@ -963,6 +986,8 @@ extension StatusItemController {
         self.invalidateMenus()
         if !self.openMenus.isEmpty {
             self.lemelsonRebuildOpenMenus()
+        } else {
+            self.lemelsonMenuBarSpendDidChange()
         }
         self.lemelsonRefreshStore()
     }
@@ -978,6 +1003,8 @@ extension StatusItemController {
         self.invalidateMenus()
         if !self.openMenus.isEmpty {
             self.lemelsonRebuildOpenMenus()
+        } else {
+            self.lemelsonMenuBarSpendDidChange()
         }
         self.lemelsonRefreshStore()
     }
@@ -991,6 +1018,7 @@ extension StatusItemController {
         }
         if self.openMenus.isEmpty {
             self.invalidateMenus()
+            self.lemelsonMenuBarSpendDidChange()
             self.lemelsonRefreshStore()
         } else {
             // The menu bar icon updates after the menu closes: otherwise CodexBar's data refresh would
@@ -1017,8 +1045,13 @@ extension StatusItemController {
         }
         session.rebuildPending = false
         // The rebuild only goes ahead while the menu still shows the tab it is for.
-        let provider = LemelsonProviderPageState.state(forPageKey: self.lemelsonCurrentPageKey())?.provider
-            ?? .claude
+        let pageKey = self.lemelsonCurrentPageKey()
+        let provider: UsageProvider = if pageKey == "overview" {
+            // Overview is no provider's page: the provider the menu resolves to stands for it.
+            self.resolvedMenuProvider() ?? .claude
+        } else {
+            LemelsonProviderPageState.state(forPageKey: pageKey)?.provider ?? .claude
+        }
         for menu in self.openMenus.values where menu.supermenu == nil {
             self.scheduleOpenRootMenuDataRebuildIfStillVisible(menu, provider: provider)
         }

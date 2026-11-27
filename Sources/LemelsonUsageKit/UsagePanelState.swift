@@ -34,9 +34,19 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     /// A value of an unexpected shape reads as nil instead of costing the whole summary.
     private var cacheErrorField: Lenient<String>?
 
+    /// API dollars of the last 24 hours (rolling) across every subscription on this Mac (`usage/CODEX-STATE.md`,
+    /// Changes 2026-11-27). Nil in older summaries, when malformed, or when the collector's step failed.
+    public var spend24h: Spend24h? {
+        self.spend24hField?.value
+    }
+
+    /// Decoded leniently: a malformed block never costs the summary.
+    private var spend24hField: Lenient<Spend24h>?
+
     enum CodingKeys: String, CodingKey {
         case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, vpnState, antigravity, codex, cache
         case cacheErrorField = "cacheError"
+        case spend24hField = "spend24h"
         case kFable = "k_fable"
         case kSource = "k_source"
         case kPairs = "k_pairs"
@@ -77,6 +87,9 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var daily: [Day]?
         public var usdToday: Double?
         public var tokensToday: Double?
+        /// The last 24 hours, rolling (not since local midnight like `usdToday`).
+        public var usd24h: Double? = nil
+        public var tokens24h: Double? = nil
         public var usd7d: Double?
         public var tokens7d: Double?
         public var usd30d: Double?
@@ -410,6 +423,46 @@ extension UsagePanelState {
         self.accounts.reduce(0) { $0 + ($1.usd30d ?? 0) }
     }
 
+    /// Dollars of the last 24 hours across all subscriptions: `spend24h.usd`, else the sum of whatever accounts
+    /// and provider blocks carry `usd24h`; nil when none does.
+    public var rolling24hUsd: Double? {
+        if let usd = self.spend24h?.usd { return usd }
+        return Self.sum(self.rolling24hAccounts.map(\.usd24h))
+    }
+
+    /// Tokens of the last 24 hours, with the same fallback as `rolling24hUsd`.
+    public var rolling24hTokens: Double? {
+        if let spend = self.spend24h { return spend.tokens }
+        return Self.sum(self.rolling24hAccounts.map(\.tokens24h))
+    }
+
+    /// True when some subscription or Claude account failed this time, so `rolling24hUsd` is a lower bound.
+    public var isRolling24hPartial: Bool {
+        if let spend = self.spend24h {
+            if spend.partial == true { return true }
+            if let by = spend.byProvider {
+                if by.claude?.error != nil || (by.claude?.failedAccounts ?? 0) > 0 { return true }
+                if by.codex?.error != nil || by.antigravity?.error != nil { return true }
+            }
+            return false
+        }
+        return self.accounts.contains(where: \.isUnavailable)
+            || self.codex?.error != nil
+            || self.antigravity?.error != nil
+    }
+
+    private var rolling24hAccounts: [Account] {
+        self.accounts + [self.codex, self.antigravity].compactMap { block in
+            guard let block, block.error == nil else { return nil }
+            return block.account
+        }
+    }
+
+    private static func sum(_ values: [Double?]) -> Double? {
+        let present = values.compactMap { $0 }
+        return present.isEmpty ? nil : present.reduce(0, +)
+    }
+
     public var totalTodayUsd: Double {
         self.accounts.reduce(0) { $0 + ($1.usdToday ?? 0) }
     }
@@ -420,6 +473,128 @@ extension UsagePanelState {
 
     public var hasDaily: Bool {
         self.accounts.contains { !($0.daily ?? []).isEmpty }
+    }
+}
+
+extension UsagePanelState {
+    /// Top-level `spend24h` of `state.json`.
+    public struct Spend24h: Decodable, Sendable, Equatable {
+        public var usd: Double
+        public var tokens: Double?
+        /// When the collector added it up (seconds since 1970).
+        public var asOf: Double?
+        /// True when any provider or Claude account failed, so `usd` is a lower bound.
+        public var partial: Bool?
+        public var byProvider: ByProvider?
+
+        public init(
+            usd: Double,
+            tokens: Double? = nil,
+            asOf: Double? = nil,
+            partial: Bool? = nil,
+            byProvider: ByProvider? = nil)
+        {
+            self.usd = usd
+            self.tokens = tokens
+            self.asOf = asOf
+            self.partial = partial
+            self.byProvider = byProvider
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case usd, tokens, asOf, partial, byProvider
+        }
+
+        public init(from decoder: Decoder) throws {
+            let keys = try decoder.container(keyedBy: CodingKeys.self)
+            self.usd = try keys.decode(Double.self, forKey: .usd)
+            self.tokens = keys.lenient(Double.self, .tokens)
+            self.asOf = keys.lenient(Double.self, .asOf)
+            self.partial = keys.lenient(Bool.self, .partial)
+            self.byProvider = keys.lenient(ByProvider.self, .byProvider)
+        }
+
+        public struct ByProvider: Decodable, Sendable, Equatable {
+            public var claude: Provider?
+            public var codex: Provider?
+            public var antigravity: Provider?
+
+            public init(claude: Provider? = nil, codex: Provider? = nil, antigravity: Provider? = nil) {
+                self.claude = claude
+                self.codex = codex
+                self.antigravity = antigravity
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case claude, codex, antigravity
+            }
+
+            /// Provider by provider: one malformed entry drops only itself.
+            public init(from decoder: Decoder) throws {
+                let keys = try decoder.container(keyedBy: CodingKeys.self)
+                self.claude = keys.lenient(Provider.self, .claude)
+                self.codex = keys.lenient(Provider.self, .codex)
+                self.antigravity = keys.lenient(Provider.self, .antigravity)
+            }
+        }
+
+        public struct Provider: Decodable, Sendable, Equatable {
+            public var usd: Double
+            public var tokens: Double?
+            /// Claude only: per account.
+            public var accounts: [AccountEntry]?
+            /// Claude only: accounts whose step failed this time.
+            public var failedAccounts: Int?
+            /// Set when this provider's step failed; `usd` is then 0.
+            public var error: String?
+
+            public init(
+                usd: Double,
+                tokens: Double? = nil,
+                accounts: [AccountEntry]? = nil,
+                failedAccounts: Int? = nil,
+                error: String? = nil)
+            {
+                self.usd = usd
+                self.tokens = tokens
+                self.accounts = accounts
+                self.failedAccounts = failedAccounts
+                self.error = error
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case usd, tokens, accounts, failedAccounts, error
+            }
+
+            public init(from decoder: Decoder) throws {
+                let keys = try decoder.container(keyedBy: CodingKeys.self)
+                self.usd = try keys.decode(Double.self, forKey: .usd)
+                self.tokens = keys.lenient(Double.self, .tokens)
+                self.accounts = keys.lenient([Lenient<AccountEntry>].self, .accounts)?.compactMap(\.value)
+                self.failedAccounts = keys.lenient(Int.self, .failedAccounts)
+                self.error = keys.lenient(String.self, .error)
+            }
+        }
+
+        public struct AccountEntry: Decodable, Sendable, Equatable, Identifiable {
+            public var uuid: String
+            public var name: String
+            public var short: String?
+            public var usd: Double
+            public var tokens: Double?
+
+            public var id: String {
+                self.uuid
+            }
+
+            public init(uuid: String, name: String, short: String? = nil, usd: Double, tokens: Double? = nil) {
+                self.uuid = uuid
+                self.name = name
+                self.short = short
+                self.usd = usd
+                self.tokens = tokens
+            }
+        }
     }
 }
 
