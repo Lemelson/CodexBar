@@ -322,14 +322,14 @@ extension StatusItemController {
         }
     }
 
-    /// Called by `navigateProviderSwitcher` while a tab with modes (Claude, Codex) is selected. Moves to the
-    /// neighbouring mode of the tab whose mode row the menu shows and returns true, or returns false at the
-    /// first/last mode (and without a mode row) so the provider tabs move.
+    /// Called by `navigateProviderSwitcher` while a tab with modes (Overview, Claude, Codex) is selected. Moves
+    /// to the neighbouring mode of the tab whose mode row the menu shows and returns true, or returns false at
+    /// the first/last mode (and without a mode row) so the provider tabs move.
     func lemelsonStepMode(_ direction: StatusItemMenuProviderNavigationDirection, menu: NSMenu?) -> Bool {
         guard let menu = menu ?? self.lemelsonPagedRootMenu(), let tab = self.lemelsonModeTab(in: menu) else {
             return false
         }
-        let modes = LemelsonPanelMode.allCases
+        let modes = tab.modes
         guard let index = modes.firstIndex(of: LemelsonModeStore.store(for: tab).mode) else { return false }
         let target = index + (direction == .next ? 1 : -1)
         guard modes.indices.contains(target) else { return false }
@@ -340,9 +340,11 @@ extension StatusItemController {
     /// The tab with modes a selection names, when its page is the fork's (the Claude panel needs the summary;
     /// the Codex page also needs `lemelsonCodexPage` not set to "stock").
     static func lemelsonModeTab(of selection: ProviderSwitcherSelection) -> LemelsonModeTab? {
-        guard case let .provider(id) = selection,
-              FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path)
-        else { return nil }
+        guard FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path) else { return nil }
+        guard case let .provider(id) = selection else {
+            // Overview: Limits and Spend, unless its stock tab or the Spend-only page was asked for.
+            return LemelsonOverviewPageState.shared.usesModes ? .overview : nil
+        }
         switch id.firstPartyProvider {
         case .claude: return .claude
         case .codex: return LemelsonProviderPageState.codex.usesStockTab ? nil : .codex
@@ -363,11 +365,11 @@ extension StatusItemController {
         menu: NSMenu?)
     {
         guard let menu = menu ?? self.lemelsonPagedRootMenu() else { return }
-        // Entering a tab with modes (Claude, Codex) from the left lands on its first mode, from the right on
-        // its last.
+        // Entering a tab with modes (Overview, Claude, Codex) from the left lands on its first mode, from the
+        // right on its last.
         let tab = Self.lemelsonModeTab(of: selection)
         let store = tab.map(LemelsonModeStore.store(for:))
-        let landing: LemelsonPanelMode? = tab == nil ? nil : Self.lemelsonLandingMode(direction)
+        let landing: LemelsonPanelMode? = tab.map { Self.lemelsonLandingMode(direction, tab: $0) }
         self.lemelsonBeginPageTransition(
             menu: menu,
             boundary: .providerRow,
@@ -382,8 +384,11 @@ extension StatusItemController {
 
     /// The mode a tab with modes opens in when the line enters it: its first from the left, its last from the
     /// right.
-    static func lemelsonLandingMode(_ direction: StatusItemMenuProviderNavigationDirection) -> LemelsonPanelMode {
-        direction == .next ? LemelsonPanelMode.allCases.first ?? .limits : LemelsonPanelMode.allCases.last ?? .value
+    static func lemelsonLandingMode(
+        _ direction: StatusItemMenuProviderNavigationDirection,
+        tab: LemelsonModeTab = .claude) -> LemelsonPanelMode
+    {
+        direction == .next ? tab.modes.first ?? .limits : tab.modes.last ?? .limits
     }
 
     /// A page turn is waiting for a rebuild of `menu` while a native row (Status Page, Settings…) is
@@ -412,8 +417,8 @@ extension StatusItemController {
     /// The mode buttons, arrow keys and swipes all end here.
     func lemelsonSelectMode(_ mode: LemelsonPanelMode, tab: LemelsonModeTab = .claude, menu: NSMenu?) {
         let store = LemelsonModeStore.store(for: tab)
-        guard store.mode != mode else { return }
-        let modes = LemelsonPanelMode.allCases
+        let modes = tab.modes
+        guard store.mode != mode, modes.contains(mode) else { return }
         let forward = (modes.firstIndex(of: mode) ?? 0) > (modes.firstIndex(of: store.mode) ?? 0)
         if let menu {
             self.lemelsonBeginPageTransition(
@@ -429,12 +434,14 @@ extension StatusItemController {
 
     // MARK: - Page names
 
-    /// The name of a page of the line: "overview", "codex:limits", "claude:spend", "antigravity". `mode` is
-    /// the mode of the selected tab; nil takes the mode it shows now.
+    /// The name of a page of the line: "overview:limits", "codex:limits", "claude:spend", "antigravity";
+    /// "overview" while Overview has no modes (its stock tab, or the Spend-only page). `mode` is the mode of
+    /// the selected tab; nil takes the mode it shows now.
     static func lemelsonPageKey(selection: ProviderSwitcherSelection?, mode: LemelsonPanelMode? = nil) -> String {
         switch selection {
         case .overview:
-            return "overview"
+            guard LemelsonOverviewPageState.shared.usesModes else { return LemelsonOverviewPageState.pageKey }
+            return Self.lemelsonPageKey(tab: .overview, mode: mode)
         case let .provider(id):
             guard let provider = id.firstPartyProvider else { return "plugin:\(id)" }
             switch provider {
@@ -451,9 +458,9 @@ extension StatusItemController {
         }
     }
 
-    /// "claude:limits", "codex:value".
+    /// "claude:limits", "codex:value", "overview:spend".
     static func lemelsonPageKey(tab: LemelsonModeTab, mode: LemelsonPanelMode?) -> String {
-        "\(tab.provider.rawValue):\((mode ?? LemelsonModeStore.store(for: tab).mode).rawValue)"
+        "\(tab.rawValue):\((mode ?? LemelsonModeStore.store(for: tab).mode).rawValue)"
     }
 
     /// The page the menu shows now.

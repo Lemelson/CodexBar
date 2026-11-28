@@ -1068,18 +1068,41 @@ struct UsageSplitBar: View {
     let parts: [(Double, Color)]
     let scale: Double
     var height: CGFloat = 6
+    /// Indices of `parts` drawn hatched ("Not split yet") instead of filled.
+    var hatched: Set<Int> = []
+    /// The narrowest a part is drawn. Shares of a limit ask for 2.5 pt: narrower, a part is a sliver of
+    /// colour nobody can tell from the gap beside it.
+    var minPartWidth: CGFloat = 1.5
+
+    /// `parts` with those under `threshold` set to nothing, so the bar does not draw a sliver for a share
+    /// its caption does not name. The indices stay (`hatched` goes by them), and when every part is that
+    /// small the largest is kept: a reading that is all sliver is still a mark on the bar.
+    static func withoutSlivers(_ parts: [(Double, Color)], under threshold: Double = 0.5) -> [(Double, Color)] {
+        guard parts.contains(where: { $0.0 >= threshold }) else {
+            let largest = parts.indices.max { parts[$0].0 < parts[$1].0 }
+            return parts.indices.map { ($0 == largest ? parts[$0].0 : 0, parts[$0].1) }
+        }
+        return parts.map { ($0.0 >= threshold ? $0.0 : 0, $0.1) }
+    }
 
     var body: some View {
         GeometryReader { proxy in
             // The 1 pt gaps between parts come out of the width, so parts that fill the scale end at the
             // bar's end instead of running past it into the rounded clip.
-            let drawn = self.parts.filter { $0.0 > 0 }
+            let drawn = Array(self.parts.enumerated()).filter { $0.element.0 > 0 }
             let usable = max(0, proxy.size.width - CGFloat(max(0, drawn.count - 1)))
             HStack(spacing: 1) {
-                ForEach(Array(drawn.enumerated()), id: \.offset) { _, part in
-                    Rectangle()
-                        .fill(part.1)
-                        .frame(width: max(1.5, usable * CGFloat(min(1, part.0 / self.scale))))
+                ForEach(drawn, id: \.offset) { index, part in
+                    Group {
+                        if self.hatched.contains(index) {
+                            Canvas { context, size in
+                                UsageHatch.draw(in: context, rect: CGRect(origin: .zero, size: size))
+                            }
+                        } else {
+                            Rectangle().fill(part.1)
+                        }
+                    }
+                    .frame(width: max(self.minPartWidth, usable * CGFloat(min(1, part.0 / self.scale))))
                 }
                 Spacer(minLength: 0)
             }

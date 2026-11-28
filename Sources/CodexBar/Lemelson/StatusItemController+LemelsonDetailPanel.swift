@@ -141,7 +141,21 @@ extension StatusItemController {
             {
                 return
             }
+            // The chart's own row became the highlighted one (Overview → Limits: its row takes clicks for the
+            // switches, so it highlights) in the same pointer move that reached the plot: the hover has just
+            // begun, it is not over. Without this the pointed-at time was dropped until the next move.
+            if let item,
+               panel.isShowingChartDayPanel,
+               let chartID = UsageDayFocus.shared.activeChartID,
+               UsageChartPointer.shared.isPointerOverChartOrBand(at: panel.lastPointerLocation),
+               let plot = UsageChartPointer.shared.plotScreenRect(chartID: chartID),
+               let (rowRect, _) = self.lemelsonScreenRect(of: item, in: menu),
+               rowRect.contains(NSPoint(x: plot.midX, y: plot.midY))
+            {
+                return
+            }
             if item != nil, UsageDayFocus.shared.activeChartID != nil {
+                UsageChartPointer.shared.trace?("chart focus cleared: a row without a panel is highlighted")
                 UsageDayFocus.shared.clear()
             }
             panel.pointerLeftRows()
@@ -149,6 +163,7 @@ extension StatusItemController {
         }
         // Onto a row with its own detail: the chart's hovered day ends, the panel moves to the row.
         if UsageDayFocus.shared.activeChartID != nil {
+            UsageChartPointer.shared.trace?("chart focus cleared: a row with a panel is highlighted")
             UsageDayFocus.shared.clear()
         }
         panel.show(

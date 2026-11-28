@@ -716,6 +716,10 @@ extension StatusItemController {
             let accounts = self.lemelsonCodexAccountsDidChange(page)
             readings += accounts.readings
             rebuild = rebuild || accounts.changed
+            if accounts.changed {
+                // Overview's Limits lists the same accounts with the same live numbers.
+                self.lemelsonCodexLiveDidChangeForOverview()
+            }
         }
         // The new numbers (and a switch's border, dot and card order) show at once; the live file is written
         // after, and only a line that went in rebuilds again (with the collector's pass started).

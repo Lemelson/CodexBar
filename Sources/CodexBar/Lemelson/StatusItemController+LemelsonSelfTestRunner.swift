@@ -16,8 +16,12 @@ extension StatusItemController {
     /// Each step logs the page it reached:
     /// `log show --last 2m --info --predicate 'subsystem == "com.steipete.codexbar.lemelson"'`.
     /// The menu opens on the page named by `lemelsonSelfTestStart` (default `claude:limits`; `overview`,
-    /// `codex`, `antigravity`, `claude:spend`, …; `keep` opens where the menu was left). Returns true when a
-    /// self-test runs and its start page was set.
+    /// `overview:limits`, `codex`, `codex:spend`, `antigravity`, `claude:spend`, …; `keep` opens where the menu
+    /// was left). Returns true when a self-test runs and its start page was set.
+    ///
+    /// Overview: `lemelsonSelfTestOverview -bool YES` runs the Spend plan from `overview` (or
+    /// `overview:spend`) and the Limits plan from `overview:limits`; the Limits plan ends with a line
+    /// `overview-limits: end, N passed, M failed`.
     func lemelsonRunSelfTestIfRequested(menu: NSMenu) -> Bool {
         guard UserDefaults.standard.bool(forKey: "lemelsonSelfTest"), menu.supermenu == nil else { return false }
         let log = Self.lemelsonLog
@@ -214,8 +218,15 @@ extension StatusItemController {
     private func lemelsonForceSelfTestStart(_ key: String) -> Bool {
         guard key != "keep" else { return false }
         let session = LemelsonPanelSession.shared
-        if key == "overview" {
+        if LemelsonOverviewPageState.isShown(onPage: key) {
             self.settings.mergedMenuLastSelectedWasOverview = true
+            // "overview" alone is the Spend page the older tests were written for; "overview:limits" names
+            // the other one.
+            let mode = key.split(separator: ":").dropFirst().first.map(String.init)
+                .flatMap(LemelsonPanelMode.init(rawValue:)) ?? .spend
+            if LemelsonModeTab.overview.modes.contains(mode) {
+                LemelsonModeStore.overview.mode = mode
+            }
             return true
         }
         let parts = key.split(separator: ":").map(String.init)
@@ -227,8 +238,12 @@ extension StatusItemController {
         }
         self.settings.mergedMenuLastSelectedWasOverview = false
         self.selectedMenuProvider = provider.instanceID
+        let mode = parts.dropFirst().first.flatMap(LemelsonPanelMode.init(rawValue:))
         if provider == .claude {
-            session.mode = parts.dropFirst().first.flatMap(LemelsonPanelMode.init(rawValue:)) ?? .limits
+            session.mode = mode ?? .limits
+        } else if provider == .codex, let mode, LemelsonModeTab.codex.modes.contains(mode) {
+            // "codex:spend": the Codex tab's own mode ("codex" alone keeps the one it was left in).
+            LemelsonModeStore.codex.mode = mode
         }
         return true
     }

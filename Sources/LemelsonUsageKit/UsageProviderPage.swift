@@ -215,15 +215,17 @@ public struct UsageProviderPage {
                         style: style,
                         now: now,
                         width: width,
-                        sources: .single,
+                        sources: spec.sources(for: window, block: block),
                         sessionsLeft: block.sessionsLeft(for: kind, now: now),
                         sessionsNote: block.sessionsMeasuringCaption(for: kind, now: now),
                         last: last,
                         afterHeader: index == 0),
                     separatorAfter: last,
                     inCard: true,
+                    fingerprint: Self.splitFingerprint(window),
                     detail: {
-                        AnyView(Self.detail(kind: kind, window: window, block: block, now: clock(), width: detailWidth))
+                        AnyView(Self.detail(
+                            kind: kind, window: window, block: block, now: clock(), width: detailWidth, spec: spec))
                     })
             }
         }
@@ -314,13 +316,24 @@ public struct UsageProviderPage {
         SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// The hover detail of one limit row: the same panel as a Claude limit, single source.
+    /// What of a window's split changes its row: the chips under the bar can wrap, so the row's height
+    /// follows the method and the rounded parts.
+    nonisolated static func splitFingerprint(_ window: UsagePanelState.Window) -> String {
+        guard let split = window.split else { return "" }
+        let parts = [split.youPct, split.othersPct, split.unknownPct].map { String(Int($0.rounded())) }
+        return ":\(split.method.rawValue)\(split.preliminary ? "~" : ""):" + parts.joined(separator: "/")
+    }
+
+    /// The hover detail of one limit row: the same panel as a Claude limit. With the provider's `spec` and a
+    /// window the collector split, the panel tells this Mac, others and the unsplit part apart.
     public static func detail(
         kind: UsagePanelState.WindowKind,
         window: UsagePanelState.Window,
         block: UsageProviderBlock,
         now: Date,
-        width: CGFloat = UsageProviderPage.defaultDetailWidth) -> UsageLimitDetailPanelView
+        width: CGFloat = UsageProviderPage.defaultDetailWidth,
+        spec: UsageProviderSpec? = nil,
+        title: String? = nil) -> UsageLimitDetailPanelView
     {
         UsageLimitDetailPanelView(
             account: block.account,
@@ -329,7 +342,8 @@ public struct UsageProviderPage {
             now: now,
             width: width,
             sessionsLeft: block.sessionsLeft(for: kind, now: now),
-            sources: .single,
+            title: title,
+            sources: spec?.sources(for: window, block: block) ?? .single,
             sessionsNote: block.sessionsMeasuringSentence(for: kind, now: now))
     }
 

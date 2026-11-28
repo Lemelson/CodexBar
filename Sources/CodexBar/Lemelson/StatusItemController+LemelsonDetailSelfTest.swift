@@ -15,7 +15,9 @@ extension StatusItemController {
     }
 
     /// `lemelsonSelfTestOverview -bool YES` (with `lemelsonSelfTestStart overview`): the Overview plan below
-    /// instead of the detail panel plan.
+    /// instead of the detail panel plan. With `lemelsonSelfTestStart overview:limits` it is the Limits plan
+    /// (`lemelsonOverviewLimitsSelfTestPlan`): the cumulative chart's hover, click and clean-up, and
+    /// Limits ↔ Spend.
     static var lemelsonOverviewSelfTestRequested: Bool {
         UserDefaults.standard.bool(forKey: "lemelsonSelfTestOverview")
     }
@@ -175,6 +177,11 @@ extension StatusItemController {
     /// the plot zoom into those days, one Escape zooms out with the menu still open. Then every Overview row with
     /// a detail (the three providers, the prompt cache) is hovered and its panel's size logged.
     func lemelsonOverviewSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        // Opened on Limits (`lemelsonSelfTestStart overview:limits`): that page has its own plan.
+        let overview = LemelsonOverviewPageState.shared
+        if overview.usesModes, overview.mode == .limits {
+            return self.lemelsonOverviewLimitsSelfTestPlan(menu: menu)
+        }
         let log = Self.lemelsonLog
         let panel = UsageHoverPanelController.shared
         let pointer = UsageChartPointer.shared
@@ -220,7 +227,7 @@ extension StatusItemController {
         var plan: [(TimeInterval, () -> Void)] = [
             (0.4, {
                 let page = tools.page()
-                log.notice("overview: opened on \(page, privacy: .public)\(page == "overview" ? "" : " (set lemelsonSelfTestStart overview)", privacy: .public)")
+                log.notice("overview: opened on \(page, privacy: .public)\(LemelsonOverviewPageState.isShown(onPage: page) ? "" : " (set lemelsonSelfTestStart overview)", privacy: .public)")
             }),
             (0.6, { tools.describeOverviewRows(label: "overview") }),
             // Hover: the day panel slides out left of the menu.
@@ -338,6 +345,201 @@ extension StatusItemController {
         }))
         plan.append((13.4, { [weak menu] in
             log.notice("overview: end, menu open=\(isOpen())")
+            panel.trace = nil
+            pointer.trace = nil
+            LemelsonPageTransition.shared.trace = nil
+            menu?.cancelTracking()
+        }))
+        return plan
+    }
+
+    // MARK: - Overview: Limits
+
+    /// `lemelsonSelfTestOverview -bool YES` with `lemelsonSelfTestStart overview:limits`: Overview's Limits page
+    /// end to end inside the open menu, with events posted to this app's own queue (the pointer never moves).
+    /// Every check logs `overview-limits: PASS …` or `overview-limits: FAIL …`, and the last line counts them:
+    ///
+    ///   1. a hover over the cumulative chart opens the accounts panel (`UsageOverviewRecent.panelKey`) and
+    ///      makes the chart the pointed-at one;
+    ///   2. a click on the chart (it has no drag and no zoom) leaves the menu open and zooms nothing;
+    ///   3. moving the pointer off the chart ends the hover and takes the panel away;
+    ///   4. Limits → Spend → Limits by the mode row's own path lands on each page, and the chart is pointed
+    ///      at again after the round trip;
+    ///   5. every account row opens its weekly limit panel;
+    ///   6. a click on a Codex account row opens the Codex tab on Limits, though the tab was left on Spend.
+    func lemelsonOverviewLimitsSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
+        let log = Self.lemelsonLog
+        let panel = UsageHoverPanelController.shared
+        let pointer = UsageChartPointer.shared
+        let focus = UsageDayFocus.shared
+        let chartID = UsageOverviewRecent.chartID
+        let panelKey = UsageOverviewRecent.panelKey
+        panel.trace = { message in
+            log.notice("panel: \(message, privacy: .public)")
+        }
+        pointer.trace = { message in
+            log.notice("chart: \(message, privacy: .public)")
+        }
+        let tools = LemelsonSelfTestTools(controller: self, menu: menu)
+        let menuWindow: () -> NSWindow? = { [weak self, weak menu] in
+            menu.flatMap { self?.lemelsonMenuWindow(of: $0) }
+        }
+        let isOpen: () -> Bool = { [weak self, weak menu] in
+            menu.map { self?.openMenus[ObjectIdentifier($0)] != nil } ?? false
+        }
+        var passed = 0
+        var failed = 0
+        let check: (String, Bool, String) -> Void = { name, ok, detail in
+            if ok {
+                passed += 1
+            } else {
+                failed += 1
+            }
+            log.notice("overview-limits: \(ok ? "PASS" : "FAIL", privacy: .public) \(name, privacy: .public): \(detail, privacy: .public)")
+        }
+        let state: () -> String = {
+            "panel=\(panel.visibleKey ?? "hidden") chart=\(focus.activeChartID ?? "none") "
+                + "sample=\(focus.hoveredDayKey ?? "none") page=\(tools.page())"
+        }
+        let postOnPlot: (NSEvent.EventType, CGFloat, String) -> Void = { type, fraction, label in
+            guard let plot = pointer.activeChartPlotScreenRect() else {
+                return log.notice("overview-limits: no visible chart for \(label, privacy: .public) (registered \(pointer.registeredChartIDs.joined(separator: ","), privacy: .public))")
+            }
+            let point = NSPoint(x: plot.minX + plot.width * fraction, y: plot.midY)
+            tools.post(type, at: point, in: menuWindow())
+            log.notice("overview-limits: post \(label, privacy: .public) at \(Int(point.x)),\(Int(point.y))")
+        }
+        let row: (String) -> NSMenuItem? = { [weak menu] suffix in
+            menu?.items.first { ($0.representedObject as? String) == UsageOverviewPage.idPrefix + suffix }
+        }
+        let accountRows: () -> [NSMenuItem] = { [weak menu] in
+            (menu?.items ?? []).filter {
+                ($0.representedObject as? String)?.hasPrefix(UsageOverviewPage.idPrefix + "limits-acct-") == true
+            }
+        }
+        let name: (NSMenuItem) -> String = { ($0.representedObject as? String) ?? $0.title }
+
+        var plan: [(TimeInterval, () -> Void)] = [
+            (0.4, {
+                let page = tools.page()
+                check("opens on Limits", page == "overview:limits", "page=\(page) (set lemelsonSelfTestStart overview:limits)")
+            }),
+            (0.6, { tools.describeOverviewRows(label: "overview-limits") }),
+            // 1. Hover: every account at the pointed-at time, left of the menu.
+            (1.2, {
+                log.notice("overview-limits: charts registered \(pointer.registeredChartIDs.joined(separator: ","), privacy: .public) plot \(NSStringFromRect(pointer.activeChartPlotScreenRect() ?? .zero), privacy: .public)")
+                postOnPlot(.mouseMoved, 0.6, "hover at 60%")
+            }),
+            (1.3, { log.notice("overview-limits: 0.1 s after the hover: \(state(), privacy: .public)") }),
+            (1.9, {
+                check(
+                    "hover opens the accounts panel",
+                    panel.visibleKey == panelKey && focus.activeChartID == chartID && focus.hoveredDayKey != nil,
+                    state())
+            }),
+            // 2. The chart is only pointed at: a click neither closes the menu nor zooms.
+            (2.2, { postOnPlot(.leftMouseDown, 0.5, "press at 50%") }),
+            (2.3, { postOnPlot(.leftMouseUp, 0.5, "release at 50%") }),
+            (2.9, {
+                let zoom = UsagePanelSelection.shared.customRange?.shortTitle ?? "none"
+                check(
+                    "click on the chart keeps the menu open",
+                    isOpen() && tools.page() == "overview:limits" && UsagePanelSelection.shared.customRange == nil
+                        && !pointer.hasActiveDrag,
+                    "menu open=\(isOpen()) zoom=\(zoom) drag=\(pointer.hasActiveDrag) \(state())")
+            }),
+            // 3. Off the chart, onto the "WEEKLY LIMITS" line (no detail of its own).
+            (3.2, {
+                guard let head = row("limits-head") else { return log.notice("overview-limits: no limits-head row") }
+                tools.moveOver(head, label: "limits-head")
+            }),
+            (4.0, {
+                check(
+                    "pointer away ends the hover",
+                    panel.visibleKey != panelKey && focus.activeChartID != chartID,
+                    state())
+            }),
+            // 4. Limits → Spend → Limits, the way the mode row, the arrow keys and swipes switch.
+            (4.3, { [weak self, weak menu] in
+                self?.lemelsonSelectMode(.spend, tab: .overview, menu: menu)
+            }),
+            (5.3, {
+                let spend = row("spend") != nil
+                check(
+                    "Limits to Spend",
+                    tools.page() == "overview:spend" && spend && row("limits-recent") == nil
+                        && panel.visibleKey != panelKey,
+                    "spend row=\(spend) limits row=\(row("limits-recent") != nil) \(state())")
+            }),
+            (5.6, { [weak self, weak menu] in
+                self?.lemelsonSelectMode(.limits, tab: .overview, menu: menu)
+            }),
+            (6.6, {
+                let recent = row("limits-recent") != nil
+                check(
+                    "Spend to Limits",
+                    tools.page() == "overview:limits" && recent && row("spend") == nil,
+                    "limits row=\(recent) spend row=\(row("spend") != nil) \(state())")
+                postOnPlot(.mouseMoved, 0.3, "hover at 30% after the round trip")
+            }),
+            (7.3, {
+                check(
+                    "hover works after the round trip",
+                    panel.visibleKey == panelKey && focus.activeChartID == chartID,
+                    state())
+            }),
+        ]
+        // 5. Every account row (at most eight, to bound the run) opens its weekly limit panel.
+        var time = 7.6
+        for index in 0..<8 {
+            let start = time
+            plan.append((start, {
+                let rows = accountRows()
+                if index == 0 {
+                    log.notice("overview-limits: \(rows.count) account rows: \(rows.map(name).joined(separator: ", "), privacy: .public)")
+                    check("the page lists accounts", !rows.isEmpty, "\(rows.count) rows")
+                }
+                guard rows.indices.contains(index) else { return }
+                tools.moveOver(rows[index], label: name(rows[index]))
+            }))
+            plan.append((start + 0.6, {
+                let rows = accountRows()
+                guard rows.indices.contains(index) else { return }
+                let id = name(rows[index])
+                // A row without a reading has no panel; the others open their own.
+                let hasDetail = LemelsonDetailPanelState.shared.itemKeys[ObjectIdentifier(rows[index])] != nil
+                check(
+                    "account row \(index) panel",
+                    hasDetail ? panel.visibleKey == id : panel.visibleKey != panelKey,
+                    "row=\(id) detail=\(hasDetail) panel=\(panel.visibleKey ?? "hidden") card=\(NSStringFromRect(panel.cardScreenRect))")
+            }))
+            time += 0.8
+        }
+        // 6. A click on a Codex account row: the Codex tab opens on Limits, though it was left on Spend.
+        let codexRow: () -> NSMenuItem? = {
+            accountRows().first { name($0).hasPrefix(UsageOverviewPage.idPrefix + "limits-acct-codex-") }
+        }
+        let codexHasModes: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return self.store.enabledFirstPartyProvidersForDisplay().contains(.codex)
+                && Self.lemelsonModeTab(of: .provider(UsageProvider.codex.instanceID)) == .codex
+        }
+        plan.append((time, {
+            guard codexHasModes(), let item = codexRow() else {
+                return log.notice("overview-limits: no Codex account row or no Codex tab with modes, the click is skipped")
+            }
+            LemelsonModeStore.codex.mode = .spend
+            tools.click(item, label: "codex account row (tab left on Spend)")
+        }))
+        plan.append((time + 1.0, {
+            guard codexHasModes() else { return }
+            check(
+                "account row click opens the tab on Limits",
+                tools.page() == "codex:limits" && isOpen(),
+                "page=\(tools.page()) codex mode=\(LemelsonModeStore.codex.mode.rawValue) menu open=\(isOpen())")
+        }))
+        plan.append((time + 1.5, { [weak menu] in
+            log.notice("overview-limits: end, \(passed) passed, \(failed) failed, menu open=\(isOpen())")
             panel.trace = nil
             pointer.trace = nil
             LemelsonPageTransition.shared.trace = nil
@@ -649,7 +851,7 @@ extension StatusItemController {
         // Left of Codex is Overview: its rows and height against the screen, then back to Codex.
         at(20.0, [(0, { tools.key(right: false, "left, to Overview") })])
         at(20.7, [(0, {
-            guard tools.page() == "overview" else { return log.notice("tour: left of Codex is \(tools.page(), privacy: .public), not overview") }
+            guard LemelsonOverviewPageState.isShown(onPage: tools.page()) else { return log.notice("tour: left of Codex is \(tools.page(), privacy: .public), not overview") }
             tools.describeOverviewRows(label: "overview")
         })])
         at(20.9, [(0, { tools.key(right: true, "right, back to Codex Limits") })])

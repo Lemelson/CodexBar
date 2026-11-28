@@ -20,9 +20,19 @@ import LemelsonUsageKit
 ///   priced    "legacy" with a known plan and price
 ///   measuring "full" before the session size is measured: no `sessions`, `calibration` says 1 of 3 windows seen
 ///   measuring-bare  the same without `calibration`
+///
+/// "full" with both limits told apart into this Mac, others and what cannot be told yet (`windows.*.split`,
+/// five-element `series`, `weeks[].unknownPct` and `splitMethod`), one fixture per method of the collector:
+///   calibrated   a measured rate: You and Others
+///   preliminary  the same from a rate measured once: "≈" on You
+///   idle         the limit moved while this Mac was idle: You 0%, all of it Others
+///   floor        no rate: a proven share of Others ("12%+") and the rest not split
+///   unknown      no rate and nothing proven: all of it not split
+///   mixed        a rate, with a part that has no clean match yet: You, Others and Not split yet
 enum AntigravityFixture {
+    static let splitNames = ["calibrated", "preliminary", "idle", "floor", "unknown", "mixed"]
     static let names = ["full", "no-price", "no-value", "no-cache", "legacy", "run-out", "no-quota", "no-spend",
-                        "one-day", "error", "rolled", "priced", "measuring", "measuring-bare"]
+                        "one-day", "error", "rolled", "priced", "measuring", "measuring-bare"] + splitNames
 
     static func state(_ name: String, now: Date) -> UsagePanelState? {
         let summary: [String: Any] = [
@@ -121,8 +131,13 @@ enum AntigravityFixture {
                 block["planName"] = "AI Ultra"
                 block["planPriceUsd"] = 250.0
             }
-            if ["full", "no-price", "no-value", "no-cache", "measuring", "measuring-bare"].contains(name) {
+            if ["full", "no-price", "no-value", "no-cache", "measuring", "measuring-bare"].contains(name)
+                || self.splitNames.contains(name)
+            {
                 self.addMessage24(to: &block, name)
+            }
+            if self.splitNames.contains(name) {
+                self.addSplit(to: &block, name, now: now)
             }
             if name.hasPrefix("measuring") {
                 // No measured session size, and no 5-hour rate to stand in for it.
@@ -141,6 +156,88 @@ enum AntigravityFixture {
             }
         }
         return block
+    }
+
+    /// Both limits told apart, as the collector writes it: `split`, `mine` and `outside` (only when nothing is
+    /// left unsplit), five-element `series`, and the limit weeks with their own parts.
+    private static func addSplit(to block: inout [String: Any], _ name: String, now: Date) {
+        // Shares of a reading: this Mac, others, not split.
+        let shares: (you: Double, others: Double, unknown: Double)
+        var reason: Any = NSNull()
+        switch name {
+        case "idle":
+            shares = (0, 1, 0)
+        case "floor":
+            shares = (0, 0.3, 0.7)
+            reason = "uncovered"
+        case "unknown":
+            shares = (0, 0, 1)
+            reason = "missing_baseline"
+        case "mixed":
+            shares = (0.5, 0.2, 0.3)
+            reason = "possible_local_activity"
+        default:
+            shares = (0.65, 0.35, 0)
+        }
+        let method = name == "preliminary" ? "calibrated" : name
+        // Without a rate the collector does not know this Mac's part: null, not zero.
+        let knowsYou = !["floor", "unknown"].contains(name)
+        func tenth(_ value: Double) -> Double {
+            (value * 10).rounded() / 10
+        }
+        func parts(_ pct: Double) -> (you: Double, others: Double, unknown: Double) {
+            let you = tenth(pct * shares.you)
+            let others = tenth(pct * shares.others)
+            return (you, others, max(0, tenth(pct - you - others)))
+        }
+        let t = now.timeIntervalSince1970
+        guard var windows = block["windows"] as? [String: Any] else { return }
+        // The "full" 5-hour window is a fresh 0%: give it a reading to split.
+        if var five = windows["5h"] as? [String: Any] {
+            let reset = t + 2 * hour + 12 * 60
+            five["pct"] = 27.0
+            five["resetsAt"] = reset
+            five["start"] = reset - 5 * hour
+            five["usd"] = ["opus": 0, "fable": 0, "other": shares.you > 0 ? 24.6 : 0.0]
+            five["series"] = self.ramp(from: reset - 5 * hour, to: t - 12 * 60, pct: 27, steps: 7)
+            windows["5h"] = five
+        }
+        for key in ["5h", "7d"] {
+            guard var window = windows[key] as? [String: Any], let pct = window["pct"] as? Double else { continue }
+            let split = parts(pct)
+            window["split"] = ["youPct": split.you, "othersPct": split.others, "unknownPct": split.unknown,
+                               "method": method, "preliminary": name == "preliminary", "reason": reason]
+            window["mine"] = split.unknown == 0 ? split.you : NSNull()
+            window["outside"] = split.unknown == 0 ? split.others : NSNull()
+            if let series = window["series"] as? [[Any]] {
+                window["series"] = series.map { point -> [Any] in
+                    guard point.count >= 2, let used = point[1] as? Double else { return point }
+                    let at = parts(used)
+                    return [point[0], used, knowsYou ? at.you : NSNull(), at.others, at.unknown]
+                }
+            }
+            windows[key] = window
+        }
+        block["windows"] = windows
+        // The limit weeks: the current one and two finished ones, split the same way.
+        if let week = windows["7d"] as? [String: Any], let reset = week["resetsAt"] as? Double {
+            // (weeks back, the week's peak, this Mac's dollars)
+            let weeks: [(Double, Double, Double)] = [(0, 40, 252.9), (1, 82, 518), (2, 55, 347)]
+            block["weeks"] = weeks.map { back, peak, usd -> [String: Any] in
+                let end = reset - back * 7 * day
+                let split = parts(peak)
+                return ["start": end - 7 * day, "end": end, "current": back == 0,
+                        "usd": ["opus": 0, "fable": 0, "other": shares.you > 0 || name == "floor" ? usd : 0.0],
+                        "tokens": usd * 2_100_000, "peakPct": peak, "peakAt": min(t - 12 * 60, end - 2 * hour),
+                        "peakFinal": back > 0, "minePct": knowsYou ? split.you : NSNull(), "othersPct": split.others,
+                        "unknownPct": split.unknown, "splitMethod": method]
+            }
+        }
+        var calibration = block["calibration"] as? [String: Any] ?? [:]
+        var thresholds = calibration["thresholds"] as? [String: Any] ?? [:]
+        thresholds["stretchUsd"] = ["5h": 3.0, "7d": 10.0]
+        calibration["thresholds"] = thresholds
+        block["calibration"] = calibration
     }
 
     /// The fields of `usage/ANTIGRAVITY-STATE.md` on top of the older block.

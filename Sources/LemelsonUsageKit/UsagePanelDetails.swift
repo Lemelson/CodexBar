@@ -12,8 +12,10 @@ public struct UsageLimitDetailPanelView: View {
     let sessionsLeft: UsageSessionsLeft?
     /// Replaces the long window title ("5-hour session limit").
     let title: String?
-    /// `.single` (provider pages): no "You" line or "Where it went", dollars read as "your use", and a plain
-    /// sentence instead of a chart with fewer than two readings.
+    /// `.single` (provider pages without a split): no "You" line or "Where it went", dollars read as "your
+    /// use", and a plain sentence instead of a chart with fewer than two readings. `.local` (provider pages
+    /// with the collector's split): the same, plus You / Others / Not split yet on the chart and in
+    /// "Where it went".
     let sources: UsageLimitSources
     /// One sentence in place of `sessionsLeft` while the session size is still being measured.
     let sessionsNote: String?
@@ -40,7 +42,7 @@ public struct UsageLimitDetailPanelView: View {
         self.sessionsNote = sessionsNote
     }
 
-    private struct Sample: Identifiable {
+    struct Sample: Identifiable, Equatable {
         let date: Date
         let value: Double
         let series: String
@@ -69,22 +71,85 @@ public struct UsageLimitDetailPanelView: View {
         return parts.joined(separator: " · ")
     }
 
-    private func samples(in range: ClosedRange<Date>) -> (used: [Sample], mine: [Sample]) {
+    /// Others' use between two heights of the chart.
+    struct Band: Identifiable, Equatable {
+        let date: Date
+        let low: Double
+        let high: Double
+        /// The stretch of readings the band belongs to: see `Samples.run`.
+        let series: String
+
+        var id: Double {
+            self.date.timeIntervalSince1970
+        }
+    }
+
+    struct ChartSamples {
         var used: [Sample] = []
         var mine: [Sample] = []
-        for point in self.window.points {
+        /// Provider pages: others above this Mac's part, or hanging below the reading while that part is unknown.
+        var others: [Band] = []
+
+        var drawsOthers: Bool {
+            self.others.contains { $0.high - $0.low >= 0.5 }
+        }
+    }
+
+    /// The window's readings as chart series. This Mac's part is drawn in stretches: a reading without it
+    /// (no rate at that time) ends the stretch, so the orange line and area stop there and start again at the
+    /// next reading that has it, instead of running straight across readings nobody split. Others' band is
+    /// the collector's own fourth column when the reading has one; only an older three-column reading is
+    /// worked out from the total.
+    static func samples(
+        of points: [UsagePanelState.Window.Point],
+        in range: ClosedRange<Date>,
+        local: Bool) -> ChartSamples
+    {
+        var result = ChartSamples()
+        var run = 0
+        var previousHadMine: Bool?
+        for point in points {
             let date = Date(timeIntervalSince1970: point.time)
             guard range.contains(date) else { continue }
-            used.append(Sample(date: date, value: point.used, series: "used"))
+            result.used.append(Sample(date: date, value: point.used, series: "used"))
+            // A new stretch whenever this Mac's part appears or disappears.
+            let hasMine = point.mine != nil
+            if let previousHadMine, previousHadMine != hasMine {
+                run += 1
+            }
+            previousHadMine = hasMine
             if let value = point.mine {
-                mine.append(Sample(date: date, value: value, series: "you"))
+                result.mine.append(Sample(date: date, value: value, series: "you-\(run)"))
+            }
+            guard local else { continue }
+            let series = "others-\(run)"
+            if let mine = point.mine {
+                // Others sit right above the orange: the collector's own number, else what is neither this
+                // Mac's nor unsplit.
+                let top = point.others.map { mine + max(0, $0) } ?? max(mine, point.used - (point.unknown ?? 0))
+                result.others.append(Band(date: date, low: mine, high: max(mine, min(point.used, top)), series: series))
+            } else if let others = point.others, others > 0 {
+                // No rate, so no orange: the proven part of others hangs below the reading.
+                result.others.append(Band(
+                    date: date, low: max(0, point.used - others), high: point.used, series: series))
+            } else {
+                result.others.append(Band(date: date, low: point.used, high: point.used, series: series))
             }
         }
-        return (used, mine)
+        if !result.drawsOthers {
+            result.others = []
+        }
+        return result
+    }
+
+    private func samples(in range: ClosedRange<Date>) -> ChartSamples {
+        Self.samples(of: self.window.points, in: range, local: self.sources.local != nil)
     }
 
     public var body: some View {
-        let segments = self.sources == .split ? UsageSegment.build(for: self.window, kind: self.kind) : []
+        let segments = self.sources.hasParts
+            ? UsageSegment.build(for: self.window, kind: self.kind, sources: self.sources).filter { $0.kind != .all }
+            : []
         let pace = UsageLimitPace.make(window: self.window, kind: self.kind, now: self.now)
         let forecast = self.window.liveForecast(now: self.now)
         // The row's verdict: the panel's forecast says the same thing in more words, in the same colour.
@@ -97,7 +162,8 @@ public struct UsageLimitDetailPanelView: View {
                     .font(.system(size: 11))
                     .fixedSize(horizontal: false, vertical: true)
             } else if let range = self.range {
-                self.chart(range: range)
+                let samples = self.samples(in: range)
+                self.chart(range: range, samples: samples)
                 if let first = self.window.points.first,
                    first.time > range.lowerBound.timeIntervalSince1970 + 0.15 * self.kind.span
                 {
@@ -112,6 +178,12 @@ public struct UsageLimitDetailPanelView: View {
                         UsageChip(color: UsagePalette.you, text: "You")
                     } else {
                         UsageChip(color: .primary, text: "Used", line: true)
+                        if self.sources.local != nil, !samples.mine.isEmpty {
+                            UsageChip(color: UsagePalette.you, text: "You")
+                        }
+                        if samples.drawsOthers {
+                            UsageChip(color: UsagePalette.others, text: "Others")
+                        }
                     }
                     UsageChip(color: .secondary, text: "Even pace", dashed: true)
                     if forecast != nil {
@@ -130,7 +202,12 @@ public struct UsageLimitDetailPanelView: View {
                         self.row(segment)
                     }
                 }
-                if self.kind != .week, segments.contains(where: { $0.kind == .others }) {
+                if let local = self.sources.local {
+                    if let split = self.window.split {
+                        UsageNote(text: local.note(
+                            for: split, usd: self.spentInWindow, used: self.used, rated: self.hasRate))
+                    }
+                } else if self.kind != .week, segments.contains(where: { $0.kind == .others }) {
                     UsageNote(text: "The server does not split this limit by source, so everything "
                         + "outside this Mac is shown as one part.")
                 }
@@ -176,10 +253,10 @@ public struct UsageLimitDetailPanelView: View {
                     .font(.system(size: 11))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if self.sources == .single, self.kind == .week, !(self.account.weeks ?? []).isEmpty {
+            if self.sources != .split, self.kind == .week, !(self.account.weeks ?? []).isEmpty {
                 // Claude shows the weeks in Spend's account panel; a provider page has no such panel.
                 Divider()
-                UsageWeekWindows(account: self.account, now: self.now)
+                UsageWeekWindows(account: self.account, now: self.now, sources: self.sources)
             }
             Divider()
             VStack(alignment: .leading, spacing: 3) {
@@ -193,10 +270,22 @@ public struct UsageLimitDetailPanelView: View {
         .frame(width: self.width, alignment: .leading)
     }
 
+    /// This Mac's dollars in this window, as "Where it went" shows them next to "You"; nil after a reset,
+    /// when the last dollars belong to the window before.
+    private var spentInWindow: Double? {
+        self.window.rolled == true ? nil : self.window.usd?.total
+    }
+
+    /// Whether the account has a dollars-per-percent rate for this limit; nil when the summary has no rates.
+    private var hasRate: Bool? {
+        guard let rates = self.account.rates else { return nil }
+        return (rates[self.kind.rawValue]?.usdPer100 ?? 0) > 0
+    }
+
     /// With a single source, fewer than two readings in the window say more as a sentence than as a chart
     /// of one dot. Claude keeps its chart.
     private var sparseReadings: String? {
-        guard self.sources == .single else { return nil }
+        guard self.sources != .split else { return nil }
         guard let range = self.range else {
             return self.window.rolled == true
                 ? "No reading since this window reset."
@@ -369,7 +458,7 @@ public struct UsageLimitDetailPanelView: View {
     }
 
     private var facts: [String] {
-        if self.sources == .single {
+        if self.sources != .split {
             return self.singleSourceFacts
         }
         var facts: [String] = []
@@ -436,9 +525,13 @@ public struct UsageLimitDetailPanelView: View {
 
     private func row(_ segment: UsageSegment) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(segment.color)
-                .frame(width: 8, height: 8)
+            if segment.isHatched {
+                UsageHatchSwatch(size: CGSize(width: 8, height: 8))
+            } else {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(segment.color)
+                    .frame(width: 8, height: 8)
+            }
             Text(segment.longLabel)
                 .font(.system(size: 11))
                 .lineLimit(1)
@@ -449,15 +542,15 @@ public struct UsageLimitDetailPanelView: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            Text(segment.kind == .unknown ? "—" : UsageFormat.percent(segment.value))
+            Text(segment.kind == .unknown && segment.local == nil ? "—" : segment.longValueText)
                 .font(.system(size: 11, weight: .semibold))
                 .monospacedDigit()
+                .fixedSize()
                 .frame(minWidth: 34, alignment: .trailing)
         }
     }
 
-    private func chart(range: ClosedRange<Date>) -> some View {
-        let samples = self.samples(in: range)
+    private func chart(range: ClosedRange<Date>, samples: ChartSamples) -> some View {
         let pace = [
             Sample(date: range.lowerBound, value: 0, series: "pace"),
             Sample(date: range.upperBound, value: 100, series: "pace"),
@@ -474,8 +567,20 @@ public struct UsageLimitDetailPanelView: View {
                     .foregroundStyle(Color.secondary.opacity(0.7))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
+            ForEach(samples.others) { band in
+                AreaMark(
+                    x: .value("Time", band.date),
+                    yStart: .value("Low", band.low),
+                    yEnd: .value("High", band.high),
+                    series: .value("Series", band.series))
+                    .foregroundStyle(UsagePalette.others.opacity(0.42))
+            }
             ForEach(samples.mine) { sample in
-                AreaMark(x: .value("Time", sample.date), y: .value("Percent", sample.value))
+                AreaMark(
+                    x: .value("Time", sample.date),
+                    yStart: .value("Bottom", 0.0),
+                    yEnd: .value("Percent", sample.value),
+                    series: .value("Series", "area-" + sample.series))
                     .foregroundStyle(UsagePalette.you.opacity(0.30))
             }
             ForEach(samples.mine) { sample in

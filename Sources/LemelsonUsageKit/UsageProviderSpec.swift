@@ -52,6 +52,19 @@ public struct UsageProviderSpec: Sendable {
         }
     }
 
+    /// Whose use "You" is on this provider's limits, for a window the collector split (`Window.Split`).
+    public func localSource(block: UsageProviderBlock?) -> UsageLocalSource {
+        UsageLocalSource(
+            app: self.name,
+            providerNote: self.elsewhere,
+            stretchUsd: block?.calibration?.weekStretchUsd)
+    }
+
+    /// How a window's use is told apart: by the collector's split when it wrote one, else not at all.
+    public func sources(for window: UsagePanelState.Window, block: UsageProviderBlock?) -> UsageLimitSources {
+        window.split == nil ? .single : .local(self.localSource(block: block))
+    }
+
     /// "Google AI Ultra 5x" → "Ultra 5x"; nil stays nil, an empty result keeps the whole name.
     public func shortPlan(_ plan: String?) -> String? {
         guard var plan = plan?.trimmingCharacters(in: .whitespaces), !plan.isEmpty else { return nil }

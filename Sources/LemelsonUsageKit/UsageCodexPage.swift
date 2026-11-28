@@ -224,7 +224,7 @@ public struct UsageCodexPage {
                                 style: style,
                                 now: now,
                                 width: width,
-                                sources: .single,
+                                sources: spec.sources(for: window, block: entry),
                                 sessionsLeft: entry.sessionsLeft(for: kind, now: now),
                                 sessionsNote: entry.sessionsMeasuringCaption(for: kind, now: now),
                                 last: last,
@@ -232,10 +232,12 @@ public struct UsageCodexPage {
                             scope: cardScope + "limit-\(kind.rawValue)",
                             separatorAfter: last,
                             inCard: true,
-                            fingerprint: ":\(entry.account.isActive):\(Int(window.measuredAt ?? 0))",
+                            fingerprint: ":\(entry.account.isActive):\(Int(window.measuredAt ?? 0))"
+                                + UsageProviderPage.splitFingerprint(window),
                             detail: {
                                 AnyView(UsageProviderPage.detail(
-                                    kind: kind, window: window, block: entry, now: clock(), width: detailWidth))
+                                    kind: kind, window: window, block: entry, now: clock(), width: detailWidth,
+                                    spec: spec))
                             })
                     }
                 }
@@ -371,7 +373,7 @@ public struct UsageCodexPage {
 
     /// The accounts of the block in card order: the active one first, the rest in the summary's order (the
     /// order of `account-names.json`). An older summary without `accounts` gives the block itself.
-    public static func entries(
+    public nonisolated static func entries(
         of block: UsageProviderBlock,
         live: [String: UsageCodexLive] = [:]) -> [UsageProviderBlock]
     {
@@ -427,7 +429,7 @@ public struct UsageCodexPage {
 
     /// The name shown for every account of the block while personal info is hidden: CodexBar's label when
     /// it gave one, else "Account <n>" by the account's place in the summary (after CodexBar's numbers).
-    static func privateNames(of block: UsageProviderBlock, given: [String: String]) -> [String: String] {
+    nonisolated static func privateNames(of block: UsageProviderBlock, given: [String: String]) -> [String: String] {
         // An older summary without the list has the block itself ("Codex"): nothing personal to hide.
         let accounts = block.accounts
         var names: [String: String] = [:]
@@ -457,7 +459,7 @@ public struct UsageCodexPage {
 
     /// The block (and its accounts) with the names hidden: the summary's name, short name and e-mail of every
     /// account become its private name.
-    static func renamed(_ block: UsageProviderBlock, names: [String: String]) -> UsageProviderBlock {
+    nonisolated static func renamed(_ block: UsageProviderBlock, names: [String: String]) -> UsageProviderBlock {
         var block = block
         if let name = names[block.account.uuid.lowercased()] {
             block.account.name = name
@@ -469,7 +471,7 @@ public struct UsageCodexPage {
 
     /// CodexBar's newer reading of the account in place of the summary's: the percent, reset time and time of
     /// each window it read, the plan name when the summary has none, and the credits when they are newer.
-    static func merged(_ entry: UsageProviderBlock, with live: UsageCodexLive) -> UsageProviderBlock {
+    nonisolated static func merged(_ entry: UsageProviderBlock, with live: UsageCodexLive) -> UsageProviderBlock {
         guard entry.error == nil else { return entry }
         var entry = entry
         let newest = entry.account.lastMeasuredAt
@@ -482,6 +484,15 @@ public struct UsageCodexPage {
                 // A reset passed since the summary's reading: its forecast and series belong to the old window.
                 if let old = window.resetsAt, let new = reading.resetsAt, abs(old - Double(new)) > 3600 {
                     window = UsagePanelState.Window(source: "live")
+                }
+                // What the limit moved since the summary's reading is nobody's yet.
+                if var split = window.split, let old = window.pct, reading.pct - old >= 0.5 {
+                    split.unknownPct += reading.pct - old
+                    if split.method == .calibrated || split.method == .idle {
+                        split.method = .mixed
+                    }
+                    split.reason = "live_reading"
+                    window.split = split
                 }
                 window.pct = reading.pct
                 window.measuredAt = live.measuredAt
@@ -764,7 +775,11 @@ struct UsageCodexAccountPanelView: View {
                 if (entry.account.weeks ?? []).isEmpty {
                     UsageNote(text: "Weekly windows appear after the first limit reading of this account.")
                 } else {
-                    UsageWeekWindows(account: entry.account, now: self.now)
+                    UsageWeekWindows(
+                        account: entry.account,
+                        now: self.now,
+                        sources: entry.account.window(.week).map { self.spec.sources(for: $0, block: entry) }
+                            ?? .single)
                 }
                 Divider()
                 if let spend = self.spends[entry.account.uuid], spend.hasSpend {

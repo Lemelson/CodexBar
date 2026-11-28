@@ -43,10 +43,20 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
     /// Decoded leniently: a malformed block never costs the summary.
     private var spend24hField: Lenient<Spend24h>?
 
+    /// You / others / not split yet across every account on fixed rolling grids (`usage/timeline.py`).
+    /// Nil in older summaries, when malformed, or when the collector's step failed (`{"error": …}`).
+    public var overviewTimeline: OverviewTimeline? {
+        self.overviewTimelineField?.value
+    }
+
+    /// Decoded leniently: a malformed block never costs the summary.
+    private var overviewTimelineField: Lenient<OverviewTimeline>?
+
     enum CodingKeys: String, CodingKey {
         case schema, generatedAt, accounts, dashboardPath, collector, vpnUp, vpnState, antigravity, codex, cache
         case cacheErrorField = "cacheError"
         case spend24hField = "spend24h"
+        case overviewTimelineField = "overviewTimeline"
         case kFable = "k_fable"
         case kSource = "k_source"
         case kPairs = "k_pairs"
@@ -179,10 +189,26 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var sinceMeasure: Double?
         /// The server's own breakdown (week only): claude_code, chat, cowork, other.
         public var server: [String: Double]?
-        /// Window progress: [time, limit percentage, of which mine].
+        /// Window progress: [time, limit percentage, of which mine, others, not split yet]. The last two are
+        /// written only by the providers that split by readings (Codex, Antigravity).
         public var series: [[Double?]]?
         /// Where the window will end up at the reset: computed by the collector from the window progress and past windows.
         public var forecast: Forecast?
+        /// Codex and Antigravity: the reading split into this Mac, others and what cannot be told yet.
+        /// Nil in older summaries and for Claude, whose split is `mine` / `outside` / `server`.
+        public var split: Split? {
+            get { self.splitField?.value }
+            set { self.splitField = newValue.map { Lenient(value: $0) } }
+        }
+
+        /// A value of an unexpected shape reads as nil instead of costing the window.
+        var splitField: Lenient<Split>? = nil
+
+        enum CodingKeys: String, CodingKey {
+            case pct, measuredAt, resetsAt, source, rolled, start, usd, mine, outside, sinceMeasure, server, series
+            case forecast
+            case splitField = "split"
+        }
 
         /// The forecast is valid while both the reading it starts from and the forecast itself are fresh, and the
         /// window has not been reset. The one check for every consumer: the row's verdict, the panel's chart and
@@ -202,6 +228,10 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
             public var time: Double
             public var used: Double
             public var mine: Double?
+            /// Proven to be someone else's use at this reading (provider pages).
+            public var others: Double? = nil
+            /// Not told apart yet at this reading: this Mac or others (provider pages).
+            public var unknown: Double? = nil
 
             public var id: Double {
                 self.time
@@ -211,7 +241,78 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var points: [Point] {
             (self.series ?? []).compactMap { row in
                 guard row.count >= 2, let time = row[0], let used = row[1] else { return nil }
-                return Point(time: time, used: used, mine: row.count > 2 ? row[2] : nil)
+                return Point(
+                    time: time,
+                    used: used,
+                    mine: row.count > 2 ? row[2] : nil,
+                    others: row.count > 3 ? row[3] : nil,
+                    unknown: row.count > 4 ? row[4] : nil)
+            }
+        }
+
+        /// One reading of a provider's limit told apart: `youPct + othersPct + unknownPct` is the reading.
+        public struct Split: Decodable, Sendable, Equatable {
+            /// How the parts were obtained.
+            public enum Method: String, Sendable, Equatable {
+                /// Nothing ran on this Mac while the limit moved: all of it is others.
+                case idle
+                /// This Mac's part comes from the measured dollars-per-percent rate.
+                case calibrated
+                /// No rate yet, but some of the movement happened while this Mac was idle: others is a floor.
+                case floor
+                /// A rate exists, and part of the reading still cannot be told apart.
+                case mixed
+                /// No rate and no idle movement: nothing can be told apart yet.
+                case unknown
+            }
+
+            public var youPct: Double
+            public var othersPct: Double
+            public var unknownPct: Double
+            public var method: Method
+            /// The rate rests on a single stretch, so this Mac's part is approximate.
+            public var preliminary: Bool
+            /// Why a part is not split, in the collector's words ("uncovered", "rounding", …).
+            public var reason: String?
+
+            public init(
+                youPct: Double,
+                othersPct: Double,
+                unknownPct: Double = 0,
+                method: Method,
+                preliminary: Bool = false,
+                reason: String? = nil)
+            {
+                self.youPct = youPct
+                self.othersPct = othersPct
+                self.unknownPct = unknownPct
+                self.method = method
+                self.preliminary = preliminary
+                self.reason = reason
+            }
+
+            enum CodingKeys: String, CodingKey {
+                case youPct, othersPct, unknownPct, method, preliminary, reason
+            }
+
+            /// Field by field: a missing or malformed part reads as zero, an unfamiliar method as "unknown".
+            public init(from decoder: Decoder) throws {
+                let keys = try decoder.container(keyedBy: CodingKeys.self)
+                self.youPct = Self.points(keys.lenient(Double.self, .youPct))
+                self.othersPct = Self.points(keys.lenient(Double.self, .othersPct))
+                self.unknownPct = Self.points(keys.lenient(Double.self, .unknownPct))
+                self.method = keys.lenient(String.self, .method).flatMap(Method.init(rawValue:)) ?? .unknown
+                self.preliminary = keys.lenient(Bool.self, .preliminary) ?? false
+                self.reason = keys.lenient(String.self, .reason)
+            }
+
+            private static func points(_ value: Double?) -> Double {
+                guard let value, value.isFinite else { return 0 }
+                return max(0, value)
+            }
+
+            public var total: Double {
+                self.youPct + self.othersPct + self.unknownPct
             }
         }
     }
@@ -266,6 +367,10 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         public var approx: Bool?
         /// Provider pages: the window was reset early; `end` is when the next one began, this is when it was due.
         public var scheduledEnd: Double?
+        /// Provider pages: points of that week's peak that cannot be told apart (this Mac or others).
+        public var unknownPct: Double?
+        /// Provider pages: how the week was split (`Window.Split.Method` raw values).
+        public var splitMethod: String?
 
         public var id: Double {
             self.end
@@ -274,6 +379,7 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
         enum CodingKeys: String, CodingKey {
             case start, end, current, usd, tokens, peakPct, m
             case peakAt, peakFinal, minePct, minePctByModel, othersPct, resetAt, approx, scheduledEnd
+            case unknownPct, splitMethod
         }
 
         public init(from decoder: Decoder) throws {
@@ -298,6 +404,9 @@ public struct UsagePanelState: Decodable, Sendable, Equatable {
             self.approx = try? container.decodeIfPresent(Bool.self, forKey: .approx)
             self.scheduledEnd = (try? container.decodeIfPresent(Double.self, forKey: .scheduledEnd))
                 .flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+            self.unknownPct = container.lenient(Double.self, .unknownPct)
+                .flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+            self.splitMethod = container.lenient(String.self, .splitMethod)
         }
     }
 

@@ -7,7 +7,7 @@ import SwiftUI
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
 //       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache
 //               |codex|codex-limits|codex-spend|codex-value|codex-details|codex-cache|pages|overview
-//               |overview-details|overview-cache|day-detail]
+//               |overview-details|overview-limits-details|overview-cache|day-detail]
 //       (limits, spend, value and details also as a comma list: --only limits,spend,value)
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--codex block.json] [--claude-cache real|full|plain|none]
@@ -15,7 +15,9 @@ import SwiftUI
 //       [--drift month|week] [--hover-month 0] [--drift-fixture months] [--unit opus|mix|fable]
 //       [--value-period month|week] [--broken-account 1] [--cache-error]
 //       [--custom-range 2026-11-03..2026-11-14] [--drag-range 2026-11-05..2026-11-12]
-//       [--overview-breakdown providers|models]
+//       [--overview-breakdown providers|models] [--overview-mode limits|spend|off]
+//       [--recent-span 24h|72h|7d] [--recent-unit usd|quotas] [--hover-recent 40]
+//       [--overview-fixture made|partial|none|error]
 //
 // --highlighted draws the limit rows as they look under the cursor (light ink on the selection color).
 // --hover-week draws the Value page's limit chart as if a week were pointed at: 0 is the latest week.
@@ -46,6 +48,9 @@ import SwiftUI
 // when it has one, else the built-in fixture "full". --fixture picks a fixture (full, run-out, no-quota,
 // no-spend, one-day, error, ...: see AntigravityFixture); --antigravity reads the block from a file (a whole summary or the block alone).
 //
+// Limits told apart (Codex and Antigravity): --fixture calibrated|preliminary|idle|floor|unknown|mixed draws
+// the limit rows and their panels in that state of the collector's split (You, Others, Not split yet).
+//
 // Codex (--only codex, codex-details, codex-cache): the summary's own `codex` block when it has one, else the
 // Antigravity fixture of the same name renamed to Codex (CodexFixture). --codex reads the block from a file
 // (a whole summary: its `codex`, else its `antigravity` renamed; or the block alone). With --fixture the Codex
@@ -58,10 +63,18 @@ import SwiftUI
 // --only pages draws Claude Limits, the Antigravity page and Codex Limits side by side.
 //
 // Overview (from the summary as is: all Claude accounts, its `codex` and `antigravity` blocks):
-// --only overview draws the page with its footer, the prompt cache row of all subscriptions and stand-ins for
-// the menu's own rows; overview-details the three provider panels and the page's day panel side by side;
-// overview-cache the cache row and its panel. --overview-breakdown picks the Providers / Models split
-// (default providers).
+// --only overview draws the page in a mode with its footer, the prompt cache row of all subscriptions and
+// stand-ins for the menu's own rows. --overview-mode picks the mode: limits (default: the cumulative chart
+// of the last hours and every account's weekly limit), spend, or off (the Spend-only page without the mode
+// row, as after `defaults write com.steipete.codexbar lemelsonOverviewLimits off`).
+// Limits: --recent-span 24h|72h|7d and --recent-unit usd|quotas pick the chart's switches (default 24h and
+// usd, so renders do not depend on an earlier run); --hover-recent draws the chart as if that grid point were
+// pointed at (0 is the start of the range). --only overview-limits-details draws the chart's hover panel (for
+// --hover-recent, else the end of the range) and the weekly detail panel of every account.
+// --overview-fixture replaces the summary's `overviewTimeline` (OverviewFixture: made, partial, none, error).
+// Spend: overview-details draws the three provider panels and the page's day panel side by side;
+// --overview-breakdown picks the Providers / Models split (default providers).
+// overview-cache draws the cache row and its panel.
 // --only day-detail draws the day panels of Overview, Claude Spend, Codex Spend (the Codex tab's own catalog,
 // split by account, `UsageCodexPage.spendDayCatalog`) and Antigravity (the summary's blocks, else the fixture
 // "full") for --hover-day (default today), plus Overview's panel for a day without calls and for a dragged
@@ -72,10 +85,12 @@ import SwiftUI
 
 struct ModeChips: View {
     let selected: String
+    /// Overview has two modes.
+    var titles = ["Limits", "Spend", "Value"]
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(["Limits", "Spend", "Value"], id: \.self) { title in
+            ForEach(self.titles, id: \.self) { title in
                 Text(title)
                     .font(.system(size: 11))
                     .foregroundStyle(title == self.selected ? .white : .secondary)
@@ -164,6 +179,9 @@ struct PreviewRoot: View {
     var codex: UsagePanelState?
     var codexExtras: [UsageProviderPage.Extra] = []
     var dragRange: UsageSpendRange?
+    /// Nil: the Spend-only Overview without the mode row.
+    var overviewMode: UsageOverviewMode? = .limits
+    var hoverRecent: Int?
 
     private let menuWidth: CGFloat = 310
     private let panelWidth: CGFloat = 340
@@ -222,6 +240,9 @@ struct PreviewRoot: View {
                 if self.only == "overview-details" {
                     self.overviewDetails(state)
                 }
+                if self.only == "overview-limits-details" {
+                    self.overviewLimitsDetails(state)
+                }
                 if self.only == "overview-cache" {
                     if let summary = UsageCacheSummary.all(state) {
                         self.cachePair(summary)
@@ -238,6 +259,7 @@ struct PreviewRoot: View {
         }
         .environment(\.usagePreviewHoveredDay, self.hoverDay)
         .environment(\.usagePreviewDragRange, self.dragRange)
+        .environment(\.usagePreviewHoveredRecent, self.hoverRecent)
         .padding(20)
         .background(Color(nsColor: .underPageBackgroundColor))
         .overlay {
@@ -390,7 +412,13 @@ struct PreviewRoot: View {
     /// Overview as the menu stacks it: the page's rows (separators where a row asks for one), then the prompt
     /// cache row right under the footer's status line, one group closed by a separator, and the menu's own rows.
     @ViewBuilder private func overviewPage(_ state: UsagePanelState) -> some View {
-        let page = UsageOverviewPage(state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth)
+        let page = UsageOverviewPage(
+            state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth,
+            mode: self.overviewMode, clock: { [now = self.now] in now })
+        if let mode = self.overviewMode {
+            ModeChips(selected: mode.title, titles: UsageOverviewMode.allCases.map(\.title))
+            Divider()
+        }
         Color.clear.frame(height: 4)
         ForEach(Array(page.rows.enumerated()), id: \.element.id) { index, row in
             let lit = self.highlighted && row.detail != nil
@@ -417,20 +445,51 @@ struct PreviewRoot: View {
     /// The three provider panels and the page's day panel (for --hover-day, else today; --drag-range shows the
     /// dragged span instead).
     @ViewBuilder private func overviewDetails(_ state: UsagePanelState) -> some View {
-        let page = UsageOverviewPage(state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth)
+        let page = UsageOverviewPage(
+            state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth, mode: .spend)
         ForEach(page.rows.filter { $0.detail != nil }) { row in
             if let detail = row.detail {
                 self.card(width: self.panelWidth) { detail() }
             }
         }
-        if page.spend.hasSpend {
+        if let spend = page.spend, spend.hasSpend {
             self.card(width: self.panelWidth) {
                 UsageDayDetailPanelView(
-                    catalog: page.spend.dayDetailCatalog(now: self.now),
+                    catalog: spend.dayDetailCatalog(now: self.now),
                     width: self.panelWidth,
                     previewDayKey: self.hoverDay,
                     previewRange: self.dragRange)
             }
+        }
+    }
+
+    /// Overview → Limits: the cumulative chart's hover panel, then the weekly detail panel of every account
+    /// (what hovering its row opens), captioned with the account.
+    @ViewBuilder private func overviewLimitsDetails(_ state: UsagePanelState) -> some View {
+        let page = UsageOverviewPage(
+            state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth, mode: .limits,
+            clock: { [now = self.now] in now })
+        let recent = UsageOverviewRecent(state: state, accounts: page.limitAccounts)
+        if recent.isAvailable {
+            self.captioned("Chart · \(UsageOverviewSelection.shared.recentSpan.title)") {
+                UsageOverviewRecentPanelView(recent: recent, width: self.panelWidth, previewIndex: self.hoverRecent)
+            }
+        }
+        ForEach(page.limitAccounts) { account in
+            if let row = page.rows.first(where: { $0.id.hasSuffix("limits-acct-\(account.id)") }),
+               let detail = row.detail
+            {
+                self.captioned("\(account.name) · \(account.subtitle)") { detail() }
+            }
+        }
+    }
+
+    private func captioned(_ caption: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(caption)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+            self.card(width: self.panelWidth, content: content)
         }
     }
 
@@ -607,7 +666,9 @@ guard arguments.count >= 2 else {
         + "[--breakdown accounts|models] [--fill-missing] [--manual-age hours] [--drift month|week] "
         + "[--hover-month n] [--drift-fixture months] [--unit opus|mix|fable] [--value-period month|week] "
         + "[--broken-account n] [--cache-error] [--custom-range a..b] [--drag-range a..b] "
-        + "[--overview-breakdown providers|models]\n"
+        + "[--overview-breakdown providers|models] [--overview-mode limits|spend|off] "
+        + "[--recent-span 24h|72h|7d] [--recent-unit usd|quotas] [--hover-recent n] "
+        + "[--overview-fixture made|partial|none|error]\n"
     FileHandle.standardError.write(Data(usage.utf8))
     exit(2)
 }
@@ -626,6 +687,20 @@ if !brokenAccounts.isEmpty || arguments.contains("--cache-error") {
     }
     stateURL = copy
     FileHandle.standardError.write(Data("failures: accounts \(brokenAccounts), cache error \(arguments.contains("--cache-error"))\n".utf8))
+}
+let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
+if let name = argument(after: "--overview-fixture") {
+    guard OverviewFixture.names.contains(name) else {
+        let list = OverviewFixture.names.joined(separator: ", ")
+        FileHandle.standardError.write(Data("unknown overview fixture \(name): \(list)\n".utf8))
+        exit(2)
+    }
+    guard let copy = OverviewFixture.writing(from: stateURL, fixture: name, now: now) else {
+        FileHandle.standardError.write(Data("cannot write the overview fixture from \(stateURL.path)\n".utf8))
+        exit(1)
+    }
+    stateURL = copy
+    FileHandle.standardError.write(Data("overview timeline: fixture \(name)\n".utf8))
 }
 var state = UsagePanelStore.load(from: stateURL)
 if only == "cache" || argument(after: "--claude-cache") != nil {
@@ -650,7 +725,6 @@ if let name = argument(after: "--drift-fixture") {
     }
     state = state.map(ClaudeFixture.driftMonths)
 }
-let now = argument(after: "--now").flatMap(Double.init).map { Date(timeIntervalSince1970: $0) } ?? Date()
 let wantsAntigravity = only?.hasPrefix("antigravity") == true || only == "pages"
 let wantsCodex = only?.hasPrefix("codex") == true || only == "pages"
 
@@ -722,6 +796,16 @@ UsagePanelSelection.shared.valuePeriod = argument(after: "--value-period")
     .flatMap(UsageDriftPeriod.init(rawValue:)) ?? .month
 UsageOverviewSelection.shared.breakdown = argument(after: "--overview-breakdown")
     .flatMap(UsageOverviewBreakdown.init(rawValue:)) ?? .providers
+UsageOverviewSelection.shared.recentSpan = argument(after: "--recent-span")
+    .flatMap(UsageOverviewRecentSpan.init(rawValue:)) ?? .h24
+UsageOverviewSelection.shared.recentUnit = argument(after: "--recent-unit")
+    .flatMap(UsageOverviewRecentUnit.init(rawValue:)) ?? .usd
+/// "off" is the page from before the modes; anything else but "spend" is Limits.
+let overviewMode: UsageOverviewMode? = switch argument(after: "--overview-mode") {
+case "off": nil
+case "spend": .spend
+default: .limits
+}
 // After the period: choosing a period ends a zoom.
 UsagePanelSelection.shared.customRange = rangeArgument(after: "--custom-range")
 let dragRange = rangeArgument(after: "--drag-range")
@@ -742,7 +826,9 @@ let hosting = NSHostingView(rootView: PreviewRoot(
     antigravity: antigravity,
     codex: codex,
     codexExtras: argument(after: "--fixture") == nil || arguments.contains("--no-extras") ? [] : CodexFixture.extras(now: now),
-    dragRange: dragRange))
+    dragRange: dragRange,
+    overviewMode: overviewMode,
+    hoverRecent: argument(after: "--hover-recent").flatMap(Int.init)))
 hosting.appearance = appearance
 let size = hosting.fittingSize
 hosting.frame = NSRect(origin: .zero, size: size)

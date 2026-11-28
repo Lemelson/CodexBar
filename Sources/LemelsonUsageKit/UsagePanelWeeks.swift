@@ -36,9 +36,13 @@ struct UsageWeekLimit: Equatable {
     let mine: Double?
     let mineByModel: [Part]
     let others: Double?
+    /// Provider pages with a split: points nobody can be given yet (this Mac or others). Nil elsewhere.
+    let unknown: Double?
     /// The limit was reset inside the window at this time: `used`, `mine` and `others` count from it.
     let resetAt: Double?
-    /// `.single` (provider pages): one quota with no split by source, so no "you" and "others".
+    /// `.single` (provider pages without a split): one quota, so no "you" and "others". `.local` (provider
+    /// pages with the collector's split): you, others and what is not split yet, exactly as the collector
+    /// wrote them: nothing is derived from the total here.
     let sources: UsageLimitSources
 
     init(
@@ -75,25 +79,56 @@ struct UsageWeekLimit: Equatable {
         } else {
             reading = .none
         }
+        var unknown: Double?
         if sources == .single {
             mine = nil
             others = nil
-        }
-        // This Mac's part is an estimate through the dollar rate; it can come out above the reading.
-        // An early peak is then the weaker number, a live or late one the stronger.
-        if let total = used, let part = mine, part > total {
-            if reading == .atLeast {
-                used = part
+        } else if sources.local != nil {
+            // The collector's own three parts. Without a rate this Mac's part is not known, and "others" is
+            // only what was proven: never the total minus a guess.
+            if reading == .live {
+                let parts = window?.split
+                let knowsMine = parts.map { $0.method == .calibrated || $0.method == .idle
+                    || ($0.method == .mixed && $0.youPct > 0)
+                } ?? false
+                mine = knowsMine ? parts?.youPct : nil
+                others = parts?.othersPct
+                unknown = parts.map { $0.unknownPct + (knowsMine ? 0 : $0.youPct) }
             } else {
-                mine = total
+                // A week split without a rate has no "you" to estimate. The collector writes null then; an
+                // explicit 0 is its own statement that this Mac's part is known to be nothing, and stays.
+                // Any other number under such a method is not a measurement and is dropped.
+                let method = week.splitMethod.flatMap(UsagePanelState.Window.Split.Method.init(rawValue:))
+                mine = method == .floor || method == .unknown ? (week.minePct == 0 ? 0 : nil) : week.minePct
+                others = week.othersPct
+                unknown = week.unknownPct
             }
-        }
-        if let total = used, let part = mine {
-            others = max(0, total - part)
+            if let total = used {
+                let known = (mine ?? 0) + (others ?? 0)
+                // Whatever the parts leave of the reading is not split either.
+                unknown = max(unknown ?? 0, total - known)
+                if known > total, known > 0 {
+                    mine = mine.map { $0 * total / known }
+                    others = others.map { $0 * total / known }
+                }
+            }
+        } else {
+            // This Mac's part is an estimate through the dollar rate; it can come out above the reading.
+            // An early peak is then the weaker number, a live or late one the stronger.
+            if let total = used, let part = mine, part > total {
+                if reading == .atLeast {
+                    used = part
+                } else {
+                    mine = total
+                }
+            }
+            if let total = used, let part = mine {
+                others = max(0, total - part)
+            }
         }
 
         var parts: [Part] = []
-        if let mine, mine > 0 {
+        if sources == .split, let mine, mine > 0 {
             let given = week.minePctByModel ?? [:]
             let givenTotal = given.values.reduce(0, +)
             for family in UsageModelFamily.allCases {
@@ -110,6 +145,7 @@ struct UsageWeekLimit: Equatable {
         self.mine = mine
         self.mineByModel = parts
         self.others = others
+        self.unknown = unknown
         self.resetAt = week.resetAt
     }
 
@@ -124,12 +160,25 @@ struct UsageWeekLimit: Equatable {
         if self.sources == .single {
             return [(self.used ?? 0, UsagePalette.single)]
         }
+        if self.sources.local != nil {
+            return [
+                (self.mine ?? 0, UsagePalette.you),
+                (self.others ?? 0, UsagePalette.others),
+                (self.unknown ?? 0, UsagePalette.unsplitStripe),
+            ]
+        }
         guard self.mine != nil else { return [(self.used ?? 0, UsagePalette.others)] }
         return self.mineByModel.map { ($0.pct, $0.family.color) } + [(self.others ?? 0, UsagePalette.others)]
     }
 
+    /// Which of `barParts` are hatched ("Not split yet") rather than filled.
+    var hatchedBarParts: Set<Int> {
+        self.sources.local == nil ? [] : [2]
+    }
+
     /// "Used 51%", "At least 51% used", "Limit hit", "Now 71% used", "No limit reading"; after a reset inside
-    /// the week "After the Nov 14 reset: used 81%".
+    /// the week "After the Nov 14 reset · used 81%" (a dot, so the parts that follow in brackets do not make
+    /// a second colon).
     var headline: String {
         let text: String
         if let used {
@@ -144,12 +193,27 @@ struct UsageWeekLimit: Equatable {
             text = "No limit reading"
         }
         guard let resetAt else { return text }
-        return "After the \(UsageFormat.shortDay(resetAt)) reset: " + text.prefix(1).lowercased() + text.dropFirst()
+        return "After the \(UsageFormat.shortDay(resetAt)) reset · " + text.prefix(1).lowercased() + text.dropFirst()
+    }
+
+    /// The parts of a week in whole percent that add up to the week's own rounded reading, so "Limit hit" is
+    /// never 45% + 45% + 11%. A part under one percent keeps its own value (it reads "<1%").
+    static func labels(_ parts: [Double], of used: Double) -> [Double] {
+        let rounded = UsageSegment.rounded(parts, to: min(used.rounded(), parts.reduce(0, +).rounded()))
+        return zip(parts, rounded).map { part, label in label >= 1 ? label : min(part, 0.49) }
+    }
+
+    /// After a reset the headline already has its own separator: ": you 4%, others 8%" becomes
+    /// " (you 4%, others 8%)".
+    private func closing(_ text: String) -> String {
+        guard self.resetAt != nil, text.hasPrefix(": ") else { return text }
+        return " (" + text.dropFirst(2) + ")"
     }
 
     /// What follows the headline: whose it was and what was left.
     /// ": you ≈34%, others ≈17% · 49% left", ", all yours", " · your part needs a rate". After a reset the
-    /// headline is longer and what was left goes: the empty part of the bar shows it.
+    /// headline is longer, what was left goes (the empty part of the bar shows it) and the parts stand in
+    /// brackets: " (you <1%, others ≈60%)". "≈" never stands before "<1%" or "0%".
     var tail: String {
         if self.sources == .single {
             guard let used = self.used, self.resetAt == nil else { return "" }
@@ -159,25 +223,32 @@ struct UsageWeekLimit: Equatable {
             default: return ""
             }
         }
+        if self.sources.local != nil {
+            return self.localTail
+        }
         guard let mine else {
             return self.used == nil ? "" : " · your part needs a rate"
         }
-        let you = "you ≈\(UsageFormat.percent(mine))"
-        guard let used = self.used else { return ": \(you)" }
+        guard let used = self.used else { return self.closing(": you \(UsageFormat.approxPercent(mine))") }
         var text: String
         let others = self.others ?? 0
+        // Rounded together, so the two parts add up to the reading the headline shows.
+        let labels = Self.labels([mine, others], of: used)
+        let you = "you \(UsageFormat.approxPercent(labels[0]))"
         if others < 0.5, self.reading == .atLeast, mine >= 0.5 {
             // The limit was last read early in the week (an account that was not polled then): this Mac's part
             // already covers that reading, so how much others used afterwards was never measured.
             text = ": \(you), others unknown"
         } else if others < 0.5 {
             text = mine < 0.5 ? "" : ", all yours"
+        } else if self.reading == .atLeast {
+            // A floor is rounded down: 0.6 is never "at least 1%".
+            text = ": you \(UsageFormat.approxPercent(mine)), others \(Self.atLeast(others))"
         } else {
-            let sign = self.reading == .atLeast ? "≥" : "≈"
-            text = ": \(you), others \(sign)\(UsageFormat.percent(others))"
+            text = ": \(you), others \(UsageFormat.approxPercent(labels[1]))"
         }
         let left = max(0, 100 - used)
-        guard self.resetAt == nil else { return text }
+        guard self.resetAt == nil else { return self.closing(text) }
         switch self.reading {
         case .live:
             text += " · \(UsageFormat.percent(left)) left"
@@ -185,6 +256,53 @@ struct UsageWeekLimit: Equatable {
             text += " · \(UsageFormat.percent(left)) unused"
         default:
             break
+        }
+        return text
+    }
+}
+
+extension UsageWeekLimit {
+    /// "≥12%" for a proven floor, rounded down; under one percent ">0%" (never "≥1%" for 0.6).
+    static func atLeast(_ value: Double) -> String {
+        value >= 1 ? "≥" + UsageFormat.floorPercent(value) : ">0%"
+    }
+
+    /// A provider's week: ": you ≈8%, others ≈4%", ": others ≥4%, 9% not split", " · not split yet"; an
+    /// explicit zero stays ("you 0%"). The parts are rounded together, so they add up to the reading. What
+    /// was left follows only while the line stays short; after a reset the parts stand in brackets.
+    fileprivate var localTail: String {
+        guard let used = self.used else { return "" }
+        let unknown = self.unknown ?? 0
+        let others = self.others ?? 0
+        var names: [String] = []
+        if let mine = self.mine {
+            let labels = Self.labels([mine, others, unknown], of: used)
+            names.append("you \(UsageFormat.approxPercent(labels[0]))")
+            if others >= 0.5 {
+                names.append("others \(UsageFormat.approxPercent(labels[1]))")
+            }
+            if unknown >= 0.5 {
+                names.append("\(UsageFormat.percent(labels[2])) not split")
+                return self.closing(": " + names.joined(separator: ", "))
+            }
+        } else {
+            // No "you": others is only what was proven, rounded down; the rest of the reading is not split.
+            if others >= 0.5 {
+                names.append("others \(Self.atLeast(others))")
+            }
+            if unknown >= 0.5 {
+                guard !names.isEmpty else { return " · not split yet" }
+                let rest = max(0, used.rounded() - others.rounded(.down))
+                names.append("\(UsageFormat.percent(rest)) not split")
+                return self.closing(": " + names.joined(separator: ", "))
+            }
+        }
+        var text = names.isEmpty ? "" : ": " + names.joined(separator: ", ")
+        guard self.resetAt == nil else { return self.closing(text) }
+        switch self.reading {
+        case .live: text += " · \(UsageFormat.percent(max(0, 100 - used))) left"
+        case .final where used < 99.5: text += " · \(UsageFormat.percent(max(0, 100 - used))) unused"
+        default: break
         }
         return text
     }
@@ -341,7 +459,8 @@ struct UsageSpendWeekList: View {
                 .frame(width: 54, alignment: .trailing)
             Spacer(minLength: 4)
             if let share {
-                Text("≈ \(UsageFormat.percentFine(share)) of limit")
+                // "≈" never stands before a zero: a model that took nothing reads "0% of limit".
+                Text(share < 0.05 ? "0% of limit" : "≈ \(UsageFormat.percentFine(share)) of limit")
                     .font(.system(size: 10.5))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -380,7 +499,11 @@ struct UsageWeekRow: View {
                     .monospacedDigit()
             }
             if let limit {
-                UsageSplitBar(parts: limit.barParts, scale: 100)
+                UsageSplitBar(
+                    parts: UsageSplitBar.withoutSlivers(limit.barParts),
+                    scale: 100,
+                    hatched: limit.hatchedBarParts,
+                    minPartWidth: UsageSegmentBar.minSegmentWidth)
                 (Text(self.week.approx == true ? "No readings that week" : limit.headline).foregroundStyle(.primary)
                     + Text(limit.tail + self.earlyReset))
                     .font(.system(size: 10.5))
@@ -414,6 +537,8 @@ struct UsageWeekWindows: View {
     let now: Date
     /// Rows at most: the panel sits beside the menu and must not outgrow the screen.
     var limit = 4
+    /// `.local` when the collector splits this provider's readings; `.single` otherwise.
+    var sources: UsageLimitSources = .single
 
     var body: some View {
         let weeks = Array((self.account.weeks ?? []).sorted { $0.end > $1.end }.prefix(self.limit))
@@ -427,10 +552,13 @@ struct UsageWeekWindows: View {
                             week: week,
                             limit: UsageWeekLimit(
                                 week: week, window: window, capacity: nil, fableWeight: 1, now: self.now,
-                                sources: .single))
+                                sources: self.sources))
                     }
                 }
-                UsageNote(text: "Dollars are this Mac's use at API prices; the bar is the week's highest reading.")
+                UsageNote(text: self.sources.local == nil
+                    ? "Dollars are this Mac's use at API prices; the bar is the week's highest reading."
+                    : "Dollars are this Mac's use at API prices. Each bar is the week's highest reading: "
+                    + "orange is you, grey is others, hatched is not split yet.")
             }
         }
     }

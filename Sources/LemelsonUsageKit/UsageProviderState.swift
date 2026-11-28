@@ -254,6 +254,9 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
         public var sessionPairsNeeded: Double?
         /// How many measured stretches the value needs before the collector calls it confident.
         public var valuePairsNeeded: Double?
+        /// This Mac's dollars between two weekly readings that make one stretch of the rate
+        /// (`thresholds.stretchUsd["7d"]`): what it takes before a reading can be split.
+        public var weekStretchUsd: Double?
 
         public init(from decoder: Decoder) throws {
             let keys = try? decoder.container(keyedBy: Key.self)
@@ -261,20 +264,23 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
             let thresholds = keys?.lenient(Thresholds.self, .thresholds)
             self.sessionPairsNeeded = thresholds?.sessionPairs
             self.valuePairsNeeded = thresholds?.confidentStretches
+            self.weekStretchUsd = thresholds?.stretchUsd?["7d"]?.value
         }
 
         private struct Thresholds: Decodable {
             var sessionPairs: Double?
             var confidentStretches: Double?
+            var stretchUsd: [String: Lenient<Double>]?
 
             init(from decoder: Decoder) throws {
                 let keys = try? decoder.container(keyedBy: Key.self)
                 self.sessionPairs = keys?.lenient(Double.self, .sessionPairs)
                 self.confidentStretches = keys?.lenient(Double.self, .confidentStretches)
+                self.stretchUsd = keys?.lenient([String: Lenient<Double>].self, .stretchUsd)
             }
 
             enum Key: String, CodingKey {
-                case sessionPairs, confidentStretches
+                case sessionPairs, confidentStretches, stretchUsd
             }
         }
 
@@ -444,6 +450,10 @@ struct AccountProbe: Decodable {
 
 struct Lenient<T: Decodable>: Decodable {
     let value: T?
+
+    init(value: T?) {
+        self.value = value
+    }
 
     init(from decoder: Decoder) throws {
         self.value = try? T(from: decoder)

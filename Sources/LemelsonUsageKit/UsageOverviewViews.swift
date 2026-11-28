@@ -307,9 +307,21 @@ struct UsageOverviewLimitLine: View {
                     .font(.system(size: 11))
                     .lineLimit(1)
                     .frame(width: Self.nameWidth, alignment: .leading)
-                UsageSplitBar(
-                    parts: limit.usedPct.map { [(min(100, max(0, $0)), limit.tone == .bad ? UsagePalette.paceBad : self.color)] } ?? [],
-                    scale: 100)
+                if let split = limit.split {
+                    // Told apart: you, others and the unsplit part, as on the limit's own row.
+                    UsageSplitBar(
+                        parts: [
+                            (split.you, UsagePalette.you),
+                            (split.others, UsagePalette.others),
+                            (split.unknown, UsagePalette.unsplitStripe),
+                        ],
+                        scale: 100,
+                        hatched: [2])
+                } else {
+                    UsageSplitBar(
+                        parts: limit.usedPct.map { [(min(100, max(0, $0)), limit.tone == .bad ? UsagePalette.paceBad : self.color)] } ?? [],
+                        scale: 100)
+                }
                 Text(limit.usedPct.map { UsageFormat.percent(max(0, $0)) } ?? "—")
                     .font(.system(size: 11, weight: .semibold))
                     .monospacedDigit()

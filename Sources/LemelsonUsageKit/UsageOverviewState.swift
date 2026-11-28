@@ -68,6 +68,8 @@ public enum UsageOverviewBreakdown: String, CaseIterable, Identifiable, Sendable
 public final class UsageOverviewSelection: ObservableObject {
     public static let shared = UsageOverviewSelection()
     public static let breakdownKey = "lemelsonOverviewBreakdown"
+    public static let recentSpanKey = "lemelsonOverviewRecentSpan"
+    public static let recentUnitKey = "lemelsonOverviewRecentUnit"
 
     @Published public var breakdown: UsageOverviewBreakdown {
         didSet {
@@ -75,9 +77,29 @@ public final class UsageOverviewSelection: ObservableObject {
         }
     }
 
+    /// Limits mode: how far back the cumulative chart goes.
+    @Published public var recentSpan: UsageOverviewRecentSpan {
+        didSet {
+            UserDefaults.standard.set(self.recentSpan.rawValue, forKey: Self.recentSpanKey)
+        }
+    }
+
+    /// Limits mode: API dollars or weekly quotas.
+    @Published public var recentUnit: UsageOverviewRecentUnit {
+        didSet {
+            UserDefaults.standard.set(self.recentUnit.rawValue, forKey: Self.recentUnitKey)
+        }
+    }
+
     private init() {
-        self.breakdown = UserDefaults.standard.string(forKey: Self.breakdownKey)
+        let defaults = UserDefaults.standard
+        self.breakdown = defaults.string(forKey: Self.breakdownKey)
             .flatMap(UsageOverviewBreakdown.init(rawValue:)) ?? .providers
+        self.recentSpan = defaults.string(forKey: Self.recentSpanKey)
+            .flatMap(UsageOverviewRecentSpan.init(rawValue:)) ?? .h24
+        // Dollars first: the 24-hour "You" then reads the same as the menu bar.
+        self.recentUnit = defaults.string(forKey: Self.recentUnitKey)
+            .flatMap(UsageOverviewRecentUnit.init(rawValue:)) ?? .usd
     }
 }
 
@@ -196,6 +218,27 @@ public struct UsageOverviewSpend: Sendable, Equatable {
             public let tone: Tone
             /// "resets Tue 11:00", "Paused · VPN", "Collector error: …".
             public let detail: String?
+            /// The reading told apart, when it can be: the bar is then drawn in parts.
+            public var split: Split? = nil
+
+            /// This Mac, others and what is not split yet, in percent of the limit.
+            public struct Split: Sendable, Equatable {
+                public let you: Double
+                public let others: Double
+                public let unknown: Double
+
+                /// Nil when nothing is told apart: Claude without a rate, a provider without a split.
+                init?(window: UsagePanelState.Window, sources: UsageLimitSources) {
+                    let segments = UsageSegment.threeWay(for: window, sources: sources)
+                    guard segments.contains(where: { $0.kind != .unknown }) else { return nil }
+                    func part(_ kind: UsageSegment.Kind) -> Double {
+                        segments.first { $0.kind == kind }?.barValue ?? 0
+                    }
+                    self.you = part(.you)
+                    self.others = part(.others)
+                    self.unknown = part(.unknown)
+                }
+            }
         }
 
         public let kind: UsageOverviewProviderKind

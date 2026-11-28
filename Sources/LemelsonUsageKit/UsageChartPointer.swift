@@ -30,19 +30,40 @@ public final class UsageChartPointer {
         /// A drag over at least two days was released.
         public var onDragEnded: @MainActor (_ range: UsageSpendRange) -> Void
         public var onDoubleClick: @MainActor () -> Void
+        /// False for a chart that is only pointed at (Overview's cumulative chart): a press on its plot is
+        /// kept from the menu together with its release and starts nothing; `dayKey` then names a sample,
+        /// not a day.
+        public var allowsDrag: Bool
 
         public init(
             panelKey: String,
             plotBoundsInView: @escaping @MainActor () -> CGRect,
             dayKey: @escaping @MainActor (_ localX: CGFloat) -> String?,
             onDragEnded: @escaping @MainActor (_ range: UsageSpendRange) -> Void,
-            onDoubleClick: @escaping @MainActor () -> Void)
+            onDoubleClick: @escaping @MainActor () -> Void,
+            allowsDrag: Bool = true)
         {
             self.panelKey = panelKey
             self.plotBoundsInView = plotBoundsInView
             self.dayKey = dayKey
             self.onDragEnded = onDragEnded
             self.onDoubleClick = onDoubleClick
+            self.allowsDrag = allowsDrag
+        }
+
+        /// A chart that only answers hovering: no drag, no zoom, no double click.
+        public static func hoverOnly(
+            panelKey: String,
+            plotBoundsInView: @escaping @MainActor () -> CGRect,
+            key: @escaping @MainActor (_ localX: CGFloat) -> String?) -> Handlers
+        {
+            Handlers(
+                panelKey: panelKey,
+                plotBoundsInView: plotBoundsInView,
+                dayKey: key,
+                onDragEnded: { _ in },
+                onDoubleClick: {},
+                allowsDrag: false)
         }
     }
 
@@ -155,6 +176,11 @@ public final class UsageChartPointer {
             let point = UsageHoverPanelController.screenLocation(of: event)
             guard let placed = self.placed(at: point) else { return false }
             let local = placed.local(point)
+            guard placed.registration.handlers.allowsDrag else {
+                // Hover only: the click must not close the menu, and there is nothing to drag or zoom.
+                self.swallowNextMouseUp = true
+                return true
+            }
             if event.clickCount >= 2 {
                 self.swallowNextMouseUp = true
                 self.hovered = nil
@@ -241,6 +267,7 @@ public final class UsageChartPointer {
             return
         }
         self.hovered = nil
+        self.trace?("chart \(hovered.chartID) hover ended at \(Int(screenPoint.x)),\(Int(screenPoint.y))")
         if focus.activeChartID == hovered.chartID {
             focus.clear()
         }
@@ -251,6 +278,9 @@ public final class UsageChartPointer {
 
     /// Cancels a drag and forgets the hovered day: on a page change and when the menu closes.
     public func cancelActiveInteraction() {
+        if self.hovered != nil || self.drag != nil {
+            self.trace?("chart interaction cancelled")
+        }
         self.drag = nil
         self.hovered = nil
         self.swallowNextMouseUp = false

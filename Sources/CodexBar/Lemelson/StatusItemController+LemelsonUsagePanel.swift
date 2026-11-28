@@ -36,10 +36,17 @@ enum LemelsonPanelMode: String, CaseIterable {
         switch (self, tab) {
         case (.limits, .claude): "Limits of every account: your share, others, pace"
         case (.limits, .codex): "Limits and credits of every Codex account"
+        case (.limits, .overview): "Weekly limits of every account, you against others"
         case (.spend, .claude): "Your Claude Code spend on this Mac"
         case (.spend, .codex): "Your Codex spend on this Mac, by account and model"
+        case (.spend, .overview): "What every subscription costs at API prices"
         case (.value, _): "What the plan is worth at API prices"
         }
+    }
+
+    /// The same mode of Overview in the layout module; Overview has no Value.
+    var overviewMode: UsageOverviewMode {
+        self == .spend ? .spend : .limits
     }
 
     /// The same mode in the layout module.
@@ -56,12 +63,22 @@ enum LemelsonPanelMode: String, CaseIterable {
 enum LemelsonModeTab: String {
     case claude
     case codex
+    /// Overview: Limits and Spend. `defaults write com.steipete.codexbar lemelsonOverviewLimits off` brings
+    /// back the Spend-only Overview without a mode row.
+    case overview
 
-    var provider: UsageProvider {
+    /// The provider whose tab this is; nil for Overview, which is no provider's.
+    var provider: UsageProvider? {
         switch self {
         case .claude: .claude
         case .codex: .codex
+        case .overview: nil
         }
+    }
+
+    /// The tab's modes in page order.
+    var modes: [LemelsonPanelMode] {
+        self == .overview ? [.limits, .spend] : LemelsonPanelMode.allCases
     }
 }
 
@@ -99,10 +116,16 @@ final class LemelsonModeStore {
         defaults.removeObject(forKey: key)
     }
 
+    /// A stored mode, when the tab has it (Overview has no Value).
+    private func stored(_ key: String) -> LemelsonPanelMode? {
+        self.defaults.string(forKey: key).flatMap(LemelsonPanelMode.init(rawValue:))
+            .flatMap { self.tab.modes.contains($0) ? $0 : nil }
+    }
+
     /// The pinned mode: every menu opens in it. Nil: the menu opens in the mode shown last.
     var pinnedMode: LemelsonPanelMode? {
         get {
-            self.defaults.string(forKey: self.pinnedModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
+            self.stored(self.pinnedModeKey)
         }
         set {
             if let newValue {
@@ -115,9 +138,7 @@ final class LemelsonModeStore {
 
     /// The mode a menu opens in.
     var startMode: LemelsonPanelMode {
-        self.pinnedMode
-            ?? self.defaults.string(forKey: self.lastModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
-            ?? .limits
+        self.pinnedMode ?? self.stored(self.lastModeKey) ?? .limits
     }
 
     /// Pins the mode shown, or unpins it when it is the pinned one.
@@ -129,11 +150,14 @@ final class LemelsonModeStore {
         tab: .claude, lastModeKey: "lemelsonPanelLastMode", pinnedModeKey: "lemelsonPanelDefaultMode")
     static let codex = LemelsonModeStore(
         tab: .codex, lastModeKey: "lemelsonCodexLastMode", pinnedModeKey: "lemelsonCodexDefaultMode")
+    static let overview = LemelsonModeStore(
+        tab: .overview, lastModeKey: UsageOverviewMode.defaultsKey, pinnedModeKey: "lemelsonOverviewDefaultMode")
 
     static func store(for tab: LemelsonModeTab) -> LemelsonModeStore {
         switch tab {
         case .claude: self.claude
         case .codex: self.codex
+        case .overview: self.overview
         }
     }
 }
@@ -308,9 +332,9 @@ private final class LemelsonSubpanelMenu: NSMenu, NSMenuDelegate {
 }
 
 /// The row of mode buttons and the pin: pinned, the menu always opens in that mode; unpinned, in the mode
-/// shown last. The Claude and the Codex tab each have one, with their own modes and pin.
+/// shown last. The Claude, the Codex and the Overview tab each have one, with their own modes and pin.
 final class LemelsonModeSwitcherView: NSView {
-    private let modes = LemelsonPanelMode.allCases
+    private let modes: [LemelsonPanelMode]
     private var buttons: [NSButton] = []
     private let pinButton: NSButton
     private let onSelect: (LemelsonPanelMode) -> Void
@@ -329,6 +353,7 @@ final class LemelsonModeSwitcherView: NSView {
         onPin: @escaping () -> Void)
     {
         self.tab = tab
+        self.modes = tab.modes
         self.onSelect = onSelect
         self.onPin = onPin
         self.preferredSize = NSSize(width: width, height: 28)
@@ -863,9 +888,22 @@ extension StatusItemController {
         self.preservingMergedSwitcherContentCachesDuringInvalidation {
             self.invalidateMenus()
         }
-        self.lemelsonDropCachedContent(of: tab.provider)
+        if let provider = tab.provider {
+            self.lemelsonDropCachedContent(of: provider)
+        } else {
+            self.lemelsonDropCachedOverviewContent()
+        }
         if let menu {
-            self.deferSwitcherMenuRebuildIfStillVisible(menu, provider: tab.provider)
+            // Overview is no provider's page: the provider the menu resolves to stands for it.
+            self.deferSwitcherMenuRebuildIfStillVisible(
+                menu, provider: tab.provider ?? self.resolvedMenuProvider() ?? .claude)
+        }
+    }
+
+    /// Drops the merged menu's cached Overview rows (they were rendered in its other mode).
+    func lemelsonDropCachedOverviewContent() {
+        for key in Array(self.mergedSwitcherContentCaches.keys) {
+            self.mergedSwitcherContentCaches[key]?.removeValue(forKey: .overview)
         }
     }
 
@@ -904,10 +942,9 @@ extension StatusItemController {
                 session.mode = session.startMode
                 changed = true
             }
-            // The Codex tab returns to its own start mode the same way.
-            let codex = LemelsonModeStore.codex
-            if codex.mode != codex.startMode {
-                codex.mode = codex.startMode
+            // The Codex tab and Overview return to their own start modes the same way.
+            for store in [LemelsonModeStore.codex, .overview] where store.mode != store.startMode {
+                store.mode = store.startMode
                 changed = true
             }
         }
@@ -1183,7 +1220,7 @@ extension StatusItemController {
         session.rebuildPending = false
         // The rebuild only goes ahead while the menu still shows the tab it is for.
         let pageKey = self.lemelsonCurrentPageKey()
-        let provider: UsageProvider = if pageKey == "overview" {
+        let provider: UsageProvider = if LemelsonOverviewPageState.isShown(onPage: pageKey) {
             // Overview is no provider's page: the provider the menu resolves to stands for it.
             self.resolvedMenuProvider() ?? .claude
         } else {

@@ -36,6 +36,20 @@ public enum UsageFormat {
         return "\(Int(value.rounded()))%"
     }
 
+    /// "≈34%" for an estimate; never "≈<1%" or "≈0%": under half a point there is nothing to approximate,
+    /// and a plain zero is exact.
+    public static func approxPercent(_ value: Double) -> String {
+        let text = self.percent(value)
+        return text == "0%" || text.hasPrefix("<") ? text : "≈" + text
+    }
+
+    /// A lower bound in whole percent, rounded down so it never claims more than was proven: 12.9 → "12%",
+    /// 0.6 → "0%" (rounding to the nearest would say "at least 1%").
+    public static func floorPercent(_ value: Double) -> String {
+        guard value.isFinite, value > 0 else { return "0%" }
+        return "\(Int(value.rounded(.down)))%"
+    }
+
     /// A share and the rest of 100, rounded together so the two always add up to 100: 93.5 → "94%" and "6%"
     /// (each rounded alone they read 94% + 7%). A side under half a percent reads "<1%" and the other ">99%".
     public static func split(_ part: Double) -> (part: String, rest: String) {

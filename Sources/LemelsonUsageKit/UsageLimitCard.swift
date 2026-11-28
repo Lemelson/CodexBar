@@ -409,8 +409,8 @@ public struct UsageLimitCardRow: View {
     let style: UsageLimitCardStyle
     let now: Date
     let width: CGFloat
-    /// `.split` (Claude): a bar part and a legend chip per source. `.single`: one part, no chips: the quota
-    /// counts all use wherever it happened, so there is nothing honest to put on a chip.
+    /// `.split` (Claude) and `.local` (Codex, Antigravity with a split): a bar part and a legend chip per
+    /// source. `.single`: one part, no chips: nothing is known about where the use came from.
     let sources: UsageLimitSources
     /// Weekly row only: see `UsageSessionsLeft.make(for:account:in:now:)`.
     let sessionsLeft: UsageSessionsLeft?
@@ -456,7 +456,7 @@ public struct UsageLimitCardRow: View {
     public var body: some View {
         let segments = UsageSegment.build(for: self.window, kind: self.kind, sources: self.sources)
         let verdict = UsageLimitVerdict(window: self.window, now: self.now)
-        let chips = self.sources == .split ? segments : []
+        let chips = self.sources.hasParts ? segments.filter { $0.kind != .all } : []
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Image(systemName: self.symbol)
@@ -486,7 +486,8 @@ public struct UsageLimitCardRow: View {
             HStack(alignment: .top, spacing: 5) {
                 UsageFlowLayout(spacing: 6) {
                     ForEach(chips) { segment in
-                        UsageChip(color: segment.color, text: segment.chipText, fontSize: 9.5)
+                        UsageChip(
+                            color: segment.color, text: segment.chipText, hatched: segment.isHatched, fontSize: 9.5)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

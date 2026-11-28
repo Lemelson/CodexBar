@@ -15,8 +15,20 @@ import SwiftUI
 ///   cache row  "Prompt cache" of all subscriptions together (`UsageCacheSummary.all`): one line with the whole
 ///              story in the hover panel, placed by the menu above its action rows
 ///
+/// With a `mode` the page is one of two (`UsageOverviewMode`): `.spend` is the rows above; `.limits` is
+///
+///   recent     `UsageOverviewRecentView`: what every account used in the last 24 hours, 72 hours or 7 days,
+///              you against others, in API dollars or in weekly quotas; pointing at the chart shows
+///              `chartDayDetail` (every account at that time)
+///   head       "WEEKLY LIMITS" and the legend of the bars
+///   accounts   one row per account of every provider with its weekly limit split into You, Others and Not
+///              split yet; the hover panel is that limit's own (`UsageLimitDetailPanelView`), a click opens the
+///              provider's tab
+///   footer, cache row   as on Spend
+///
 /// Every view is laid out at the fixed `width` it was given; hover details at `detailWidth`. Ids are stable
-/// across rebuilds and all start with `idPrefix`, the prefix Overview's warm-row recycling looks for.
+/// across rebuilds and all start with `idPrefix`, the prefix Overview's warm-row recycling looks for; the rows
+/// of Limits carry the mode in their ids (`lemelsonOverview-limits-…`), so the two modes never share a row.
 @MainActor
 public struct UsageOverviewPage {
     public enum Part: Equatable, Sendable {
@@ -24,6 +36,12 @@ public struct UsageOverviewPage {
         case spend
         /// Claude, Codex or Antigravity; has a hover detail.
         case provider(UsageOverviewProviderKind)
+        /// Limits: the cumulative chart with its span and unit switches.
+        case recent
+        /// Limits: the "WEEKLY LIMITS" line.
+        case limitsHeader
+        /// Limits: one account's weekly limit; has a hover detail.
+        case account(UsageOverviewProviderKind)
         /// The prompt cache row: not in `rows`, see `cacheRow`.
         case cache
         /// When the summary was updated: one line.
@@ -52,36 +70,52 @@ public struct UsageOverviewPage {
     public static let idPrefix = "lemelsonOverview-"
     public static let defaultDetailWidth: CGFloat = 340
 
-    public let spend: UsageOverviewSpend
+    /// What the subscriptions cost: built for the Spend page only. Nil on Limits, which shows none of it
+    /// (the per-day history of every provider is not walked for a page that has no spend chart).
+    public let spend: UsageOverviewSpend?
+    /// The page shown: nil is the Spend-only Overview from before the modes (the rollback).
+    public let mode: UsageOverviewMode?
+    /// Limits only: every account with a weekly limit, in row order.
+    public let limitAccounts: [UsageOverviewLimitAccount]
     public let rows: [Row]
     public let detailWidth: CGFloat
     /// The one-line "Prompt cache" row of all subscriptions, with its detail panel; nil without cache data.
     public let cacheRow: Row?
-    /// The day panel of the spend chart (hovering a day, dragging a span), for the hover panel: register
-    /// `build` under `key` (`UsageOverviewSpend.defaultChartID + ":day"`). Nil without spend.
+    /// The panel of the page's chart, for the hover panel: register `build` under `key`. On Spend, the day
+    /// panel of the per-day chart (`UsageOverviewSpend.defaultChartID + ":day"`); on Limits, every account at
+    /// the pointed-at time (`UsageOverviewRecent.panelKey`). Nil without data for the chart.
     public let chartDayDetail: (key: String, build: @MainActor () -> AnyView)?
+    /// The id of the row that holds the chart `chartDayDetail` belongs to.
+    public let chartRowID: String
 
     /// The one-line rows for the menu's footer area (above Status Page).
     public var lineRows: [Row] {
         [self.cacheRow].compactMap(\.self)
     }
 
+    ///   - codexLive: CodexBar's in-memory reads of its Codex accounts by account id (lowercase), the same
+    ///     ones the Codex tab is given: Limits shows them until the collector has taken them in.
+    ///   - codexPrivateNames: CodexBar's "Hide personal info" is on: the name shown for each Codex account id.
+    ///   - clock: the time a detail panel is built at (it is built when its row is pointed at, which may be
+    ///     long after the page was).
     public init(
         state: UsagePanelState,
         now: Date,
         width: CGFloat,
         detailWidth: CGFloat = UsageOverviewPage.defaultDetailWidth,
-        refreshing: Bool = false)
+        refreshing: Bool = false,
+        mode: UsageOverviewMode? = nil,
+        codexLive: [String: UsageCodexLive] = [:],
+        codexPrivateNames: [String: String]? = nil,
+        clock: @escaping @MainActor () -> Date = { Date() })
     {
-        let spend = UsageOverviewSpend(state: state, now: now)
-        self.spend = spend
+        self.mode = mode
         self.detailWidth = detailWidth
         let stamp = Int(state.generatedAt)
         let ageBucket = Int(now.timeIntervalSince1970 / 600)
         let fingerprint = "\(stamp):\(ageBucket)"
         let prefix = Self.idPrefix
         let scope = "lemelson-overview-"
-        let offered = spend.offered
         var rows: [Row] = []
         func add(
             _ part: Part,
@@ -105,23 +139,7 @@ public struct UsageOverviewPage {
                 heightFingerprint: fingerprint + extra))
         }
 
-        // The zoom chip's ✕ and the split switch are controls too, also with a single period.
-        add(.spend, "spend", UsageOverviewSummaryView(spend: spend, width: width),
-            separatorAfter: true, hasControls: spend.offered.count > 1 || spend.hasSpend)
-        for (index, provider) in spend.providers.enumerated() {
-            add(
-                .provider(provider.kind),
-                "provider-\(provider.kind.rawValue)",
-                UsageOverviewProviderRowView(provider: provider, offered: offered, width: width),
-                separatorAfter: index == spend.providers.count - 1,
-                providerKind: provider.kind,
-                // A quiet line in place of the numbers has its own height.
-                fingerprint: provider.unavailableNote.map { ":note-\($0.count)" } ?? "",
-                detail: {
-                    AnyView(UsageOverviewProviderPanelView(provider: provider, offered: offered, width: detailWidth))
-                })
-        }
-        add(.footer, "footer", UsageFooterView(
+        let footer = UsageFooterView(
             state: state,
             now: now,
             width: width,
@@ -129,16 +147,75 @@ public struct UsageOverviewPage {
             showsLegend: false,
             showsYouChip: false,
             note: "Dollars at API prices",
-            compact: true), separatorAfter: true)
-        self.rows = rows
+            compact: true)
 
-        if spend.hasSpend {
-            let catalog = spend.dayDetailCatalog(now: now)
-            self.chartDayDetail = (key: catalog.panelKey, build: {
-                AnyView(UsageDayDetailPanelView(catalog: catalog, width: detailWidth))
-            })
+        if mode == .limits {
+            self.spend = nil
+            let accounts = UsageOverviewLimitAccount.all(
+                in: state, now: now, codexLive: codexLive, codexPrivateNames: codexPrivateNames)
+            let recent = UsageOverviewRecent(state: state, accounts: accounts)
+            self.limitAccounts = accounts
+            add(.recent, "limits-recent", UsageOverviewRecentView(recent: recent, width: width),
+                separatorAfter: true, hasControls: recent.isAvailable,
+                fingerprint: recent.isAvailable ? "" : ":none")
+            add(.limitsHeader, "limits-head", UsageOverviewLimitsHeader(width: width))
+            for (index, entry) in accounts.enumerated() {
+                let hasDetail = entry.window?.pct != nil
+                rows.append(Row(
+                    id: prefix + "limits-acct-\(entry.id)",
+                    part: .account(entry.provider),
+                    view: AnyView(UsageOverviewAccountLimitRow(entry: entry, now: now, width: width)),
+                    detail: hasDetail ? Self.limitDetail(entry, state: state, clock: clock, width: detailWidth) : nil,
+                    hasControls: false,
+                    separatorAfter: index == accounts.count - 1,
+                    providerKind: entry.provider,
+                    // One scope for every account row: they all have one fixed height.
+                    heightCacheScope: "lemelson-overview-limits-acct",
+                    heightFingerprint: fingerprint + entry.fingerprint))
+            }
+            add(.footer, "limits-footer", footer, separatorAfter: true)
+            self.rows = rows
+            self.chartRowID = prefix + "limits-recent"
+            if recent.isAvailable {
+                self.chartDayDetail = (key: UsageOverviewRecent.panelKey, build: {
+                    AnyView(UsageOverviewRecentPanelView(recent: recent, width: detailWidth))
+                })
+            } else {
+                self.chartDayDetail = nil
+            }
         } else {
-            self.chartDayDetail = nil
+            let spend = UsageOverviewSpend(state: state, now: now)
+            let offered = spend.offered
+            self.spend = spend
+            self.limitAccounts = []
+            // The zoom chip's ✕ and the split switch are controls too, also with a single period.
+            add(.spend, "spend", UsageOverviewSummaryView(spend: spend, width: width),
+                separatorAfter: true, hasControls: spend.offered.count > 1 || spend.hasSpend)
+            for (index, provider) in spend.providers.enumerated() {
+                add(
+                    .provider(provider.kind),
+                    "provider-\(provider.kind.rawValue)",
+                    UsageOverviewProviderRowView(provider: provider, offered: offered, width: width),
+                    separatorAfter: index == spend.providers.count - 1,
+                    providerKind: provider.kind,
+                    // A quiet line in place of the numbers has its own height.
+                    fingerprint: provider.unavailableNote.map { ":note-\($0.count)" } ?? "",
+                    detail: {
+                        AnyView(UsageOverviewProviderPanelView(
+                            provider: provider, offered: offered, width: detailWidth))
+                    })
+            }
+            add(.footer, "footer", footer, separatorAfter: true)
+            self.rows = rows
+            self.chartRowID = UsageOverviewSpend.defaultChartID
+            if spend.hasSpend {
+                let catalog = spend.dayDetailCatalog(now: now)
+                self.chartDayDetail = (key: catalog.panelKey, build: {
+                    AnyView(UsageDayDetailPanelView(catalog: catalog, width: detailWidth))
+                })
+            } else {
+                self.chartDayDetail = nil
+            }
         }
         self.cacheRow = UsageCacheSummary.all(state).map { summary in
             Row(
@@ -152,6 +229,20 @@ public struct UsageOverviewPage {
                 heightCacheScope: scope + "cache",
                 heightFingerprint: fingerprint)
         }
+    }
+}
+
+extension UsageOverviewPage {
+    /// The hover panel of an account row on Limits: that account's weekly limit, as on its own page.
+    /// Built at `clock()`, the moment the row is pointed at: a page that stayed open keeps its ages and its
+    /// forecast current.
+    private static func limitDetail(
+        _ entry: UsageOverviewLimitAccount,
+        state: UsagePanelState,
+        clock: @escaping @MainActor () -> Date,
+        width: CGFloat) -> @MainActor () -> AnyView
+    {
+        { AnyView(entry.detail(in: state, now: clock(), width: width)) }
     }
 }
 
@@ -219,7 +310,8 @@ extension UsageOverviewSpend {
                     usedPct: account.isUnavailable ? nil : window?.pct,
                     verdict: account.isUnavailable ? "—" : verdict.text,
                     tone: Self.tone(verdict),
-                    detail: detail)
+                    detail: detail,
+                    split: account.isUnavailable ? nil : window.flatMap { .init(window: $0, sources: .split) })
             }
             let count = state.accounts.count
             let subtitle: String = if !counted.isEmpty, counted.count < accounts.count {
@@ -269,7 +361,8 @@ extension UsageOverviewSpend {
                     usedPct: window.pct,
                     verdict: verdict.text,
                     tone: Self.tone(verdict),
-                    detail: window.rolled == true ? "New window" : window.resetsAt.map { UsageFormat.reset($0, now: now) })
+                    detail: window.rolled == true ? "New window" : window.resetsAt.map { UsageFormat.reset($0, now: now) },
+                    split: .init(window: window, sources: spec.sources(for: window, block: block)))
             }
             let plan = spec.shortPlan(block?.account.planName ?? block?.worth?.planName)
             return ProviderSummary(
