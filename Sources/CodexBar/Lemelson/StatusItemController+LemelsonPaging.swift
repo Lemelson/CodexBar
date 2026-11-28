@@ -5,10 +5,11 @@ import LemelsonUsageKit
 import os
 
 // One bounded line of pages for the merged menu:
-//   Overview, Codex, …, Claude:Limits, Claude:Spend, Claude:Value, Claude:Classic, …
+//   Overview, Codex:Limits, Codex:Spend, Codex:Value, Claude:Limits, Claude:Spend, Claude:Value, Antigravity
 // Left/right arrow keys and a horizontal two-finger swipe move along it, never past either end and never
 // out of CodexBar to the neighbouring menu bar items. Hooks in the author's code:
-//   • `navigateProviderSwitcher` (ProviderNavigation): Claude modes first, hard edges, the landing mode;
+//   • `navigateProviderSwitcher` (ProviderNavigation): the tab's modes first (Claude, Codex), hard edges, the
+//     landing mode;
 //   • `handleProviderSwitcherShortcut` (ProviderSwitcher): left/right left to `LemelsonMenuEventFilter`;
 //   • `populateMenu` (Menu): tells the page transition that the new rows are in.
 
@@ -317,23 +318,36 @@ extension StatusItemController {
         if self.shouldMergeIcons, menu.items.first?.view is ProviderSwitcherView {
             self.navigateProviderSwitcher(direction, menu: menu)
         } else {
-            _ = self.lemelsonStepClaudeMode(direction, menu: menu)
+            _ = self.lemelsonStepMode(direction, menu: menu)
         }
     }
 
-    /// Called by `navigateProviderSwitcher` while Claude is selected. Moves to the neighbouring mode and
-    /// returns true, or returns false at the first/last mode (and without the panel) so the provider tabs move.
-    func lemelsonStepClaudeMode(_ direction: StatusItemMenuProviderNavigationDirection, menu: NSMenu?) -> Bool {
-        guard let menu = menu ?? self.lemelsonPagedRootMenu(), self.lemelsonModeRowItem(in: menu) != nil else {
+    /// Called by `navigateProviderSwitcher` while a tab with modes (Claude, Codex) is selected. Moves to the
+    /// neighbouring mode of the tab whose mode row the menu shows and returns true, or returns false at the
+    /// first/last mode (and without a mode row) so the provider tabs move.
+    func lemelsonStepMode(_ direction: StatusItemMenuProviderNavigationDirection, menu: NSMenu?) -> Bool {
+        guard let menu = menu ?? self.lemelsonPagedRootMenu(), let tab = self.lemelsonModeTab(in: menu) else {
             return false
         }
         let modes = LemelsonPanelMode.allCases
-        let session = LemelsonPanelSession.shared
-        guard let index = modes.firstIndex(of: session.mode) else { return false }
+        guard let index = modes.firstIndex(of: LemelsonModeStore.store(for: tab).mode) else { return false }
         let target = index + (direction == .next ? 1 : -1)
         guard modes.indices.contains(target) else { return false }
-        self.lemelsonSelectMode(modes[target], menu: menu)
+        self.lemelsonSelectMode(modes[target], tab: tab, menu: menu)
         return true
+    }
+
+    /// The tab with modes a selection names, when its page is the fork's (the Claude panel needs the summary;
+    /// the Codex page also needs `lemelsonCodexPage` not set to "stock").
+    static func lemelsonModeTab(of selection: ProviderSwitcherSelection) -> LemelsonModeTab? {
+        guard case let .provider(id) = selection,
+              FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path)
+        else { return nil }
+        switch id.firstPartyProvider {
+        case .claude: return .claude
+        case .codex: return LemelsonProviderPageState.codex.usesStockTab ? nil : .codex
+        default: return nil
+        }
     }
 
     /// Called when the user clicks a provider tab in `ProviderSwitcherView`.
@@ -349,26 +363,27 @@ extension StatusItemController {
         menu: NSMenu?)
     {
         guard let menu = menu ?? self.lemelsonPagedRootMenu() else { return }
-        let session = LemelsonPanelSession.shared
-        // Entering Claude from the left lands on its first mode, from the right on its last.
-        var landing = session.mode
-        var entersClaudePanel = false
-        if case let .provider(id) = selection, id.firstPartyProvider == .claude,
-           FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path)
-        {
-            landing = direction == .next ? .limits : .classic
-            entersClaudePanel = true
-        }
+        // Entering a tab with modes (Claude, Codex) from the left lands on its first mode, from the right on
+        // its last.
+        let tab = Self.lemelsonModeTab(of: selection)
+        let store = tab.map(LemelsonModeStore.store(for:))
+        let landing: LemelsonPanelMode? = tab == nil ? nil : Self.lemelsonLandingMode(direction)
         self.lemelsonBeginPageTransition(
             menu: menu,
             boundary: .providerRow,
             forward: direction == .next,
             target: Self.lemelsonPageKey(selection: selection, mode: landing))
-        guard entersClaudePanel, session.mode != landing else { return }
-        session.mode = landing
+        guard let store, let landing, store.mode != landing else { return }
+        store.mode = landing
         UsageHoverPanelController.shared.hide(animated: false)
-        // Rows cached for the Claude tab were rendered in another mode.
+        // Rows cached for the tab were rendered in another mode.
         self.mergedSwitcherContentCaches[ObjectIdentifier(menu)]?.removeValue(forKey: selection)
+    }
+
+    /// The mode a tab with modes opens in when the line enters it: its first from the left, its last from the
+    /// right.
+    static func lemelsonLandingMode(_ direction: StatusItemMenuProviderNavigationDirection) -> LemelsonPanelMode {
+        direction == .next ? LemelsonPanelMode.allCases.first ?? .limits : LemelsonPanelMode.allCases.last ?? .value
     }
 
     /// A page turn is waiting for a rebuild of `menu` while a native row (Status Page, Settings…) is
@@ -395,45 +410,56 @@ extension StatusItemController {
     }
 
     /// The mode buttons, arrow keys and swipes all end here.
-    func lemelsonSelectMode(_ mode: LemelsonPanelMode, menu: NSMenu?) {
-        let session = LemelsonPanelSession.shared
-        guard session.mode != mode else { return }
+    func lemelsonSelectMode(_ mode: LemelsonPanelMode, tab: LemelsonModeTab = .claude, menu: NSMenu?) {
+        let store = LemelsonModeStore.store(for: tab)
+        guard store.mode != mode else { return }
         let modes = LemelsonPanelMode.allCases
-        let forward = (modes.firstIndex(of: mode) ?? 0) > (modes.firstIndex(of: session.mode) ?? 0)
+        let forward = (modes.firstIndex(of: mode) ?? 0) > (modes.firstIndex(of: store.mode) ?? 0)
         if let menu {
             self.lemelsonBeginPageTransition(
                 menu: menu,
                 boundary: .modeRow,
                 forward: forward,
-                target: Self.lemelsonPageKey(selection: nil, mode: mode))
+                target: Self.lemelsonPageKey(tab: tab, mode: mode))
         }
-        session.mode = mode
+        store.mode = mode
         UsageHoverPanelController.shared.hide(animated: false)
-        self.lemelsonRebuildAfterModeChange(menu: menu)
+        self.lemelsonRebuildAfterModeChange(menu: menu, tab: tab)
     }
 
     // MARK: - Page names
 
-    /// The name of a page of the line: "overview", "codex", "claude:limits".
-    static func lemelsonPageKey(selection: ProviderSwitcherSelection?, mode: LemelsonPanelMode) -> String {
+    /// The name of a page of the line: "overview", "codex:limits", "claude:spend", "antigravity". `mode` is
+    /// the mode of the selected tab; nil takes the mode it shows now.
+    static func lemelsonPageKey(selection: ProviderSwitcherSelection?, mode: LemelsonPanelMode? = nil) -> String {
         switch selection {
         case .overview:
             return "overview"
         case let .provider(id):
             guard let provider = id.firstPartyProvider else { return "plugin:\(id)" }
-            return provider == .claude ? "claude:\(mode.rawValue)" : provider.rawValue
+            switch provider {
+            case .claude:
+                return Self.lemelsonPageKey(tab: .claude, mode: mode)
+            case .codex where !LemelsonProviderPageState.codex.usesStockTab:
+                return Self.lemelsonPageKey(tab: .codex, mode: mode)
+            default:
+                return provider.rawValue
+            }
         case nil:
             // A menu of its own for Claude, without the provider row.
-            return "claude:\(mode.rawValue)"
+            return Self.lemelsonPageKey(tab: .claude, mode: mode)
         }
+    }
+
+    /// "claude:limits", "codex:value".
+    static func lemelsonPageKey(tab: LemelsonModeTab, mode: LemelsonPanelMode?) -> String {
+        "\(tab.provider.rawValue):\((mode ?? LemelsonModeStore.store(for: tab).mode).rawValue)"
     }
 
     /// The page the menu shows now.
     func lemelsonCurrentPageKey() -> String {
         let providers = self.store.enabledFirstPartyProvidersForDisplay()
-        return Self.lemelsonPageKey(
-            selection: self.resolvedMergedMenuSelection(enabledProviders: providers),
-            mode: LemelsonPanelSession.shared.mode)
+        return Self.lemelsonPageKey(selection: self.resolvedMergedMenuSelection(enabledProviders: providers))
     }
 
     // MARK: - Page transition
@@ -1418,7 +1444,7 @@ final class LemelsonPageTransition {
         guard !self.applyingHeight, let window = self.menuWindow else { return }
         let final = window.frame.height
         guard self.phase == .active || self.heightTimer != nil else {
-            // The page at rest changed height by itself: Classic's stock rows add their cost section a
+            // The page at rest changed height by itself: stock rows below a page (Claude Spend's Cost) add their cost section a
             // moment after the page is shown (657 -> 1077 pt). Its picture has the old height and the next
             // visit would slide it in and then jump, so it is taken again once the page rests. Taking a
             // picture draws into a bitmap only: nothing changes on screen.

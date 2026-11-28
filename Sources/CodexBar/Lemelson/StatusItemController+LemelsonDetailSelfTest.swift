@@ -301,8 +301,9 @@ extension StatusItemController {
                 log.notice("overview: hover \(name(rows[index]), privacy: .public): panel=\(panel.visibleKey ?? "hidden", privacy: .public) alpha=\(alpha, privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public)")
             }))
         }
-        // Switch right to Codex (hitting cached-swap) and verify its chart day panel opens cleanly.
-        plan.append((10.8, { [weak self] in
+        // Switch right to Codex (hitting cached-swap), step on to Codex Spend (Limits, the tab's first mode, has
+        // no chart), check the page key, then verify the spend chart's day panel opens cleanly.
+        let pageRight: (String) -> Void = { [weak self] label in
             guard let self else { return }
             let character = String(UnicodeScalar(0xF703)!)
             guard let event = NSEvent.keyEvent(
@@ -311,17 +312,31 @@ extension StatusItemController {
                 characters: character, charactersIgnoringModifiers: character, isARepeat: false, keyCode: 124)
             else { return }
             _ = self.lemelsonHandleTrackedEvent(event)
-            log.notice("overview: paged right to \(self.lemelsonCurrentPageKey(), privacy: .public)")
+            log.notice("overview: \(label, privacy: .public): paged right to \(self.lemelsonCurrentPageKey(), privacy: .public)")
+        }
+        plan.append((10.8, { pageRight("to codex") }))
+        plan.append((11.6, { [weak self] in
+            guard let self else { return }
+            let key = self.lemelsonCurrentPageKey()
+            guard key.hasPrefix("codex"), key != "codex:spend" else {
+                return log.notice("overview: on \(key, privacy: .public) after the first page right, no step")
+            }
+            pageRight("to codex spend")
         }))
-        plan.append((11.6, {
-            log.notice("overview: after page right: page=\(tools.page(), privacy: .public) charts=\(pointer.registeredChartIDs.joined(separator: ","), privacy: .public)")
-            postOnPlot(.mouseMoved, 0.8, "codex chart hover at 80%")
+        plan.append((12.4, { [weak self] in
+            let key = self?.lemelsonCurrentPageKey() ?? "?"
+            let onSpend = key == "codex:spend"
+            log.notice("overview: before codex hover: page=\(tools.page(), privacy: .public) key=\(key, privacy: .public) spend=\(onSpend) charts=\(pointer.registeredChartIDs.joined(separator: ","), privacy: .public)")
+            guard onSpend else {
+                return log.error("overview: not on codex:spend, the spend chart hover is skipped")
+            }
+            postOnPlot(.mouseMoved, 0.8, "codex spend chart hover at 80%")
         }))
-        plan.append((12.2, {
+        plan.append((13.0, {
             let alpha = String(format: "%.2f", panel.panelWindow?.alphaValue ?? -1)
             log.notice("overview: after codex hover: day panel=\(panel.isShowingChartDayPanel) panel=\(panel.visibleKey ?? "hidden", privacy: .public) alpha=\(alpha, privacy: .public) card=\(NSStringFromRect(panel.cardScreenRect), privacy: .public)")
         }))
-        plan.append((12.6, { [weak menu] in
+        plan.append((13.4, { [weak menu] in
             log.notice("overview: end, menu open=\(isOpen())")
             panel.trace = nil
             pointer.trace = nil
@@ -540,10 +555,10 @@ extension StatusItemController {
 
     /// `lemelsonSelfTestTour -bool YES`: one walk over the rows added in message 24, with mouse events posted
     /// to the app's own queue (the real path through NSMenu's tracking loop): Claude Limits, the cache row,
-    /// Spend (Accounts → Models → Accounts, then 90d), Value, Classic and its cache row, Antigravity and its
-    /// cache row and Status Page, back to Classic's Status Page (the fused panel) and its "Open Status Page"
-    /// row, the Codex page (its rows listed, both limit rows, the credits and reset credits facts, "Plan worth",
-    /// the cache row, the rows around it, Status Page), and back to Claude, where a click on Status Page closes the menu (the
+    /// Spend (Accounts → Models → Accounts, then 90d), Value and its cache row, Antigravity and its
+    /// cache row and Status Page, back to Claude Value's Status Page (the fused panel) and its "Open Status Page"
+    /// row, Codex Value, Spend and Limits (its rows listed, the active account's limit rows, its credits and
+    /// reset credits facts, the cache row, the rows around it, Status Page), and back to Claude, where a click on Status Page closes the menu (the
     /// self-test only logs the page it would open).
     func lemelsonTourSelfTestPlan(menu: NSMenu) -> [(TimeInterval, () -> Void)] {
         let log = Self.lemelsonLog
@@ -598,8 +613,6 @@ extension StatusItemController {
         at(4.9, claudeHeight("claude:spend"))
         at(5.0, [(0, { tools.key(right: true, "right, to Value") })])
         at(5.6, claudeHeight("claude:value"))
-        at(5.7, [(0, { tools.key(right: true, "right, to Classic") })])
-        at(6.4, claudeHeight("claude:classic"))
         at(6.5, hover("cache", cacheRow))
         at(7.4, [(0, { tools.key(right: true, "right, to Antigravity") })])
         let codex = UsageProviderSpec.codex
@@ -611,22 +624,25 @@ extension StatusItemController {
         at(8.1, hover("Antigravity plan worth", row(antigravity.idPrefix + "value")))
         at(8.8, hover("cache", cacheRow))
         at(9.5, hover("Status Page", statusRow))
-        at(10.4, [(0, { tools.key(right: false, "left, to Classic") })])
+        at(10.4, [(0, { tools.key(right: false, "left, to Claude Value") })])
         at(11.2, hover("Status Page", statusRow))
         at(12.0, [(0, { tools.moveOverPanelRow("Open Status Page") })])
-        at(12.6, [(0, { tools.key(right: false, "left, to Value") })])
         at(13.1, [(0, { tools.key(right: false, "left, to Spend") })])
         at(13.6, [(0, { tools.key(right: false, "left, to Limits") })])
-        at(14.2, [(0, { tools.key(right: false, "left, to Codex") })])
-        // The Codex page: its two limit rows (the detail panel morphs between them), the card facts with a
-        // detail (credits, limit reset credits, when CodexBar has them), "Plan worth", the cache row and the
+        at(14.0, [(0, { tools.key(right: false, "left, to Codex Value") })])
+        at(14.3, [(0, { tools.key(right: false, "left, to Codex Spend") })])
+        at(14.6, [(0, { tools.key(right: false, "left, to Codex Limits") })])
+        // Codex Limits: the active account's two limit rows (the detail panel morphs between them), its card
+        // facts with a detail (credits, limit reset credits, when CodexBar has them), the cache row and the
         // rows around them.
+        let prefixed: (String, String) -> () -> NSMenuItem? = { [weak menu] start, end in
+            { menu?.items.first { ($0.representedObject as? String).map { $0.hasPrefix(start) && $0.hasSuffix(end) } ?? false } }
+        }
         at(14.9, [(0, { tools.describeRows(prefixes: [codex.idPrefix, codex.limitRowPrefix], label: "codex") })])
-        at(15.0, hover("Codex 5h", row(codex.limitRowPrefix + "5h")))
-        at(15.7, hover("Codex 7d", row(codex.limitRowPrefix + "7d")))
-        at(16.4, hover("Codex credits", row(codex.idPrefix + "fact-credits")))
-        at(17.1, hover("Codex reset credits", row(codex.idPrefix + "fact-reset-credits")))
-        at(17.8, hover("Codex plan worth", row(codex.idPrefix + "value")))
+        at(15.0, hover("Codex 5h", prefixed(codex.limitRowPrefix, "-5h")))
+        at(15.7, hover("Codex 7d", prefixed(codex.limitRowPrefix, "-7d")))
+        at(16.4, hover("Codex credits", prefixed(codex.idPrefix + "limits-fact-", "-credits")))
+        at(17.1, hover("Codex reset credits", prefixed(codex.idPrefix + "limits-fact-", "-reset-credits")))
         at(18.5, hover("cache", cacheRow))
         at(19.2, [(0, { tools.describeFooter() })])
         at(19.4, hover("Status Page", statusRow))
@@ -636,7 +652,9 @@ extension StatusItemController {
             guard tools.page() == "overview" else { return log.notice("tour: left of Codex is \(tools.page(), privacy: .public), not overview") }
             tools.describeOverviewRows(label: "overview")
         })])
-        at(20.9, [(0, { tools.key(right: true, "right, back to Codex") })])
+        at(20.9, [(0, { tools.key(right: true, "right, back to Codex Limits") })])
+        at(21.2, [(0, { tools.key(right: true, "right, to Codex Spend") })])
+        at(21.4, [(0, { tools.key(right: true, "right, to Codex Value") })])
         at(21.6, [(0, { tools.key(right: true, "right, back to Claude Limits") })])
         at(22.4, hover("Status Page", statusRow))
         at(23.2, [(0, {

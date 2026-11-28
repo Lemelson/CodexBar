@@ -173,6 +173,19 @@ public enum CodexProviderDescriptor {
         }
     }
 
+    /// lemelson: a strictly read-only usage read for a background (non-selected) account: OAuth with the
+    /// stored access token only. Never the Codex CLI (`codex app-server` redeems and rewrites the refresh
+    /// token of the home it runs in) and never a token refresh: an expired token fails, and the caller keeps
+    /// the account's last reading. The context's source mode should not be `.auto`, so the OAuth strategy
+    /// does not ask the CLI for a monthly credit limit either.
+    public static func readOnlyOAuthFetchOutcome(context: ProviderFetchContext) async -> ProviderFetchOutcome {
+        let pipeline = ProviderFetchPipeline(resolveStrategies: { _ in [CodexOAuthFetchStrategy()] })
+        return await pipeline.fetch(context: context, provider: .codex)
+    }
+
+    /// The strategy ids `readOnlyOAuthFetchOutcome` may run (tests check that no CLI strategy is among them).
+    public static let readOnlyOAuthStrategyIDs = ["codex.oauth"]
+
     private static func noDataMessage() -> String {
         self.noDataMessage(env: ProcessInfo.processInfo.environment)
     }

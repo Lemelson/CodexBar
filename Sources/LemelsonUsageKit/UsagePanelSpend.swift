@@ -445,6 +445,8 @@ public enum UsageSeriesColor: Hashable, Sendable {
     /// A provider on Overview: 0 Claude (orange), 1 Codex (blue), 2 Antigravity (lime), the account colors,
     /// which stay apart on a warm screen.
     case provider(Int)
+    /// A known person's account tint, as on their limit card (Codex Spend's accounts).
+    case tint(UsageAccountTint)
     /// Everything without a color of its own.
     case other
 
@@ -454,6 +456,7 @@ public enum UsageSeriesColor: Hashable, Sendable {
         case let .model(index): UsagePalette.model(index)
         case let .claude(family): family.color
         case let .provider(index): UsagePalette.account(index)
+        case let .tint(person): person.color
         case .other: UsagePalette.others
         }
     }
@@ -867,6 +870,8 @@ public struct UsageSpendAccountRowView: View {
     let colorIndex: Int
     let width: CGFloat
     let totals: UsageSpendAccountTotals
+    /// The swatch; by default the chart color of `colorIndex` (Codex passes the account's card tint).
+    let color: Color?
     @ObservedObject private var selection = UsagePanelSelection.shared
     @Environment(\.usageRowHighlighted) private var highlighted
 
@@ -875,12 +880,14 @@ public struct UsageSpendAccountRowView: View {
         colorIndex: Int,
         width: CGFloat,
         now: Date = Date(),
-        totals: UsageSpendAccountTotals? = nil)
+        totals: UsageSpendAccountTotals? = nil,
+        color: Color? = nil)
     {
         self.account = account
         self.colorIndex = colorIndex
         self.width = width
         self.totals = totals ?? UsageSpendAccountTotals(account: account, now: now)
+        self.color = color
     }
 
     public var body: some View {
@@ -888,7 +895,7 @@ public struct UsageSpendAccountRowView: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 RoundedRectangle(cornerRadius: 2)
-                    .fill(UsagePalette.account(self.colorIndex))
+                    .fill(self.color ?? UsagePalette.account(self.colorIndex))
                     .frame(width: 8, height: 8)
                 Text(self.account.displayName)
                     .font(.system(size: 12.5, weight: .semibold))

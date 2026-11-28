@@ -24,7 +24,9 @@ extension UsageStore {
         // every row and then reject its whoami identity against other accounts.
         guard !self.shouldUseAmbientCodexPATForUsage() else { return false }
         let projection = self.freshCodexVisibleAccountProjectionForAccountRefresh()
-        return (self.settings.multiAccountMenuLayout == .stacked || self.settings.accountWidgetsEnabled)
+        // lemelson: the fork's Codex page shows every account, so every account is read (read-only).
+        return (self.settings.multiAccountMenuLayout == .stacked || self.settings.accountWidgetsEnabled
+            || StatusItemController.lemelsonCodexPageShowsAllAccounts)
             && projection.visibleAccounts.count > 1
     }
 }

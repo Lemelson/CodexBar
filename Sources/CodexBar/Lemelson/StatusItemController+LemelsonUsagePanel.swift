@@ -13,32 +13,127 @@ import SwiftUI
 //   • `LemelsonPanelSession.shared.stockExtrasVisible`: in `addPrimaryMenuContent`.
 // Keyboard and swipe paging and the page slide: `StatusItemController+LemelsonPaging.swift`.
 
-/// Modes of the Claude tab, switched by the row of buttons at the top of the menu.
+/// Modes of the Claude and the Codex tab, switched by the row of buttons at the top of the menu. The stock
+/// CodexBar card has no mode of its own: `defaults write com.steipete.codexbar lemelsonCodexPage stock` (or
+/// `lemelsonAntigravityPage stock`) still brings back a stock tab.
 enum LemelsonPanelMode: String, CaseIterable {
-    /// Limits of every account, split into mine / not mine, with a pace mark.
+    /// Limits of every account (Claude: split into mine / not mine), with a pace mark.
     case limits
-    /// My Claude Code spend on this Mac.
+    /// Spend on this Mac.
     case spend
     /// What the plan is worth at API prices and whether the limit changes.
     case value
-    /// The stock CodexBar card, unchanged.
-    case classic
 
     var title: String {
         switch self {
         case .limits: "Limits"
         case .spend: "Spend"
         case .value: "Value"
-        case .classic: "Classic"
         }
     }
 
-    var help: String {
+    func help(for tab: LemelsonModeTab) -> String {
+        switch (self, tab) {
+        case (.limits, .claude): "Limits of every account: your share, others, pace"
+        case (.limits, .codex): "Limits and credits of every Codex account"
+        case (.spend, .claude): "Your Claude Code spend on this Mac"
+        case (.spend, .codex): "Your Codex spend on this Mac, by account and model"
+        case (.value, _): "What the plan is worth at API prices"
+        }
+    }
+
+    /// The same mode in the layout module.
+    var codexMode: UsageCodexMode {
         switch self {
-        case .limits: "Limits of every account: your share, others, pace"
-        case .spend: "Your Claude Code spend on this Mac"
-        case .value: "What the plan is worth at API prices"
-        case .classic: "The original CodexBar view"
+        case .limits: .limits
+        case .spend: .spend
+        case .value: .value
+        }
+    }
+}
+
+/// The tabs with modes: each keeps its own mode shown last and its own pin.
+enum LemelsonModeTab: String {
+    case claude
+    case codex
+
+    var provider: UsageProvider {
+        switch self {
+        case .claude: .claude
+        case .codex: .codex
+        }
+    }
+}
+
+/// The mode a tab shows, the one shown last (kept across app restarts) and the pinned one. A stored mode
+/// that no longer exists (the removed "classic") reads as Limits and is cleared.
+@MainActor
+final class LemelsonModeStore {
+    let tab: LemelsonModeTab
+    let lastModeKey: String
+    let pinnedModeKey: String
+    private let defaults: UserDefaults
+
+    /// The mode shown now. A menu opens in the pinned mode, or without a pin in the mode shown last.
+    var mode: LemelsonPanelMode {
+        didSet {
+            guard self.mode != oldValue else { return }
+            self.defaults.set(self.mode.rawValue, forKey: self.lastModeKey)
+        }
+    }
+
+    init(tab: LemelsonModeTab, lastModeKey: String, pinnedModeKey: String, defaults: UserDefaults = .standard) {
+        self.tab = tab
+        self.lastModeKey = lastModeKey
+        self.pinnedModeKey = pinnedModeKey
+        self.defaults = defaults
+        self.mode = .limits
+        Self.clearUnknown(lastModeKey, in: defaults)
+        Self.clearUnknown(pinnedModeKey, in: defaults)
+        self.mode = self.startMode
+    }
+
+    /// A value no mode has any more (Classic) is removed, so the next start reads the default.
+    private static func clearUnknown(_ key: String, in defaults: UserDefaults) {
+        guard let raw = defaults.string(forKey: key), LemelsonPanelMode(rawValue: raw) == nil else { return }
+        defaults.removeObject(forKey: key)
+    }
+
+    /// The pinned mode: every menu opens in it. Nil: the menu opens in the mode shown last.
+    var pinnedMode: LemelsonPanelMode? {
+        get {
+            self.defaults.string(forKey: self.pinnedModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
+        }
+        set {
+            if let newValue {
+                self.defaults.set(newValue.rawValue, forKey: self.pinnedModeKey)
+            } else {
+                self.defaults.removeObject(forKey: self.pinnedModeKey)
+            }
+        }
+    }
+
+    /// The mode a menu opens in.
+    var startMode: LemelsonPanelMode {
+        self.pinnedMode
+            ?? self.defaults.string(forKey: self.lastModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
+            ?? .limits
+    }
+
+    /// Pins the mode shown, or unpins it when it is the pinned one.
+    func togglePin() {
+        self.pinnedMode = self.pinnedMode == self.mode ? nil : self.mode
+    }
+
+    static let claude = LemelsonModeStore(
+        tab: .claude, lastModeKey: "lemelsonPanelLastMode", pinnedModeKey: "lemelsonPanelDefaultMode")
+    static let codex = LemelsonModeStore(
+        tab: .codex, lastModeKey: "lemelsonCodexLastMode", pinnedModeKey: "lemelsonCodexDefaultMode")
+
+    static func store(for tab: LemelsonModeTab) -> LemelsonModeStore {
+        switch tab {
+        case .claude: self.claude
+        case .codex: self.codex
         }
     }
 }
@@ -56,17 +151,13 @@ struct LemelsonLineRow {
 @MainActor
 final class LemelsonPanelSession {
     static let shared = LemelsonPanelSession()
-    /// The pinned mode (the pin button in the mode row); unset = no pin.
-    private static let pinnedModeKey = "lemelsonPanelDefaultMode"
-    /// The mode shown last, kept across app restarts.
-    private static let lastModeKey = "lemelsonPanelLastMode"
+    /// The Claude tab's modes (last shown, pin). The Codex tab has its own: `LemelsonModeStore.codex`.
+    let modes = LemelsonModeStore.claude
 
-    /// The mode shown now. A menu opens in the pinned mode, or without a pin in the mode shown last.
+    /// The Claude mode shown now. A menu opens in the pinned mode, or without a pin in the mode shown last.
     var mode: LemelsonPanelMode {
-        didSet {
-            guard self.mode != oldValue else { return }
-            UserDefaults.standard.set(self.mode.rawValue, forKey: Self.lastModeKey)
-        }
+        get { self.modes.mode }
+        set { self.modes.mode = newValue }
     }
 
     /// Set while a page is built (`addLemelsonUsagePanel`), added by `addLemelsonPendingRows` at the end of the
@@ -102,34 +193,23 @@ final class LemelsonPanelSession {
     var modeWarmTimer: Timer?
     var activeSwitchToken: String?
     var switchObservers: [NSObjectProtocol] = []
+    /// In-process observers: a switch made in CodexBar's own "System Account" menu.
+    var localSwitchObservers: [NSObjectProtocol] = []
     var stateWatcher: DispatchSourceFileSystemObject?
     var lastObservedStateDate: Date?
 
-    /// The pinned mode: every menu opens in it. Nil: the menu opens in the mode shown last.
+    /// The pinned Claude mode: every menu opens in it. Nil: the menu opens in the mode shown last.
     var pinnedMode: LemelsonPanelMode? {
-        get {
-            UserDefaults.standard.string(forKey: Self.pinnedModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
-        }
-        set {
-            if let newValue {
-                UserDefaults.standard.set(newValue.rawValue, forKey: Self.pinnedModeKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: Self.pinnedModeKey)
-            }
-        }
+        get { self.modes.pinnedMode }
+        set { self.modes.pinnedMode = newValue }
     }
 
-    /// The mode a menu opens in.
+    /// The Claude mode a menu opens in.
     var startMode: LemelsonPanelMode {
-        self.pinnedMode
-            ?? UserDefaults.standard.string(forKey: Self.lastModeKey).flatMap(LemelsonPanelMode.init(rawValue:))
-            ?? .limits
+        self.modes.startMode
     }
 
-    private init() {
-        self.mode = .limits
-        self.mode = self.startMode
-    }
+    private init() {}
 }
 
 /// Runs the usage collector: it queries the limits (following the VPN rule) and rewrites the summary.
@@ -228,8 +308,8 @@ private final class LemelsonSubpanelMenu: NSMenu, NSMenuDelegate {
 }
 
 /// The row of mode buttons and the pin: pinned, the menu always opens in that mode; unpinned, in the mode
-/// shown last.
-private final class LemelsonModeSwitcherView: NSView {
+/// shown last. The Claude and the Codex tab each have one, with their own modes and pin.
+final class LemelsonModeSwitcherView: NSView {
     private let modes = LemelsonPanelMode.allCases
     private var buttons: [NSButton] = []
     private let pinButton: NSButton
@@ -237,14 +317,18 @@ private final class LemelsonModeSwitcherView: NSView {
     private let onPin: () -> Void
     private let preferredSize: NSSize
     private var pressed: NSButton?
+    /// Whose modes these are.
+    let tab: LemelsonModeTab
 
     init(
+        tab: LemelsonModeTab = .claude,
         selected: LemelsonPanelMode,
         pinnedMode: LemelsonPanelMode?,
         width: CGFloat,
         onSelect: @escaping (LemelsonPanelMode) -> Void,
         onPin: @escaping () -> Void)
     {
+        self.tab = tab
         self.onSelect = onSelect
         self.onPin = onPin
         self.preferredSize = NSSize(width: width, height: 28)
@@ -263,7 +347,7 @@ private final class LemelsonModeSwitcherView: NSView {
         for (index, mode) in self.modes.enumerated() {
             let button = PaddedToggleButton(title: mode.title, target: nil, action: nil)
             button.tag = index
-            button.toolTip = mode.help
+            button.toolTip = mode.help(for: tab)
             button.isBordered = false
             button.setButtonType(.toggle)
             button.controlSize = .small
@@ -358,8 +442,8 @@ extension StatusItemController {
 
     // MARK: - Menu insertion
 
-    /// Draws the Claude tab in the selected mode. Returns `false` when there is no summary or the mode is
-    /// Classic: the menu is then built from the stock CodexBar cards.
+    /// Draws the Claude tab in the selected mode (and hands the Antigravity and Codex tabs to their pages).
+    /// Returns `false` when there is no summary: the menu is then built from the stock CodexBar cards.
     func addLemelsonUsagePanel(to menu: NSMenu, context: MenuCardContext, captureMenu: NSMenu) -> Bool {
         let session = LemelsonPanelSession.shared
         session.stockExtrasVisible = true
@@ -376,7 +460,7 @@ extension StatusItemController {
         let providerPage = LemelsonProviderPageState.state(for: context.currentProvider)
         self.lemelsonKeepProviderRowsLeaving(except: providerPage?.provider)
         if providerPage != nil {
-            return self.addLemelsonProviderPage(to: menu, context: context)
+            return self.addLemelsonProviderPage(to: menu, context: context, captureMenu: captureMenu)
         }
         guard context.currentProvider == .claude,
               self.menuCardRenderingEnabledForController,
@@ -385,11 +469,12 @@ extension StatusItemController {
         session.renderedStateDate = UsagePanelStore.modificationDate()
 
         let width = context.menuWidth
-        // Every mode, Classic too, ends with the prompt cache row above the action rows.
+        // Every mode ends with the prompt cache row above the action rows.
         session.pendingLineRows = [Self.lemelsonClaudeCacheRow(state, width: width)].compactMap(\.self)
         self.lemelsonExchangeWarmRows(width: width)
         let switcher = NSMenuItem()
         switcher.view = LemelsonModeSwitcherView(
+            tab: .claude,
             selected: session.mode,
             pinnedMode: session.pinnedMode,
             width: width,
@@ -405,8 +490,6 @@ extension StatusItemController {
 
         let now = Date()
         switch session.mode {
-        case .classic:
-            return false
         case .limits:
             self.addLemelsonLimits(state, to: menu, width: width, now: now)
         case .spend:
@@ -587,7 +670,7 @@ extension StatusItemController {
     }
 
     /// Hook at the end of `addPrimaryMenuContent`: the line rows of the page just built go under everything
-    /// the page shows (the stock rows Spend and Classic keep included), right above the action rows. Returns
+    /// the page shows (the stock rows Spend keeps included), right above the action rows. Returns
     /// whether "Buy Credits…" goes right under them (the caller makes it with the stock item).
     func addLemelsonPendingRows(to menu: NSMenu, width: CGFloat) -> Bool {
         let session = LemelsonPanelSession.shared
@@ -733,7 +816,6 @@ extension StatusItemController {
             case .limits: self.addLemelsonLimits(state, to: scratch, width: width, now: now)
             case .spend: self.addLemelsonSpend(state, to: scratch, width: width, now: now)
             case .value: self.addLemelsonValue(state, to: scratch, width: width, now: now)
-            case .classic: break
             }
             self.addLemelsonLineRows(
                 [Self.lemelsonClaudeCacheRow(state, width: width)].compactMap(\.self), to: scratch, width: width)
@@ -754,40 +836,49 @@ extension StatusItemController {
 
     // MARK: - Modes
 
-    func handleLemelsonModeSelection(_ mode: LemelsonPanelMode, menu: NSMenu?) {
-        self.lemelsonSelectMode(mode, menu: menu)
+    func handleLemelsonModeSelection(_ mode: LemelsonPanelMode, tab: LemelsonModeTab = .claude, menu: NSMenu?) {
+        self.lemelsonSelectMode(mode, tab: tab, menu: menu)
     }
 
     func lemelsonModeRowItem(in menu: NSMenu) -> NSMenuItem? {
         menu.items.first { $0.view is LemelsonModeSwitcherView }
     }
 
-    /// Pins the mode shown, or unpins it when it is the pinned one.
-    private func handleLemelsonModePin(menu: NSMenu?) {
-        let session = LemelsonPanelSession.shared
-        session.pinnedMode = session.pinnedMode == session.mode ? nil : session.mode
-        self.lemelsonRebuildAfterModeChange(menu: menu)
+    /// The tab whose mode row the menu shows now, if any.
+    func lemelsonModeTab(in menu: NSMenu) -> LemelsonModeTab? {
+        (self.lemelsonModeRowItem(in: menu)?.view as? LemelsonModeSwitcherView)?.tab
     }
 
-    func lemelsonRebuildAfterModeChange(menu: NSMenu?) {
+    /// Pins the mode shown, or unpins it when it is the pinned one.
+    func handleLemelsonModePin(tab: LemelsonModeTab = .claude, menu: NSMenu?) {
+        LemelsonModeStore.store(for: tab).togglePin()
+        self.lemelsonRebuildAfterModeChange(menu: menu, tab: tab)
+    }
+
+    func lemelsonRebuildAfterModeChange(menu: NSMenu?, tab: LemelsonModeTab = .claude) {
         self.advanceMenuInteraction(for: menu)
-        // Only the Claude tab depends on the mode, so the rendered rows of the other tabs are kept.
+        // Only the tab whose mode changed depends on it, so the rendered rows of the other tabs are kept.
         // Dropping them made the sibling warm-up render every tab again after each mode switch:
         // 0.2–0.3 s of main-thread work that delayed the end of the slide and the next key press.
         self.preservingMergedSwitcherContentCachesDuringInvalidation {
             self.invalidateMenus()
         }
+        self.lemelsonDropCachedContent(of: tab.provider)
+        if let menu {
+            self.deferSwitcherMenuRebuildIfStillVisible(menu, provider: tab.provider)
+        }
+    }
+
+    /// Drops the merged menu's cached rows of one tab (they were rendered in another mode or for another account).
+    func lemelsonDropCachedContent(of provider: UsageProvider) {
         for key in Array(self.mergedSwitcherContentCaches.keys) {
             let stale = self.mergedSwitcherContentCaches[key]?.keys.filter { selection in
-                if case let .provider(id) = selection { return id.firstPartyProvider == .claude }
+                if case let .provider(id) = selection { return id.firstPartyProvider == provider }
                 return false
             } ?? []
             for selection in stale {
                 self.mergedSwitcherContentCaches[key]?.removeValue(forKey: selection)
             }
-        }
-        if let menu {
-            self.deferSwitcherMenuRebuildIfStillVisible(menu, provider: .claude)
         }
     }
 
@@ -806,10 +897,19 @@ extension StatusItemController {
         guard FileManager.default.fileExists(atPath: UsagePanelStore.defaultURL.path) else { return }
         let session = LemelsonPanelSession.shared
         // A self-test opens on its own start page, wherever the menu was left.
-        var changed = self.lemelsonRunSelfTestIfRequested(menu: menu)
-        if !changed, self.openMenus.isEmpty, session.mode != session.startMode {
-            session.mode = session.startMode
-            changed = true
+        let selfTest = self.lemelsonRunSelfTestIfRequested(menu: menu)
+        var changed = selfTest
+        if !selfTest, self.openMenus.isEmpty {
+            if session.mode != session.startMode {
+                session.mode = session.startMode
+                changed = true
+            }
+            // The Codex tab returns to its own start mode the same way.
+            let codex = LemelsonModeStore.codex
+            if codex.mode != codex.startMode {
+                codex.mode = codex.startMode
+                changed = true
+            }
         }
         let stateDate = UsagePanelStore.modificationDate()
         if stateDate != session.renderedStateDate {
@@ -901,8 +1001,11 @@ extension StatusItemController {
         { [weak self] note in
             let token = note.userInfo?["token"] as? String
             let collectorStarted = (note.userInfo?["collectorStarted"] as? Bool) ?? true
+            let provider = note.userInfo?["provider"] as? String
+            let uuid = note.userInfo?["uuid"] as? String
             Task { @MainActor [weak self] in
-                self?.lemelsonHandleAccountDidSwitch(token: token, collectorStarted: collectorStarted)
+                self?.lemelsonHandleAccountDidSwitch(
+                    token: token, collectorStarted: collectorStarted, provider: provider, uuid: uuid)
             }
         }
         let finishObs = dnc.addObserver(
@@ -911,11 +1014,23 @@ extension StatusItemController {
             queue: .main)
         { [weak self] note in
             let token = note.userInfo?["token"] as? String
+            let provider = note.userInfo?["provider"] as? String
             Task { @MainActor [weak self] in
-                self?.lemelsonHandleUsageRefreshDidFinish(token: token)
+                self?.lemelsonHandleUsageRefreshDidFinish(token: token, provider: provider)
+            }
+        }
+        // A switch made in CodexBar's own "System Account" menu (`CodexAccountPromotionService`).
+        let promoteObs = NotificationCenter.default.addObserver(
+            forName: .lemelsonCodexSystemAccountDidChange,
+            object: nil,
+            queue: .main)
+        { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.lemelsonCodexSystemAccountDidSwitch(source: "CodexBar System Account")
             }
         }
         session.switchObservers = [startObs, finishObs]
+        session.localSwitchObservers = [promoteObs]
         self.lemelsonStartStateWatcher()
         // The menu bar shows the 24-hour figure from launch, not from the first collector tick.
         self.lemelsonMenuBarSpendDidChange()
@@ -928,6 +1043,10 @@ extension StatusItemController {
             dnc.removeObserver(obs)
         }
         session.switchObservers.removeAll()
+        for obs in session.localSwitchObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        session.localSwitchObservers.removeAll()
         session.stateWatcher?.cancel()
         session.stateWatcher = nil
     }
@@ -972,8 +1091,20 @@ extension StatusItemController {
         self.lemelsonRefreshStore()
     }
 
-    private func lemelsonHandleAccountDidSwitch(token: String?, collectorStarted: Bool) {
+    private func lemelsonHandleAccountDidSwitch(
+        token: String?,
+        collectorStarted: Bool,
+        provider: String? = nil,
+        uuid: String? = nil)
+    {
         let session = LemelsonPanelSession.shared
+        if provider == "codex" {
+            // The Codex page follows at once: CodexBar reads auth.json again, the new account is marked active
+            // until the collector's next summary, and its read-only Codex read starts. The rebuild comes below.
+            let id = uuid?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            self.lemelsonCodexSystemAccountDidSwitch(
+                to: id?.isEmpty == false ? id : nil, source: "Claude Switcher", rebuild: false)
+        }
         session.activeSwitchToken = token
         session.renderedStateDate = nil
         session.warmRows.removeAll()
@@ -992,10 +1123,16 @@ extension StatusItemController {
         self.lemelsonRefreshStore()
     }
 
-    private func lemelsonHandleUsageRefreshDidFinish(token: String?) {
+    private func lemelsonHandleUsageRefreshDidFinish(token: String?, provider: String? = nil) {
         let session = LemelsonPanelSession.shared
         if let active = session.activeSwitchToken, let token, active != token {
             return
+        }
+        if provider == "codex" {
+            // The collector's pass after a Codex switch: the next build reads auth.json and the summary anew.
+            self.settings.invalidateCodexAccountReconciliationSnapshotCache()
+            LemelsonProviderPageState.codex.warmRows.removeAll()
+            self.lemelsonDropCachedContent(of: .codex)
         }
         session.activeSwitchToken = nil
         session.isRefreshing = false

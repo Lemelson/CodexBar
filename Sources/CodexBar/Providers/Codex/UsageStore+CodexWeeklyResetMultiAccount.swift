@@ -9,6 +9,8 @@ extension UsageStore {
         let limitResetOwnerKey: CodexLimitResetOwnerKey?
         let pendingWeeklyResetCandidate: CodexWeeklyResetPublicationCandidate?
         let withheldSuccess: ProviderFetchResult?
+        /// lemelson: read with OAuth only (no CLI, no token refresh); a failure keeps the prior reading.
+        var readOnly = false
     }
 
     struct CodexAccountFetchRequest {
@@ -22,6 +24,8 @@ extension UsageStore {
         let descriptor: ProviderDescriptor
         let context: ProviderFetchContext
         let resetCreditsFetcher: CodexResetCreditsFetcher
+        /// lemelson: see `CodexAccountFetchResult.readOnly`.
+        var readOnly = false
     }
 
     static func codexSnapshotsRetainingCandidate(

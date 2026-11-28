@@ -54,9 +54,9 @@ extension StatusItemController {
             enabledProviders: enabledProviders,
             includesOverview: includesOverview)
         guard let currentIndex = selections.firstIndex(of: current) else { return }
-        // lemelson: the Claude modes are pages of the same line; they move first.
-        if case let .provider(currentID) = current, currentID.firstPartyProvider == .claude,
-           self.lemelsonStepClaudeMode(direction, menu: menu)
+        // lemelson: the Claude and Codex modes are pages of the same line; they move first.
+        if case .provider = current, Self.lemelsonModeTab(of: current) != nil,
+           self.lemelsonStepMode(direction, menu: menu)
         {
             return
         }
@@ -66,7 +66,7 @@ extension StatusItemController {
         let nextIndex = currentIndex + delta
         guard selections.indices.contains(nextIndex) else { return }
         let selection = selections[nextIndex]
-        // lemelson: slide the page and choose the Claude mode to land on.
+        // lemelson: slide the page and choose the Claude or Codex mode to land on.
         self.lemelsonWillSwitchProvider(to: selection, direction: direction, menu: menu)
         let menuProvider: UsageProvider? = switch selection {
         case .overview:

@@ -6,7 +6,8 @@ import SwiftUI
 //
 //   swift run LemelsonPanelPreview out.png [--state state.json] [--dark] [--warm] [--now 1795401983]
 //       [--only limits|spend|value|details|cache|antigravity|antigravity-details|antigravity-cache
-//               |codex|codex-details|codex-cache|pages|overview|overview-details|overview-cache|day-detail]
+//               |codex|codex-limits|codex-spend|codex-value|codex-details|codex-cache|pages|overview
+//               |overview-details|overview-cache|day-detail]
 //       (limits, spend, value and details also as a comma list: --only limits,spend,value)
 //       [--account 1] [--highlighted] [--hover-week 0] [--hover-day 2026-11-21] [--fixture full]
 //       [--antigravity block.json] [--codex block.json] [--claude-cache real|full|plain|none]
@@ -52,16 +53,19 @@ import SwiftUI
 // `UsageCodexFacts`; --no-extras leaves them out. The real summary gets none: the app takes them from
 // CodexBar's live Codex snapshot, which the preview cannot read.
 //
-// --only pages draws Claude Limits, the Antigravity page and the Codex page side by side.
+// --only codex-limits, codex-spend, codex-value draw the Codex tab in that mode (`UsageCodexPage`: every
+// account of the block's `accounts`, the same tints as Claude Limits); --only codex is codex-limits.
+// --only pages draws Claude Limits, the Antigravity page and Codex Limits side by side.
 //
 // Overview (from the summary as is: all Claude accounts, its `codex` and `antigravity` blocks):
 // --only overview draws the page with its footer, the prompt cache row of all subscriptions and stand-ins for
 // the menu's own rows; overview-details the three provider panels and the page's day panel side by side;
 // overview-cache the cache row and its panel. --overview-breakdown picks the Providers / Models split
 // (default providers).
-// --only day-detail draws the day panels of Overview, Claude Spend, Codex and Antigravity (the summary's blocks,
-// else the fixture "full") for --hover-day (default today), plus Overview's panel for a day without calls and
-// for a dragged span (--drag-range, default the last 7 days).
+// --only day-detail draws the day panels of Overview, Claude Spend, Codex Spend (the Codex tab's own catalog,
+// split by account, `UsageCodexPage.spendDayCatalog`) and Antigravity (the summary's blocks, else the fixture
+// "full") for --hover-day (default today), plus Overview's panel for a day without calls and for a dragged
+// span (--drag-range, default the last 7 days).
 // --custom-range zooms every spend section into that span, as a drag across a chart does (spend, overview,
 // codex, antigravity show the zoomed state). --drag-range draws the charts and day panels as if that span were
 // being dragged across (the live selection band).
@@ -71,7 +75,7 @@ struct ModeChips: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(["Limits", "Spend", "Value", "Classic"], id: \.self) { title in
+            ForEach(["Limits", "Spend", "Value"], id: \.self) { title in
                 Text(title)
                     .font(.system(size: 11))
                     .foregroundStyle(title == self.selected ? .white : .secondary)
@@ -196,10 +200,8 @@ struct PreviewRoot: View {
             if self.only == "pages" || self.only == "antigravity" {
                 self.card(width: self.menuWidth) { self.providerPage(.antigravity, self.antigravity) }
             }
-            if self.only == "pages" || self.only == "codex" {
-                self.card(width: self.menuWidth) {
-                    self.providerPage(.codex, self.codex, extras: self.codexExtras)
-                }
+            if let mode = self.codexMode {
+                self.card(width: self.menuWidth) { self.codexPage(self.codex, mode: mode) }
             }
             if self.only == "antigravity-details" {
                 self.providerDetails(.antigravity, self.antigravity)
@@ -252,6 +254,50 @@ struct PreviewRoot: View {
             return name == "limits"
         }
         return only.split(separator: ",").contains { $0 == name }
+    }
+
+    /// The Codex mode `--only` asks for ("codex" and "pages": Limits).
+    private var codexMode: UsageCodexMode? {
+        switch self.only {
+        case "codex", "pages", "codex-limits": .limits
+        case "codex-spend": .spend
+        case "codex-value": .value
+        default: nil
+        }
+    }
+
+    /// The Codex tab in one mode as the menu stacks it: the mode row, the page's rows (separators where a row
+    /// asks for one; the footer's gives way to the line rows), the cache row, then the menu's own rows.
+    @ViewBuilder private func codexPage(_ state: UsagePanelState?, mode: UsageCodexMode) -> some View {
+        if let state,
+           let page = UsageCodexPage(
+               state: state, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth, mode: mode,
+               clock: { [now = self.now] in now })
+        {
+            ModeChips(selected: mode.rawValue.capitalized)
+            Divider()
+            Color.clear.frame(height: 4)
+            ForEach(Array(page.rows.enumerated()), id: \.element.id) { index, row in
+                let lit = self.highlighted && row.detail != nil
+                row.view
+                    .environment(\.usageRowHighlighted, lit)
+                    .modifier(PreviewChevron(shown: row.detail != nil && !row.inCard, lit: lit))
+                    .background(lit && !row.inCard ? Color(nsColor: .selectedContentBackgroundColor) : .clear)
+                if row.separatorAfter, index < page.rows.count - 1 || page.lineRows.isEmpty {
+                    MenuSeparator()
+                }
+            }
+            if !page.lineRows.isEmpty {
+                ForEach(page.lineRows) { row in
+                    row.view.frame(height: UsageCacheRowView.rowHeight)
+                }
+                MenuSeparator()
+            }
+            MockMenuItem(title: "Buy Credits…", width: self.menuWidth)
+            MockMenuItem(title: "Usage Dashboard", width: self.menuWidth)
+            MockMenuItem(title: "Status Page", width: self.menuWidth)
+                .padding(.bottom, 5)
+        }
     }
 
     /// The cache row as the bottom of the menu, and its detail panel next to it.
@@ -409,14 +455,24 @@ struct PreviewRoot: View {
             catalog: UsageSpendDigest(state: state, now: self.now).dayDetailCatalog(now: self.now),
             width: self.panelWidth,
             previewDayKey: day))
-        ForEach([UsageProviderSpec.codex, .antigravity], id: \.name) { spec in
-            if let block = self.providerState(spec, fallback: state).flatMap(spec.block(in:)), block.error == nil {
-                self.dayCard("\(spec.name) · \(day)", UsageDayDetailPanelView(
-                    catalog: UsageProviderSpend(block: block, spec: spec, now: self.now)
-                        .dayDetailCatalog(spec: spec, now: self.now),
-                    width: self.panelWidth,
-                    previewDayKey: day))
-            }
+        // Codex: the catalog of the Codex tab's Spend mode (every account's share of the day, the calls no
+        // account owns), exactly what the menu's day panel shows.
+        if let codex = self.providerState(.codex, fallback: state),
+           let catalog = UsageCodexPage(
+               state: codex, now: self.now, width: self.menuWidth, detailWidth: self.panelWidth, mode: .spend,
+               clock: { [now = self.now] in now })?.spendDayCatalog
+        {
+            self.dayCard("Codex Spend · \(day)", UsageDayDetailPanelView(
+                catalog: catalog, width: self.panelWidth, previewDayKey: day))
+        }
+        if let block = self.providerState(.antigravity, fallback: state).flatMap(UsageProviderSpec.antigravity.block(in:)),
+           block.error == nil
+        {
+            self.dayCard("Antigravity · \(day)", UsageDayDetailPanelView(
+                catalog: UsageProviderSpend(block: block, spec: .antigravity, now: self.now)
+                    .dayDetailCatalog(spec: .antigravity, now: self.now),
+                width: self.panelWidth,
+                previewDayKey: day))
         }
     }
 

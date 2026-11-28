@@ -1,17 +1,42 @@
 import SwiftUI
 
-// Claude Limits: one shared limit card (`UsageLimitCard.swift`) per Claude account. This file holds only what
-// is Claude's own: the order of the cards, each account's tint and badge, and the notes under its name.
+// Claude Limits and Codex Limits: one shared limit card (`UsageLimitCard.swift`) per account. This file holds
+// what the two tabs share about an account (its tint and badge, by name) and what is Claude's own: the order
+// of the cards and the notes under its name.
 
-private enum UsageClaudeLimitAccount: String, CaseIterable {
+/// The people whose accounts appear on both tabs, by the short name Claude Switcher gives them
+/// (`account-names.json`): the same tint and badge on Claude and on Codex, whichever account is active.
+public enum UsageAccountTint: String, CaseIterable, Sendable {
     case lemelson
     case magomed
     case misha
 
-    init?(account: UsagePanelState.Account) {
+    public init?(account: UsagePanelState.Account) {
         self.init(rawValue: account.displayName.lowercased())
     }
 
+    /// Hex colors for light and dark appearance.
+    public var hex: (light: UInt32, dark: UInt32) {
+        switch self {
+        case .lemelson: (0x6946B6, 0xA98BFF)
+        case .misha: (0x2461B7, 0x62A8FF)
+        case .magomed: (0x526C25, 0xADC46D)
+        }
+    }
+
+    public var initials: String {
+        switch self {
+        case .lemelson: "L"
+        case .misha: "M"
+        case .magomed: "Mg"
+        }
+    }
+
+    public var color: Color {
+        UsagePalette.dynamic(light: self.hex.light, dark: self.hex.dark)
+    }
+
+    /// Claude Limits' card order: the active account first, then these, then everyone else.
     static func position(of account: UsagePanelState.Account) -> Int {
         guard let known = Self(account: account) else { return self.allCases.count }
         return self.allCases.firstIndex(of: known) ?? self.allCases.count
@@ -25,7 +50,7 @@ extension UsagePanelState {
             if lhs.isActive != rhs.isActive {
                 return lhs.isActive
             }
-            return UsageClaudeLimitAccount.position(of: lhs) < UsageClaudeLimitAccount.position(of: rhs)
+            return UsageAccountTint.position(of: lhs) < UsageAccountTint.position(of: rhs)
         }
     }
 }
@@ -33,19 +58,28 @@ extension UsagePanelState {
 extension UsageLimitCardStyle {
     /// The same account tint follows the account when the active one changes.
     public init(account: UsagePanelState.Account, in state: UsagePanelState) {
-        switch UsageClaudeLimitAccount(account: account) {
-        case .lemelson:
-            self.init(tint: UsagePalette.dynamic(light: 0x6946B6, dark: 0xA98BFF), initials: "L", active: account.isActive)
-        case .misha:
-            self.init(tint: UsagePalette.dynamic(light: 0x2461B7, dark: 0x62A8FF), initials: "M", active: account.isActive)
-        case .magomed:
-            self.init(tint: UsagePalette.dynamic(light: 0x526C25, dark: 0xADC46D), initials: "Mg", active: account.isActive)
-        case nil:
+        self.init(account: account, fallbackIndex: state.colorIndex(of: account))
+    }
+
+    /// A known person's tint and badge (`UsageAccountTint`); anyone else gets the chart color of their
+    /// position (`fallbackIndex`) and the first two letters of their name. Shared by Claude and Codex Limits.
+    public init(account: UsagePanelState.Account, fallbackIndex: Int) {
+        if let known = UsageAccountTint(account: account) {
+            self.init(tint: known.color, initials: known.initials, active: account.isActive)
+        } else {
             self.init(
-                tint: UsagePalette.account(state.colorIndex(of: account)),
+                tint: UsagePalette.account(fallbackIndex),
                 initials: String(account.displayName.prefix(2)).capitalized,
                 active: account.isActive)
         }
+    }
+}
+
+extension UsageSeriesColor {
+    /// The color of an account on a chart that sits next to its limit card: the card's tint for a known
+    /// person, else the chart color of its position.
+    public static func accountTint(_ account: UsagePanelState.Account, fallbackIndex: Int) -> UsageSeriesColor {
+        UsageAccountTint(account: account).map { .tint($0) } ?? .account(fallbackIndex)
     }
 }
 

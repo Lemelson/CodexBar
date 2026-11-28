@@ -87,6 +87,8 @@ final class CodexAccountPromotionService {
     func promoteManagedAccount(id: UUID) async throws -> CodexAccountPromotionResult {
         var result = try await self.transaction.promoteManagedAccount(id: id)
         self.activeSourceWriter.writeCodexActiveSource(result.resultingActiveSource)
+        // lemelson: the fork's Codex page marks the new system account at once (its own refresh follows).
+        NotificationCenter.default.post(name: .lemelsonCodexSystemAccountDidChange, object: nil)
         if result.didMutateLiveAuth {
             let home = CodexHomeScope.ambientHomeURL(env: self.baseEnvironment, fileManager: self.fileManager)
             result.daemonRestartNote = await self.daemon.restartIfRunning(

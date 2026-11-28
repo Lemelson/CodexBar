@@ -84,6 +84,10 @@ extension StatusItemController {
     func codexAccountMenuDisplay(for provider: UsageProvider) -> CodexAccountMenuDisplay? {
         // Provider-specific by design: managed Codex profiles use reconciled visible-account projection state.
         guard provider == .codex else { return nil }
+        // lemelson: the fork's Codex page has every account on it; no stock switcher or stacked cards.
+        guard !(Self.lemelsonCodexPageShowsAllAccounts && self.menuCardRenderingEnabledForController) else {
+            return nil
+        }
         guard let projection = self.settings.codexVisibleAccountProjectionForMenuDisplay else { return nil }
         guard projection.visibleAccounts.count > 1 else { return nil }
         let showAll = self.settings.multiAccountMenuLayout == .stacked

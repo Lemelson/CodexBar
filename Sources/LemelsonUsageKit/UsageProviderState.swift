@@ -33,6 +33,113 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
     public var weekRate: RateNote?
     /// How far the collector is with measuring a week in 5-hour sessions (`calibration`); nil in older summaries.
     public var calibration: Calibration?
+    /// Codex only: one block of the same shape per Codex account on this Mac (`usage/CODEX-STATE.md`, section
+    /// "Accounts list"). Empty in older summaries and for Antigravity: the page then shows the block itself.
+    public var accounts: [UsageProviderBlock]
+    /// Codex only: spend of calls no listed account owns (logs older than 12.10.2026 name no account).
+    public var unattributed: Unattributed?
+    /// An entry of `accounts`: CodexBar's credits balance and limit reset credits of that account.
+    public var credits: Credits?
+    /// An entry of `accounts`: CodexBar keeps it in its managed accounts (not only the live system account).
+    public var managed: Bool?
+    /// An entry of `accounts`: CodexBar's preferred account, whose limits the block itself shows.
+    public var codexbarCurrent: Bool?
+    /// An entry of `accounts`: `updatedAt` of its CodexBar snapshot record (Unix seconds).
+    public var snapshotAt: Double?
+
+    /// `accounts[].credits`: what CodexBar's snapshot of the account said about credits.
+    public struct Credits: Decodable, Sendable, Equatable {
+        /// Credits balance; nil when CodexBar could not read it.
+        public var remaining: Double?
+        /// "balance not read" | "workspace balance" | nil.
+        public var note: String?
+        /// Expiry (Unix seconds) of each available limit reset credit, soonest first; nil for a credit without
+        /// an expiry date (the collector writes `null` for it and sorts it last).
+        public var resetCredits: [Double?]
+        /// When the balance was read (Unix seconds).
+        public var updatedAt: Double?
+        /// When the limit reset credits were read, if apart from the balance (CodexBar can read them without a
+        /// balance); nil: `updatedAt` stands for both.
+        public var resetCreditsAt: Double?
+
+        public init(
+            remaining: Double?,
+            note: String? = nil,
+            resetCredits: [Double?] = [],
+            updatedAt: Double? = nil,
+            resetCreditsAt: Double? = nil)
+        {
+            self.remaining = remaining
+            self.note = note
+            self.resetCredits = resetCredits
+            self.updatedAt = updatedAt
+            self.resetCreditsAt = resetCreditsAt
+        }
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.remaining = keys?.lenient(Double.self, .remaining)
+            self.note = keys?.lenient(String.self, .note)
+            self.resetCredits = (keys?.lenient([ResetCreditExpiry].self, .resetCredits) ?? []).compactMap(\.expiry)
+            self.updatedAt = keys?.lenient(Double.self, .updatedAt)
+            self.resetCreditsAt = keys?.lenient(Double.self, .resetCreditsAt)
+        }
+
+        /// The time the reset credits stand for: their own reading time, else the balance's.
+        public var resetCreditsReadAt: Double? {
+            self.resetCreditsAt ?? self.updatedAt
+        }
+
+        enum Key: String, CodingKey {
+            case remaining, note, resetCredits, updatedAt, resetCreditsAt
+        }
+
+        /// One element of `resetCredits`: a number (the expiry), `null` (no expiry), anything else dropped.
+        private struct ResetCreditExpiry: Decodable {
+            /// `.some(nil)`: a credit without an expiry date; nil: a malformed element.
+            let expiry: Double??
+
+            init(from decoder: Decoder) throws {
+                let value = try decoder.singleValueContainer()
+                if value.decodeNil() {
+                    self.expiry = .some(nil)
+                } else if let seconds = try? value.decode(Double.self), seconds.isFinite {
+                    self.expiry = .some(seconds)
+                } else {
+                    self.expiry = nil
+                }
+            }
+        }
+    }
+
+    /// `unattributed`: calls whose session log names no account (or one not on this Mac).
+    public struct Unattributed: Decodable, Sendable, Equatable {
+        public var usd7d: Double?
+        public var usd30d: Double?
+        public var usd180d: Double?
+        public var tokens180d: Double?
+        public var calls: Double?
+        /// The newest such call (Unix seconds).
+        public var lastAt: Double?
+        public var firstAt: Double?
+        public var error: String?
+
+        public init(from decoder: Decoder) throws {
+            let keys = try? decoder.container(keyedBy: Key.self)
+            self.usd7d = keys?.lenient(Double.self, .usd7d)
+            self.usd30d = keys?.lenient(Double.self, .usd30d)
+            self.usd180d = keys?.lenient(Double.self, .usd180d)
+            self.tokens180d = keys?.lenient(Double.self, .tokens180d)
+            self.calls = keys?.lenient(Double.self, .calls)
+            self.lastAt = keys?.lenient(Double.self, .lastAt)
+            self.firstAt = keys?.lenient(Double.self, .firstAt)
+            self.error = keys?.lenient(String.self, .error)
+        }
+
+        enum Key: String, CodingKey {
+            case usd7d, usd30d, usd180d, tokens180d, calls, lastAt, firstAt, error
+        }
+    }
 
     public struct ModelStats: Decodable, Sendable, Equatable {
         public var calls: Double?
@@ -236,6 +343,7 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
         case windows, rates, drift, lastMeasuredAt, weeks, daily, trackedSince, value
         case usdToday, tokensToday, usd24h, tokens24h, usd7d, tokens7d, usd30d, tokens30d
         case beta, error, models, cache, coverage, quotaSource, valueReason, calibration
+        case accounts, unattributed, credits, managed, codexbarCurrent, snapshotAt
     }
 
     private struct ValuePairs: Decodable {
@@ -298,10 +406,42 @@ public struct UsageProviderBlock: Decodable, Sendable, Equatable {
         self.weekSessions = weekSessions
         self.weekRate = keys?.lenient([String: Lenient<RateNote>].self, .rates)?["7d"]?.value
         self.calibration = keys?.lenient(Calibration.self, .calibration)
+        // Entry by entry: one odd account drops only itself, and an entry is an object with a `uuid` (the block
+        // decoder itself takes anything, filling in defaults).
+        let probes = keys?.lenient([Lenient<AccountProbe>].self, .accounts) ?? []
+        let entries = keys?.lenient([Lenient<UsageProviderBlock>].self, .accounts) ?? []
+        self.accounts = zip(probes, entries).compactMap { probe, entry in probe.value == nil ? nil : entry.value }
+        self.unattributed = keys?.lenient(Unattributed.self, .unattributed)
+        self.credits = keys?.lenient(Credits.self, .credits)
+        self.managed = keys?.lenient(Bool.self, .managed)
+        self.codexbarCurrent = keys?.lenient(Bool.self, .codexbarCurrent)
+        self.snapshotAt = keys?.lenient(Double.self, .snapshotAt)
     }
 }
 
 /// Decodes `T` if it can and stays `nil` otherwise, without failing the container around it.
+/// An entry of a block's `accounts`: an object with a non-empty `uuid`.
+struct AccountProbe: Decodable {
+    let uuid: String
+
+    init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: AnyKey.self)
+        let uuid = try keys.decode(String.self, forKey: AnyKey("uuid")).trimmingCharacters(in: .whitespaces)
+        guard !uuid.isEmpty else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "empty uuid"))
+        }
+        self.uuid = uuid
+    }
+
+    private struct AnyKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init(_ string: String) { self.stringValue = string }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue _: Int) { nil }
+    }
+}
+
 struct Lenient<T: Decodable>: Decodable {
     let value: T?
 
@@ -509,6 +649,8 @@ public struct UsageProviderSpend: Sendable, Equatable {
         let otherIsEmpty: Bool
         /// Set for a zoom: the span shown (`period` is then the smallest preset period covering it).
         var range: UsageSpendRange?
+        /// The same days split by account (Codex with several accounts); nil on a single-account page.
+        var accountChart: UsageDayChartData?
 
         /// The note under the rows with the first `count` members named and the rest counted:
         /// "Other: Astra $4,738, Sol 5.6 $1,942 and 4 more." Nil without an "Other" row.
@@ -567,10 +709,40 @@ public struct UsageProviderSpend: Sendable, Equatable {
     private let unpricedModels: Set<String>
     private let providerName: String
 
+    /// One account of a page with several (Codex): its name, chart color and its own days.
+    public struct AccountSeries: Sendable, Equatable {
+        public let id: String
+        public let name: String
+        public let color: UsageSeriesColor
+        public let daily: [UsagePanelState.Day]
+
+        public init(id: String, name: String, color: UsageSeriesColor, daily: [UsagePanelState.Day]) {
+            self.id = id
+            self.name = name
+            self.color = color
+            self.daily = daily
+        }
+    }
+
+    /// The chart series of the calls no account owns: the block's day minus its accounts' days.
+    public static let unattributedID = "unattributed"
+    static let unattributedName = "No account"
+
+    /// The accounts of the split by account, the unattributed remainder last when there is one; empty on a
+    /// single-account page.
+    let accountLegend: [UsageDayChartData.Legend]
+    /// By day key, by account id (`unattributedID` included).
+    private let accountDays: [String: [String: UsageModelUse]]
+
+    /// Whether the page splits its days by account too.
+    public var hasAccounts: Bool {
+        !self.accountLegend.isEmpty
+    }
+
     /// Named model rows; with more models than this plus one, the rest share an "Other" row.
     static let namedRows = 3
 
-    public init(block: UsageProviderBlock, spec: UsageProviderSpec, now: Date) {
+    public init(block: UsageProviderBlock, spec: UsageProviderSpec, now: Date, accounts: [AccountSeries] = []) {
         let days = (block.account.daily ?? []).sorted { $0.day < $1.day }
         func uses(_ day: UsagePanelState.Day) -> [String: UsageModelUse] {
             guard let models = day.m, !models.isEmpty else {
@@ -631,26 +803,96 @@ public struct UsageProviderSpend: Sendable, Equatable {
         self.hasOther = hasOther
         self.unpricedModels = unpriced
         self.providerName = spec.name
+        let (legend, accountDays) = Self.accountDays(accounts, perDay: perDay)
+        self.accountLegend = legend
+        self.accountDays = accountDays
 
         self.periods = UsageSpendPeriod.allCases.map { period in
             let domain = Self.domain(period: period, firstDay: firstDay, now: now)
             let from = UsageDayKey.string(domain.lowerBound)
             let periodFrom = UsageDayKey.start(days: period.days, now: now)
-            return Self.makePeriod(
+            let hint = Self.hint(period: period, firstDay: firstDay, now: now)
+            var made = Self.makePeriod(
                 period: period,
                 range: nil,
                 split: splits[period] ?? [:],
                 domain: domain,
                 includes: { $0 >= from },
                 unpricedIncludes: { $0 >= periodFrom },
-                hint: Self.hint(period: period, firstDay: firstDay, now: now),
+                hint: hint,
                 perDay: perDay,
                 order: order,
                 labels: labels,
                 hasOther: hasOther,
                 unpriced: unpriced,
                 name: spec.name)
+            made.accountChart = Self.accountChart(
+                legend: legend, days: accountDays, base: made.chart, includes: { $0 >= from })
+            return made
         }
+    }
+
+    /// Each account's use by day, and what the block's day has beyond its accounts (calls of logs that name
+    /// no account) as one more series, so the split by account adds up to the same totals as the split by model.
+    private static func accountDays(
+        _ accounts: [AccountSeries],
+        perDay: [DayUses]) -> ([UsageDayChartData.Legend], [String: [String: UsageModelUse]])
+    {
+        guard !accounts.isEmpty else { return ([], [:]) }
+        var days: [String: [String: UsageModelUse]] = [:]
+        for account in accounts {
+            for day in account.daily {
+                let use = UsageModelUse(usd: day.total, tokens: day.tokens ?? 0)
+                days[day.day, default: [:]][account.id, default: UsageModelUse()] =
+                    days[day.day, default: [:]][account.id, default: UsageModelUse()] + use
+            }
+        }
+        var hasRemainder = false
+        for day in perDay {
+            let whole = day.total
+            let owned = (days[day.key] ?? [:]).values.reduce(UsageModelUse(), +)
+            let rest = UsageModelUse(usd: max(0, whole.usd - owned.usd), tokens: max(0, whole.tokens - owned.tokens))
+            // Rounding of the collector's per-account sums is not a remainder.
+            guard rest.usd >= 0.01 || rest.tokens >= 1000 else { continue }
+            days[day.key, default: [:]][Self.unattributedID] = rest
+            hasRemainder = true
+        }
+        var legend = accounts.map { UsageDayChartData.Legend(id: $0.id, name: $0.name, color: $0.color) }
+        if hasRemainder {
+            legend.append(.init(id: Self.unattributedID, name: Self.unattributedName, color: .other))
+        }
+        return (legend, days)
+    }
+
+    /// The chart of one period or zoom split by account: the model chart's frame (domain, hint, empty text),
+    /// other bars. Nil on a single-account page.
+    private static func accountChart(
+        legend: [UsageDayChartData.Legend],
+        days: [String: [String: UsageModelUse]],
+        base: UsageDayChartData,
+        includes: (String) -> Bool) -> UsageDayChartData?
+    {
+        guard !legend.isEmpty else { return nil }
+        var bars: [UsageDayChartData.Bar] = []
+        for key in days.keys.sorted() where includes(key) {
+            guard let date = UsageDayKey.date(key), let uses = days[key] else { continue }
+            for series in legend {
+                if let use = uses[series.id], use.usd > 0 {
+                    bars.append(.init(key: key, date: date, series: series.name, color: series.color, usd: use.usd))
+                }
+            }
+        }
+        return UsageDayChartData(
+            period: base.period,
+            domain: base.domain,
+            bars: bars,
+            hint: base.hint,
+            legend: legend,
+            dayNotes: base.dayNotes,
+            emptyText: base.emptyText,
+            chipLimit: 3,
+            centsInChips: true,
+            customRange: base.customRange)
     }
 
     /// One period's (or one zoom's) chart, rows and Other note.
@@ -805,7 +1047,7 @@ public struct UsageProviderSpend: Sendable, Equatable {
 
     /// The layer of a zoom: the same chart and rows as a period, over the span's days only.
     public func period(range: UsageSpendRange) -> Period {
-        Self.makePeriod(
+        var made = Self.makePeriod(
             period: range.coveringPeriod,
             range: range,
             split: Self.sum(self.perDay) { range.contains($0) },
@@ -819,6 +1061,16 @@ public struct UsageProviderSpend: Sendable, Equatable {
             hasOther: self.hasOther,
             unpriced: self.unpricedModels,
             name: self.providerName)
+        made.accountChart = Self.accountChart(
+            legend: self.accountLegend, days: self.accountDays, base: made.chart, includes: { range.contains($0) })
+        return made
+    }
+
+    /// One account's use over a span of days (`unattributedID` for the calls no account owns).
+    func accountUse(_ id: String, includes: (String) -> Bool) -> UsageModelUse {
+        self.accountDays.reduce(UsageModelUse()) { sum, entry in
+            includes(entry.key) ? sum + (entry.value[id] ?? UsageModelUse()) : sum
+        }
     }
 
     /// The zoomed header's tiles: the span's total, daily average and busiest day.
@@ -836,7 +1088,7 @@ public struct UsageProviderSpend: Sendable, Equatable {
         return UsageDayDetailCatalog(
             chartID: chartID ?? spec.spendChartID,
             defaultDayKey: todayKey,
-            fixedSection1Rows: 0,
+            fixedSection1Rows: self.accountLegend.count,
             fixedSection2Rows: self.rowCount,
             section1NameWidth: 66,
             // `UsageProviderPeriodLayer.nameWidth`: provider model names are longer than Claude's.
@@ -874,8 +1126,8 @@ public struct UsageProviderSpend: Sendable, Equatable {
             isCustomRange: range != nil,
             periodDailyAverageUsd: context.average,
             rankInPeriod: context.rank,
-            section1Title: nil,
-            section1Rows: [],
+            section1Title: self.hasAccounts ? "By account" : nil,
+            section1Rows: self.accountRows { $0 == key },
             section2Title: "By model",
             section2Rows: self.rows(plan, uses: uses, unpriced: dayUnpriced),
             otherNote: self.otherNote(plan, uses: uses),
@@ -894,10 +1146,19 @@ public struct UsageProviderSpend: Sendable, Equatable {
             totalTokens: summary.total.tokens,
             dailyAverageUsd: summary.dailyAverage.usd,
             busiestDay: summary.busiestDay,
-            section1Title: nil,
-            section1Rows: [],
+            section1Title: self.hasAccounts ? "By account" : nil,
+            section1Rows: self.accountRows { range.contains($0) },
             section2Title: "By model",
             section2Rows: self.rows(plan, uses: split, unpriced: rangeUnpriced))
+    }
+
+    /// The day panel's account rows over the given days, in legend order (the same rows on every day).
+    private func accountRows(_ includes: (String) -> Bool) -> [UsageDayDetail.Row] {
+        self.accountLegend.map { series in
+            let use = self.accountUse(series.id, includes: includes)
+            return UsageDayDetail.Row(
+                id: series.id, label: series.name, color: series.color, usd: use.usd, tokens: use.tokens)
+        }
     }
 
     /// The named models, colors and "Other" of a ready period, as its rows show them.

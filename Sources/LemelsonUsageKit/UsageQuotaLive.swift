@@ -12,10 +12,11 @@ import Foundation
 // "plan" is the plan or tier name exactly as the app fetched it with that reading; the key is left out when
 // the fetch did not name one. "account" is the account the reading belongs to: the key CodexBar files that
 // account's history under (`preferredAccountKey` in `history/<provider>.json`; for Codex
-// `CodexHistoryOwnership.canonicalKey`), never an e-mail; left out while CodexBar has no key for it. A line
-// of another account than the last one is written at once, so the collector can keep the accounts apart.
+// `CodexHistoryOwnership.canonicalKey`), never an e-mail; left out while CodexBar has no key for it. The
+// Codex tab writes one line per visible account (CodexBar reads every one of them, read-only).
 //
-// A line goes in only when a value changed or ten minutes passed since the last line. Each line is
+// A line goes in only when a value changed or ten minutes passed since the last line of the same account
+// (the first reading of an account is written at once, so the collector can keep the accounts apart). Each line is
 // written under the shared lock file (open, lock, append in one write, close, unlock), so the collector's
 // compaction never loses it.
 
@@ -140,7 +141,7 @@ public struct UsageQuotaLiveReading: Equatable, Sendable {
 }
 
 /// Appends readings to one provider's live file following the contract's rules. One writer per file: it
-/// remembers the last line it wrote. An actor, so the file work (reading the tail, waiting for the shared
+/// remembers the last line it wrote of each account. An actor, so the file work (reading the tail, waiting for the shared
 /// lock the collector may hold while it compacts, the write) runs on its own serial executor, never on the
 /// main thread; calls to one writer run one at a time, and `decide` keeps the file in order and deduplicated.
 public actor UsageQuotaLiveWriter {
@@ -175,6 +176,9 @@ public actor UsageQuotaLiveWriter {
 
     /// The last line written (or found at the end of the file on first use).
     public private(set) var last: UsageQuotaLiveReading?
+    /// The last line of each account ("" for lines without one): a reading is compared with its own
+    /// account's last line, so readings of several accounts taken in turn do not each write a line.
+    public private(set) var lastByAccount: [String: UsageQuotaLiveReading] = [:]
     private var loadedLast = false
 
     public init(url: URL) {
@@ -197,13 +201,18 @@ public actor UsageQuotaLiveWriter {
     public func record(_ reading: UsageQuotaLiveReading) -> Outcome {
         if !self.loadedLast {
             self.loadedLast = true
-            self.last = Self.lastLine(of: self.url)
+            let tail = Self.lastLines(of: self.url)
+            self.last = tail.last
+            for line in tail {
+                self.lastByAccount[line.account ?? ""] = line
+            }
         }
-        let outcome = Self.decide(reading, after: self.last)
+        let outcome = Self.decide(reading, after: self.lastByAccount[reading.account ?? ""])
         guard outcome == .written else { return outcome }
         do {
             try Self.append(reading.jsonLine, to: self.url, lock: self.lockURL)
             self.last = reading
+            self.lastByAccount[reading.account ?? ""] = reading
             return .written
         } catch {
             return .failed(String(describing: error))
@@ -240,20 +249,24 @@ public actor UsageQuotaLiveWriter {
 
     /// The last complete line of the file, read from its tail.
     public nonisolated static func lastLine(of url: URL) -> UsageQuotaLiveReading? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        self.lastLines(of: url).last
+    }
+
+    /// The complete lines at the end of the file (its last 64 KB), oldest first: enough to hold the last
+    /// line of every account.
+    public nonisolated static func lastLines(of url: URL, tailBytes: UInt64 = 65536) -> [UsageQuotaLiveReading] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
         defer { try? handle.close() }
-        guard let size = try? handle.seekToEnd(), size > 0 else { return nil }
-        let start = size > 4096 ? size - 4096 : 0
+        guard let size = try? handle.seekToEnd(), size > 0 else { return [] }
+        let start = size > tailBytes ? size - tailBytes : 0
         try? handle.seek(toOffset: start)
-        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return nil }
-        // Only lines that end in "\n" are complete.
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        guard let data = try? handle.readToEnd() else { return [] }
+        // Only lines that end in "\n" are complete; a tail that starts mid-line drops its first piece.
+        var lines = data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false)
         lines.removeLast()
-        for line in lines.reversed() {
-            if let reading = UsageQuotaLiveReading(jsonLine: line) {
-                return reading
-            }
+        if start > 0, !lines.isEmpty { lines.removeFirst() }
+        return lines.compactMap { line in
+            String(data: Data(line), encoding: .utf8).flatMap { UsageQuotaLiveReading(jsonLine: $0) }
         }
-        return nil
     }
 }

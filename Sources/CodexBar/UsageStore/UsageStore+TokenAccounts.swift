@@ -219,9 +219,15 @@ extension UsageStore {
                     : self.codexResetBackfillSnapshots(
                         for: account,
                         priorSnapshot: priorSnapshot,
-                        activeVisibleAccountID: originalVisibleAccountID))
-            self.handleCodexCredentialOutcome(
-                outcome, account: account, snapshot: resolved.usage, projection: currentProjection)
+                        activeVisibleAccountID: originalVisibleAccountID),
+                keepsPriorOnFailure: result.readOnly)
+            // A read-only read that failed (an expired token it may not refresh) is no credential episode:
+            // the account's own owner refreshes it when it is used.
+            let readOnlyFailure: Bool = if case .failure = outcome.result { result.readOnly } else { false }
+            if !readOnlyFailure {
+                self.handleCodexCredentialOutcome(
+                    outcome, account: account, snapshot: resolved.usage, projection: currentProjection)
+            }
             if let snapshot = resolved.snapshot {
                 snapshots.append(CodexAccountUsageSnapshot(
                     account: snapshot.account,
@@ -770,12 +776,18 @@ extension UsageStore {
                 self.providerSpecs[.codex]?.descriptor
                     ?? ProviderDescriptorRegistry
                     .descriptor(for: .codex)
+            // lemelson: the fork's Codex page reads every account in the background; those reads never run
+            // the Codex CLI or refresh a token (the selected account keeps CodexBar's own sources).
+            let readOnly = Self.codexAccountReadIsReadOnly(
+                account, activeVisibleAccountID: activeVisibleAccountID,
+                pageShowsAllAccounts: StatusItemController.lemelsonCodexPageShowsAllAccounts)
             // Spend-controls monthly credit (Business/Enterprise individual cap) is gated on this flag.
             let context = self.makeFetchContext(
                 provider: .codex,
                 override: nil,
                 codexActiveSourceOverride: account.selectionSource,
-                includeCredits: true)
+                includeCredits: true,
+                sourceModeOverride: readOnly ? .oauth : nil)
             let limitResetOwnerKey = self.codexLimitResetOwnerKey(
                 forVisibleAccount: account,
                 visibleAccounts: allVisibleAccounts)
@@ -801,7 +813,8 @@ extension UsageStore {
                 pendingWeeklyResetCandidate: priorSnapshot?.weeklyResetCandidate,
                 descriptor: descriptor,
                 context: context,
-                resetCreditsFetcher: self.codexResetCreditsFetcher(workspaceAccountID: context.codexWorkspaceID))
+                resetCreditsFetcher: self.codexResetCreditsFetcher(workspaceAccountID: context.codexWorkspaceID),
+                readOnly: readOnly)
         }
 
         return await withTaskGroup(
@@ -811,7 +824,9 @@ extension UsageStore {
             for request in requests {
                 group.addTask {
                     let fetchOutcome: CodexWeeklyConfirmationFetch = {
-                        let baseOutcome = await request.descriptor.fetchOutcome(context: request.context)
+                        let baseOutcome = request.readOnly
+                            ? await CodexProviderDescriptor.readOnlyOAuthFetchOutcome(context: request.context)
+                            : await request.descriptor.fetchOutcome(context: request.context)
                         return await Self.attachingCodexResetCreditsIfNeeded(
                             to: baseOutcome,
                             env: request.context.env,
@@ -851,7 +866,8 @@ extension UsageStore {
                         outcome: admission?.outcome,
                         limitResetOwnerKey: request.limitResetOwnerKey,
                         pendingWeeklyResetCandidate: admission?.pendingCandidate,
-                        withheldSuccess: admission?.withheldSuccess)
+                        withheldSuccess: admission?.withheldSuccess,
+                        readOnly: request.readOnly)
                 }
             }
 
@@ -869,13 +885,14 @@ extension UsageStore {
         override: TokenAccountOverride?,
         codexActiveSourceOverride: CodexActiveSource? = nil,
         includeCredits: Bool = false,
-        claudeOwnerCLIRecoveryOnly: Bool = false) -> ProviderFetchContext
+        claudeOwnerCLIRecoveryOnly: Bool = false,
+        sourceModeOverride: ProviderSourceMode? = nil) -> ProviderFetchContext
     {
         let account = ProviderTokenAccountSelection.selectedAccount(
             provider: provider,
             settings: self.settings,
             override: override)
-        let sourceMode = ProviderRegistry.resolvedSourceMode(
+        let sourceMode = sourceModeOverride ?? ProviderRegistry.resolvedSourceMode(
             provider: provider,
             settings: self.settings,
             account: account)
@@ -1301,7 +1318,8 @@ extension UsageStore {
         _ outcome: ProviderFetchOutcome,
         account: CodexVisibleAccount,
         priorSnapshot: CodexAccountUsageSnapshot? = nil,
-        resetBackfillSnapshots: [UsageSnapshot] = []) -> ResolvedCodexAccountOutcome
+        resetBackfillSnapshots: [UsageSnapshot] = [],
+        keepsPriorOnFailure: Bool = false) -> ResolvedCodexAccountOutcome
     {
         switch outcome.result {
         case let .success(result):
@@ -1346,7 +1364,9 @@ extension UsageStore {
                 return ResolvedCodexAccountOutcome(snapshot: nil, usage: nil, sourceLabel: nil)
             }
             let errorMessage = self.tokenAccountSnapshotErrorMessage(error)
-            if Self.isPreservableNetworkTransportError(error)
+            // lemelson: a read-only background read keeps the last confirmed reading on any failure (an
+            // expired token included), with its own time, so its age shows instead of an empty card.
+            if keepsPriorOnFailure || Self.isPreservableNetworkTransportError(error)
                 || Self.shouldPreserveCodexAccountSnapshotOnFailure(errorMessage),
                 let priorSnapshot,
                 let priorUsage = priorSnapshot.snapshot
@@ -1369,6 +1389,17 @@ extension UsageStore {
                 sourceLabel: nil)
             return ResolvedCodexAccountOutcome(snapshot: snapshot, usage: nil, sourceLabel: nil)
         }
+    }
+
+    /// lemelson: a visible account's read is read-only (OAuth with its stored token, no CLI, no refresh) when
+    /// the fork's Codex page reads every account and it is not the account CodexBar follows: that one keeps
+    /// CodexBar's own sources, as without the page.
+    nonisolated static func codexAccountReadIsReadOnly(
+        _ account: CodexVisibleAccount,
+        activeVisibleAccountID: String?,
+        pageShowsAllAccounts: Bool) -> Bool
+    {
+        pageShowsAllAccounts && account.id != activeVisibleAccountID
     }
 
     static func shouldPreserveCodexAccountSnapshotOnFailure(_ message: String) -> Bool {

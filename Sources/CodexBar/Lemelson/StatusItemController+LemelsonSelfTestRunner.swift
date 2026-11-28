@@ -107,39 +107,41 @@ extension StatusItemController {
         let left: UInt16 = 123
         let right: UInt16 = 124
         log.notice("self-test start on \(page(), privacy: .public)")
-        // Written for the line Overview, Codex, Claude Limits, Spend, Value, Classic, Antigravity, opened on
-        // Claude Limits. The log names the page after each step, so another line still reads.
+        // Written for the line Overview, Codex Limits, Spend, Value, Claude Limits, Spend, Value, Antigravity,
+        // opened on Claude Limits. The log names the page after each step, so another line still reads.
         // On Antigravity (the last page) its two limit rows are pointed at: the detail panel appears
-        // fused to the menu and morphs from one row to the other and back. Codex's two limit rows are pointed
-        // at the same way on the way back.
+        // fused to the menu and morphs from one row to the other and back. Codex Limits' first two limit rows
+        // are pointed at the same way on the way back.
         let back = 1.3
         let steps: [(TimeInterval, () -> Void)] = [
             (0.7, { key(right, "right, to Spend") }),
             (1.3, { key(right, "right, to Value") }),
-            (1.9, { swipe(-6, 0.5, "content-left, to Classic") }),
-            (2.5, { key(right, "right, to Antigravity (last page)") }),
+            (1.9, { swipe(-6, 0.5, "content-left, to Antigravity (last page)") }),
             (3.1, { key(right, "right at the end, stays") }),
             (3.5, { swipe(0.4, -9, "vertical, no page") }),
             (3.8, { highlight(0) }),
             (4.4, { highlight(1) }),
             (5.0, { highlight(0) }),
             (5.5, { highlight(nil) }),
-            (4.7 + back, { key(left, "left, to Classic") }),
+            (4.7 + back, { key(left, "left, to Claude Value") }),
             // Two presses 50 ms apart: the second lands mid-slide.
-            (5.3 + back, { key(left, "left, to Value") }),
-            (5.35 + back, { key(left, "left mid-slide, to Spend") }),
-            (6.0 + back, { swipe(6, -0.5, "content-right, to Limits") }),
-            (6.6 + back, { key(left, "left, to Codex") }),
+            (5.3 + back, { key(left, "left, to Spend") }),
+            (5.35 + back, { key(left, "left mid-slide, to Limits") }),
+            (6.0 + back, { swipe(6, -0.5, "content-right, to Codex Value") }),
+            (6.6 + back, { key(left, "left, to Codex Spend") }),
+            (6.9 + back, { key(left, "left, to Codex Limits") }),
             (7.2 + back, { key(left, "left, to Overview (first page)") }),
             (7.8 + back, { key(left, "left at the start, stays") }),
-            (8.3 + back, { key(right, "right, to Codex") }),
+            (8.3 + back, { key(right, "right, to Codex Limits") }),
             // Back again 80 ms later: the strip turns around from where it is.
             (8.38 + back, { key(left, "left mid-slide, reversal, to Overview") }),
-            (8.8 + back, { key(right, "right, to Codex") }),
-            // The Codex page's two limit rows: the detail panel appears and morphs between them.
+            (8.8 + back, { key(right, "right, to Codex Limits") }),
+            // Codex Limits' first two limit rows: the detail panel appears and morphs between them.
             (9.4 + back, { highlight(0) }),
             (10.0 + back, { highlight(1) }),
             (10.5 + back, { highlight(nil) }),
+            (10.7 + back, { key(right, "right, to Codex Spend") }),
+            (10.8 + back, { key(right, "right mid-slide, to Codex Value") }),
             (10.9 + back, { key(right, "right into Claude Limits") }),
             (11.4 + back, { highlight(0) }),
             (11.8 + back, { highlight(2) }),
