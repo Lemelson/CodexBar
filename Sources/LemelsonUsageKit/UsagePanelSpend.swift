@@ -505,6 +505,46 @@ struct UsageDayChartData: Sendable, Equatable {
     func total(in range: UsageSpendRange) -> Double {
         self.bars.reduce(0) { range.contains($1.key) ? $0 + $1.usd : $0 }
     }
+
+    /// The y axis of the shown days: the busiest day's stacked total rounded up to a round top, so a zoom into
+    /// a $600 day tops out at $600, not at Swift Charts' automatic $1,000. Nil without spend.
+    var yAxis: UsageChartAxis? {
+        var totals: [String: Double] = [:]
+        for bar in self.bars {
+            totals[bar.key, default: 0] += bar.usd
+        }
+        return UsageChartAxis(max: totals.values.max() ?? 0)
+    }
+}
+
+/// A round axis from zero: 2–4 equal steps of 1, 2, 2.5, 4 or 5 × 10ⁿ, the lowest top that holds `max`
+/// (fewer steps on a tie). The tallest bar may reach the top line.
+struct UsageChartAxis: Sendable, Equatable {
+    let top: Double
+    let ticks: [Double]
+
+    init?(max value: Double) {
+        guard value.isFinite, value > 0 else { return nil }
+        let magnitude = pow(10, floor(log10(value)))
+        var best: (top: Double, steps: Int, step: Double)?
+        for scale in [magnitude / 10, magnitude] {
+            for multiple in [1, 2, 2.5, 4, 5] {
+                let step = scale * multiple
+                // Dollar labels round to whole dollars from $10: no "$2.5" steps between them.
+                if value >= 10, step < 1 || step.rounded() != step { continue }
+                let steps = Int(ceil(value / step - 1e-9))
+                guard (2...4).contains(steps) else { continue }
+                let top = Double(steps) * step
+                if let current = best, current.top < top || (current.top == top && current.steps <= steps) {
+                    continue
+                }
+                best = (top, steps, step)
+            }
+        }
+        guard let best else { return nil }
+        self.top = best.top
+        self.ticks = (0...best.steps).map { Double($0) * best.step }
+    }
 }
 
 /// Caption and per-day chart of one period. Three parts, so scrubbing never lays the chart out again:
@@ -635,9 +675,10 @@ struct UsageSpendBarsCanvas: View, Equatable {
                 .foregroundStyle(bar.color.color)
         }
         .chartXScale(domain: self.data.domain)
+        .chartYScale(domain: 0...(self.yAxis?.top ?? 1))
         .chartLegend(.hidden)
         .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
+            AxisMarks(position: .leading, values: self.yAxis?.ticks ?? [0]) { value in
                 AxisGridLine().foregroundStyle(Color.primary.opacity(0.08))
                 AxisValueLabel {
                     if let amount = value.as(Double.self) {
@@ -671,6 +712,10 @@ struct UsageSpendBarsCanvas: View, Equatable {
         }
         .frame(height: self.plotHeight)
         .padding(.trailing, 22)
+    }
+
+    private var yAxis: UsageChartAxis? {
+        self.data.yAxis
     }
 
     /// Explicit tick dates strictly inside the zoomed span (`startDate...endDate`) so the exclusive upper bound

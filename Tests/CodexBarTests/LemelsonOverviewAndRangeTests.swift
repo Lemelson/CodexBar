@@ -709,3 +709,38 @@ struct LemelsonOverviewSpendTests {
         #expect(pointer.activeChartPlotScreenRect() == nil)
     }
 }
+
+/// The per-day chart's y axis follows the shown days: a zoom whose busiest day is $600 tops out at $600.
+struct LemelsonDayChartAxisTests {
+    @Test
+    func `rounds the busiest day up to a close round top`() throws {
+        let cases: [(Double, Double, [Double])] = [
+            (600, 600, [0, 200, 400, 600]),
+            (364, 400, [0, 200, 400]),
+            (700, 750, [0, 250, 500, 750]),
+            (1001, 1200, [0, 400, 800, 1200]),
+            (95, 100, [0, 50, 100]),
+            (3.6, 4, [0, 2, 4]),
+        ]
+        for (max, top, ticks) in cases {
+            let axis = try #require(UsageChartAxis(max: max))
+            #expect(axis.top == top, "max \(max)")
+            #expect(axis.ticks == ticks, "max \(max)")
+        }
+        #expect(UsageChartAxis(max: 0) == nil)
+    }
+
+    @Test
+    func `stacks a day's bars before picking the top`() {
+        let date = LemelsonRangeFixtures.now
+        let bars = [
+            UsageDayChartData.Bar(key: "a", date: date, series: "Claude", color: .other, usd: 503),
+            UsageDayChartData.Bar(key: "a", date: date, series: "Antigravity", color: .other, usd: 97),
+            UsageDayChartData.Bar(key: "b", date: date, series: "Claude", color: .other, usd: 300),
+        ]
+        let data = UsageDayChartData(
+            period: .d30, domain: date...date, bars: bars, hint: "", legend: [], dayNotes: [:],
+            emptyText: "", chipLimit: nil, centsInChips: false)
+        #expect(data.yAxis?.top == 600)
+    }
+}
